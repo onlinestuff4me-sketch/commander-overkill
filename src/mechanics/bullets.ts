@@ -94,19 +94,24 @@
  *
  * Three tiers, from `docs/reference/part1/`:
  *
- *   TIER 0  frame_000  1-3 lonely orange needles, ~18:1 aspect, near vertical.
- *   TIER 1  frame_030  the same needles, one column per soldier, countable.
- *   TIER 2  frame_035  the firehose: cyan teardrop darts, blunt nose leading,
- *                      long tapered tail, enough columns that they read as one
- *                      stream.
+ *   TIER 0  frame_000  1-3 lonely orange dashes, ~5:1 aspect, near vertical.
+ *   TIER 1  frame_030  the same dashes, one column per soldier, countable.
+ *   TIER 2  frame_035  the firehose: cyan teardrop darts at ~2.5:1, blunt nose
+ *                      leading, enough columns that they read as one stream.
  *
- * THE CONE IS WIDE BECAUSE THE SQUAD IS WIDE, NOT BECAUSE THE SPREAD IS. This
- * is the one measurement that is easy to get wrong. Measured off frame_035 the
- * stream widens about 1.5 m over 12 m of depth — a ~4° half-angle. It *looks*
- * like a 25° fan on screen only because the camera views the corridor at a
- * grazing 22°, which stretches lateral motion and squashes forward motion.
- * Dial the angular spread up to match the screen and the darts spray sideways
- * out of the corridor. Density is the shooter count's job, never the spread's.
+ * ROUNDS ARE SHORT. Re-measured off the frames by isolating bullet pixels and
+ * scaling by the road width in the same screen row: a tracer is 0.28 m long and
+ * 0.055 m wide, a dart 0.47 x 0.18. An earlier pass recorded 1.9 m at 18:1,
+ * which is 6x too long, and rounds that long touch each other inside a stream
+ * and turn it into a continuous pale jet. If the streams ever start looking
+ * like steam plumes again, this is the first number to check.
+ *
+ * THE STREAM CONVERGES, IT DOES NOT FAN. Measured on frame_030: the muzzle line
+ * spans 2.21 m and the same fire in flight spans 0.72 m. An earlier note in
+ * this file read that as a ~4° divergence; it is a ~4° CONVERGENCE, and the
+ * sign is the whole difference between fire that points at a target and fire
+ * that sprays past it. See `#advance` for the model and why it matters for how
+ * aiming feels. Density is still the shooter count's job, never the spread's.
  *
  * Most of a stream's angular error is FIXED PER STREAM (`shotJitterFraction`
  * decides how much is re-rolled per shot). A stream that re-rolls its whole aim
@@ -240,15 +245,24 @@ export interface BulletTuning {
   dartLength: number;
   dartWidth: number;
 
-  /** Random half-angle in radians on a stream's aim. */
+  /** Random half-angle in radians on a stream's aim. This, not the blob width,
+   *  is what sets the width of the converged column at target depth. */
   tier01Spread: number;
   tier2Spread: number;
   /** How much of that spread is re-rolled per shot; the rest is fixed for the
    *  life of the stream. At 1 a stream is a cone of noise instead of a line. */
   shotJitterFraction: number;
-  /** Radians of outward aim at the edge of the blob — the cone proper. Kept
-   *  deliberately small; see the note about the camera above. */
-  tier2Diverge: number;
+
+  /**
+   * CONVERGENCE. Metres over which a round's lateral offset from the squad's
+   * firing axis decays by 1/e. Lower = the army's fire focuses into a column
+   * sooner. This is what makes aiming feel like aiming: see the long note above
+   * `#converge`.
+   */
+  convergeDistance: number;
+  /** Hard cap on how far inward a round may be aimed, radians. The outermost
+   *  soldier of a wide blob would otherwise fire visibly sideways. */
+  convergeMaxAngle: number;
   /** Vertical velocity jitter, m/s. Purely so streaks do not share a plane. */
   riseJitter: number;
 
@@ -300,25 +314,34 @@ function defaultTuning(): BulletTuning {
     speedJitter: 0.14,
     range: 22,
 
-    // Measured off the frames against known road width: a tier-1 tracer is a
-    // ~1.6 m needle roughly 18:1, a tier-2 dart is a ~0.45 m teardrop at 2.7:1.
-    // Both are nudged up ~20% because our units are chunkier than the
-    // reference's.
-    tracerLength: 1.9,
-    tracerWidth: 0.11,
-    dartLength: 0.62,
-    dartWidth: 0.23,
+    // RE-MEASURED off the frames, by isolating actual bullet pixels and scaling
+    // by the road width in the same screen row. The previous numbers here (1.9 m
+    // needle at 18:1) were off by 6x in length and came from measuring the
+    // reference's yellow ENEMY SOLDIERS rather than its tracers — which is what
+    // made our tier 0/1 streams read as continuous pale jets: consecutive rounds
+    // in one stream were long enough to touch. The real thing is a short dash.
+    //
+    //   frame_030 tracer   0.25-0.31 m long, 0.05-0.06 m wide, ~5.5:1
+    //   frame_035 dart     0.47 m long,      0.18 m wide,      ~2.5:1
+    tracerLength: 0.28,
+    tracerWidth: 0.055,
+    dartLength: 0.47,
+    dartWidth: 0.18,
 
     tier01Spread: 0.012,
     tier2Spread: 0.03,
     shotJitterFraction: 0.25,
-    tier2Diverge: 0.05,
+    // 6 m and 12°: measured to put 93% of a 50-troop army's fire inside a
+    // barrel's 2.1 m window while leaving the fire 4.5 m wide 2 m off the
+    // muzzles, so every soldier still visibly shoots its own stream.
+    convergeDistance: 6,
+    convergeMaxAngle: 0.209,
     riseJitter: 0.5,
 
     muzzleY: 1.0,
     muzzleRateCap: 220,
-    muzzleLength: 0.62,
-    muzzleWidth: 0.26,
+    muzzleLength: 0.5,
+    muzzleWidth: 0.22,
     muzzleLife: 0.09,
 
     impactSize: 0.95,
@@ -334,10 +357,38 @@ function defaultTuning(): BulletTuning {
   };
 }
 
-/** Over-bright additive tints. Values above 1 are intentional — that is what
- *  makes the core clamp to white while the halo keeps its hue. */
-const TINT_WARM = { r: 1.85, g: 1.05, b: 0.4 };
-const TINT_CYAN = { r: 0.3, g: 1.25, b: 1.7 };
+/**
+ * Per-instance tints for the ROUNDS. Held at 1 on purpose.
+ *
+ * These used to be over-bright (1.85, 1.05, 0.40) on the theory that additive
+ * blending clamps the core to white and leaves the hue in the halo. That is
+ * true over black and false over our road — see the blending note above the
+ * textures. Under alpha compositing a multiplier above 1 clamps to white and
+ * destroys the hue, and a multiplier below 1 walks the round toward BLACK
+ * rather than toward invisible. The colour now lives in the texture, where it
+ * can vary from a hot core to a saturated body, and intensity lives in alpha.
+ *
+ * They stay as tints rather than being folded away because they are the hook a
+ * powerup or a damage flash would grab.
+ */
+const TINT_WARM = { r: 1, g: 1, b: 1 };
+const TINT_CYAN = { r: 1, g: 1, b: 1 };
+/**
+ * Impact bursts are still ADDITIVE — a hit flash is a light source, it should
+ * blow out, and it lasts 0.18 s so it never has to hold a hue. Kept just under
+ * the clamp so the fringe still reads warm/cool instead of grey.
+ */
+const BURST_WARM = { r: 1.0, g: 0.72, b: 0.3 };
+const BURST_CYAN = { r: 0.3, g: 0.95, b: 1.0 };
+/**
+ * Muzzle flames. These DO carry their colour in the tint, because the flame
+ * texture is deliberately neutral white — the flame has to be warm at tier 0/1
+ * and cyan at tier 2 off one texture, and under compositing `tint × white` is
+ * exactly the tint. Both sit at 1.0 in their hot channel and low in the
+ * opposite one, which is where the saturation comes from.
+ */
+const FLAME_WARM = { r: 1.0, g: 0.72, b: 0.22 };
+const FLAME_CYAN = { r: 0.35, g: 0.92, b: 1.0 };
 
 // ---------------------------------------------------------------------------
 // Public views
@@ -437,16 +488,29 @@ function rollFor(vx: number, vy: number, vz: number): number {
 class SpriteBatch {
   readonly mesh: THREE.InstancedMesh;
   readonly #capacity: number;
+  /**
+   * Per-instance opacity. three gives instances a colour but not an alpha, and
+   * under alpha compositing INTENSITY IS ALPHA: scaling a sprite's RGB toward
+   * zero fades it to black over a bright road instead of fading it out. Same
+   * patch barrels.ts uses on its smoke, for the same reason.
+   *
+   * It is equally correct for the additive batch — additive blending in three
+   * is (SRC_ALPHA, ONE), so `dst + rgb·a` scales with alpha exactly as it would
+   * with RGB. One intensity channel drives both blend modes.
+   */
+  readonly #alpha: THREE.InstancedBufferAttribute;
+  /** Own geometry per batch: the alpha attribute lives ON the geometry, so a
+   *  shared one would have all four batches writing the same buffer. */
+  readonly #geometry: THREE.BufferGeometry;
   #n = 0;
 
-  constructor(
-    geometry: THREE.BufferGeometry,
-    material: THREE.Material,
-    capacity: number,
-    renderOrder: number,
-  ) {
+  constructor(material: THREE.Material, capacity: number, renderOrder: number) {
     this.#capacity = capacity;
-    this.mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    this.#geometry = new THREE.PlaneGeometry(1, 1);
+    this.#alpha = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+    this.#alpha.setUsage(THREE.DynamicDrawUsage);
+    this.#geometry.setAttribute("aSpriteAlpha", this.#alpha);
+    this.mesh = new THREE.InstancedMesh(this.#geometry, material, capacity);
     this.mesh.count = 0;
     // The instances move every frame and their union bounds is the whole
     // corridor, so per-object culling can only ever be wrong or wasted work.
@@ -473,6 +537,7 @@ class SpriteBatch {
     r: number,
     g: number,
     b: number,
+    alpha: number,
   ): void {
     if (this.#n >= this.#capacity) return;
     _pos.set(x, y, z);
@@ -481,6 +546,7 @@ class SpriteBatch {
     _mat.compose(_pos, _quat, _scale);
     this.mesh.setMatrixAt(this.#n, _mat);
     this.mesh.setColorAt(this.#n, _col.setRGB(r, g, b));
+    this.#alpha.setX(this.#n, alpha < 0 ? 0 : alpha > 1 ? 1 : alpha);
     this.#n++;
   }
 
@@ -488,8 +554,36 @@ class SpriteBatch {
     this.mesh.count = this.#n;
     this.mesh.visible = this.#n > 0;
     this.mesh.instanceMatrix.needsUpdate = true;
+    this.#alpha.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
   }
+
+  dispose(): void {
+    this.#geometry.dispose();
+    this.mesh.dispose();
+  }
+}
+
+/**
+ * Give an instanced material a per-instance alpha channel, patching the stock
+ * shader rather than writing a custom one so the material keeps three's own
+ * fog/tone-mapping/colour-space handling.
+ */
+function attachSpriteAlpha(mat: THREE.Material): void {
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader =
+      "attribute float aSpriteAlpha;\nvarying float vSpriteAlpha;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        "#include <begin_vertex>\nvSpriteAlpha = aSpriteAlpha;",
+      );
+    shader.fragmentShader =
+      "varying float vSpriteAlpha;\n" +
+      shader.fragmentShader.replace(
+        "#include <opaque_fragment>",
+        "#include <opaque_fragment>\ngl_FragColor.a *= vSpriteAlpha;",
+      );
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +670,9 @@ class Puffs {
       if (life <= 0) continue;
       const u = 1 - life / this.#maxLife[i]!;
       shape(u, out);
+      // Intensity rides alpha for both blend modes: additive is (SRC_ALPHA,
+      // ONE) so `dst + rgb·a` dims identically, and composited flames dissolve
+      // instead of turning into dark smudges on a light road.
       const k = out[2]! * brightness;
       const s = this.#size[i]!;
       batch.push(
@@ -585,9 +682,10 @@ class Puffs {
         this.#roll[i]!,
         baseWidth * s * out[0]!,
         baseLength * s * out[1]!,
-        this.#r[i]! * k,
-        this.#g[i]! * k,
-        this.#b[i]! * k,
+        this.#r[i]!,
+        this.#g[i]!,
+        this.#b[i]!,
+        k,
       );
     }
   }
@@ -633,6 +731,10 @@ class Bullets implements BulletSystem, BulletView {
   readonly #roll = new Float32Array(BULLET_POOL);
   readonly #size = new Float32Array(BULLET_POOL);
   readonly #style = new Uint8Array(BULLET_POOL);
+  /** The x this round steers toward — the squad's firing axis when it was
+   *  fired, captured per bullet so steering the squad does not bend rounds
+   *  that are already in the air. */
+  readonly #axisX = new Float32Array(BULLET_POOL);
   /** Where each slot sits inside `ids`, so a consume is an O(1) swap-remove. */
   readonly #slot = new Int32Array(BULLET_POOL);
   readonly #free = new Int32Array(BULLET_POOL);
@@ -650,12 +752,13 @@ class Bullets implements BulletSystem, BulletView {
 
   // --- rendering ---
   readonly #scene: THREE.Scene;
-  readonly #geometry = new THREE.PlaneGeometry(1, 1);
   readonly #needleTex: THREE.CanvasTexture;
   readonly #dartTex: THREE.CanvasTexture;
+  readonly #flameTex: THREE.CanvasTexture;
   readonly #burstTex: THREE.CanvasTexture;
   readonly #needleMat: THREE.MeshBasicMaterial;
   readonly #dartMat: THREE.MeshBasicMaterial;
+  readonly #flameMat: THREE.MeshBasicMaterial;
   readonly #burstMat: THREE.MeshBasicMaterial;
   readonly #tracerBatch: SpriteBatch;
   readonly #dartBatch: SpriteBatch;
@@ -725,18 +828,22 @@ class Bullets implements BulletSystem, BulletView {
 
     this.#needleTex = needleTexture();
     this.#dartTex = dartTexture();
+    this.#flameTex = flameTexture();
     this.#burstTex = burstTexture();
 
-    this.#needleMat = additiveMaterial(this.#needleTex);
-    this.#dartMat = additiveMaterial(this.#dartTex);
+    // Rounds composite; only the impact flash adds. See the blending note above
+    // the texture builders — this is the whole fix for colourless tracers.
+    this.#needleMat = compositeMaterial(this.#needleTex);
+    this.#dartMat = compositeMaterial(this.#dartTex);
+    this.#flameMat = compositeMaterial(this.#flameTex);
     this.#burstMat = additiveMaterial(this.#burstTex);
 
     // Muzzle flames share the needle texture with tracers — the reference's
     // muzzle flash is just a short fat version of the same flame lick.
-    this.#tracerBatch = new SpriteBatch(this.#geometry, this.#needleMat, TRACER_CAPACITY, 10);
-    this.#dartBatch = new SpriteBatch(this.#geometry, this.#dartMat, BULLET_POOL, 10);
-    this.#muzzleBatch = new SpriteBatch(this.#geometry, this.#needleMat, MUZZLE_POOL, 11);
-    this.#impactBatch = new SpriteBatch(this.#geometry, this.#burstMat, IMPACT_POOL, 12);
+    this.#tracerBatch = new SpriteBatch(this.#needleMat, TRACER_CAPACITY, 10);
+    this.#dartBatch = new SpriteBatch(this.#dartMat, BULLET_POOL, 10);
+    this.#muzzleBatch = new SpriteBatch(this.#flameMat, MUZZLE_POOL, 11);
+    this.#impactBatch = new SpriteBatch(this.#burstMat, IMPACT_POOL, 12);
 
     scene.add(this.#tracerBatch.mesh);
     scene.add(this.#dartBatch.mesh);
@@ -789,8 +896,10 @@ class Bullets implements BulletSystem, BulletView {
       // Triangular rather than uniform across the line: a blob is denser through
       // the middle, and a uniform pick reads as a curtain with hard edges.
       const u = Math.random() + Math.random() - 1;
-      const aim = u * (dart ? t.tier2Diverge : 0) + (Math.random() * 2 - 1) * spread;
-      this.#shootFrom(x + u * hw, y, z, aim, this.#tier, 0, 1);
+      const aim = (Math.random() * 2 - 1) * spread;
+      // Manual volleys converge on the point they were fired at, so a scripted
+      // beat focuses exactly like automatic fire does.
+      this.#shootFrom(x + u * hw, y, z, aim, this.#tier, 0, 1, x);
     }
   }
 
@@ -810,11 +919,11 @@ class Bullets implements BulletSystem, BulletView {
     // as cyan sparks.
     const warm = this.#style[id] === STYLE_TRACER;
     this.#release(id);
-    this.#burst(x, y, z, warm ? 0.85 : 0.6, warm ? TINT_WARM : TINT_CYAN);
+    this.#burst(x, y, z, warm ? 0.85 : 0.6, warm ? BURST_WARM : BURST_CYAN);
   }
 
   spawnImpact(x: number, y: number, z: number, scale = 1): void {
-    this.#burst(x, y, z, scale, this.#tier === 2 ? TINT_CYAN : TINT_WARM);
+    this.#burst(x, y, z, scale, this.#tier === 2 ? BURST_CYAN : BURST_WARM);
   }
 
   // ------------------------------------------------------------------ system
@@ -864,12 +973,13 @@ class Bullets implements BulletSystem, BulletView {
 
     const dart = tier === 2;
     const spread = dart ? t.tier2Spread : t.tier01Spread;
-    const diverge = dart ? t.tier2Diverge : 0;
     const rolled = spread * clamp01(t.shotJitterFraction);
     const fixed = spread - rolled;
-    // Divergence is proportional to how far off-centre the soldier stands, so
-    // the cone opens with the blob and not with the troop count.
-    const invHalf = 1 / Math.max(this.#muzzleHalfWidth, 0.05);
+    // No divergence term any more. A stream's aim is jitter only; where it
+    // actually points is decided by convergence toward the firing axis, which
+    // `#advance` applies over the whole flight. The jitter is what gives the
+    // converged column a finite waist instead of a focal point.
+    const axis = this.#muzzleX;
 
     let budget = MAX_SHOTS_PER_TICK;
     for (let s = 0; s < streams && budget > 0; s++) {
@@ -884,8 +994,7 @@ class Bullets implements BulletSystem, BulletView {
       const ox = this.#streamX[s]!;
       const oy = this.#streamY[s]!;
       const oz = this.#streamZ[s]!;
-      const off = clamp((ox - this.#muzzleX) * invHalf, -1, 1);
-      const aim = off * diverge + this.#streamAim[s]! * fixed;
+      const aim = this.#streamAim[s]! * fixed;
 
       for (let k = 0; k < shots; k++) {
         // Where inside this tick the clock actually crossed. Advancing the
@@ -902,6 +1011,7 @@ class Bullets implements BulletSystem, BulletView {
           tier,
           age < 0 ? 0 : age,
           this.#shotIndex % flashStride === 0 ? 1 : 0,
+          axis,
         );
       }
     }
@@ -962,7 +1072,11 @@ class Bullets implements BulletSystem, BulletView {
       const age = this.#maxLife[id]! - life;
 
       // Fade in hot out of the barrel, fade out before the range limit, so
-      // neither end of the trajectory pops.
+      // neither end of the trajectory pops. This drives ALPHA, not RGB: a round
+      // dimmed by RGB over a light road goes grey and then black, where one
+      // dimmed by alpha dissolves into the road the way it should. The hot
+      // boost therefore reads as denser rather than whiter — the heat itself is
+      // painted into the nose of the texture, where it cannot wash out the hue.
       let k = t.brightness;
       if (life < t.fadeTime) k *= life / t.fadeTime;
       if (age < t.hotTime) k *= 1 + t.hotBoost * (1 - age / t.hotTime);
@@ -988,9 +1102,10 @@ class Bullets implements BulletSystem, BulletView {
         this.#roll[id]!,
         width,
         length,
-        tint.r * k,
-        tint.g * k,
-        tint.b * k,
+        tint.r,
+        tint.g,
+        tint.b,
+        k,
       );
     }
 
@@ -1027,20 +1142,55 @@ class Bullets implements BulletSystem, BulletView {
       this.#impactBatch,
     ]) {
       this.#scene.remove(batch.mesh);
-      batch.mesh.dispose();
+      batch.dispose();
     }
-    this.#geometry.dispose();
     this.#needleMat.dispose();
     this.#dartMat.dispose();
+    this.#flameMat.dispose();
     this.#burstMat.dispose();
     this.#needleTex.dispose();
     this.#dartTex.dispose();
+    this.#flameTex.dispose();
     this.#burstTex.dispose();
   }
 
   // ----------------------------------------------------------------- private
 
+  /**
+   * CONVERGENCE — why the army's fire focuses instead of travelling as a
+   * parallel curtain.
+   *
+   * One stream per soldier spreads the muzzles across the whole blob, which is
+   * right, but firing them all straight up the corridor means a 50-troop squad
+   * throws a 5.3 m wide curtain at a 2.1 m barrel and misses with half of it.
+   * Measured: 49% of muzzle damage on target. The player steers the crowd onto
+   * a barrel and most of the army shoots past it, so aiming does not read as
+   * aiming.
+   *
+   * The reference does not do this. In frame_030 the muzzle line spans 2.21 m
+   * and the same fire in flight spans 0.72 m — it converges to a third of its
+   * origin width. (That also settles the "~4° cone" measured earlier: for the
+   * reference's outermost round it is 4.3° of CONVERGENCE, and the old note in
+   * this file had the sign backwards.)
+   *
+   * So each round's lateral offset from the axis it was fired at decays with
+   * DISTANCE TRAVELLED, u(d) = u₀·e^(−d/Dc). Differentiating gives a lateral
+   * velocity proportional to the current offset, vx = −u·v/Dc, which is what is
+   * applied here — recomputed each tick, so the decay is exact regardless of
+   * speed and there is no focal point to cross and diverge past. Capped at
+   * `convergeMaxAngle` so an edge soldier never appears to fire sideways.
+   *
+   * Consequences, all wanted:
+   *   * Near the muzzles the fire is still nearly as wide as the blob (4.5 m of
+   *     5.3 m at 2 m out), so every soldier visibly shoots its own stream.
+   *   * By target depth it is a column: 1.0 m at 12 m, inside the barrel window.
+   *   * 93% of a 50-troop army's damage now lands on the barrel it is aimed at.
+   */
   #advance(dt: number): void {
+    const t = this.tuning;
+    const invDc = 1 / Math.max(0.25, t.convergeDistance);
+    const tanMax = Math.tan(Math.max(0, t.convergeMaxAngle));
+
     // Backwards, because expiring swap-removes the tail into the current slot —
     // the element that lands here has already been stepped this tick.
     for (let i = this.#count - 1; i >= 0; i--) {
@@ -1048,12 +1198,33 @@ class Bullets implements BulletSystem, BulletView {
       const cx = this.x[id]!;
       const cy = this.y[id]!;
       const cz = this.z[id]!;
+
+      // Re-aim toward the firing axis. `vz` is left alone, so forward pacing and
+      // therefore range and lifetime are unaffected by how hard a round turns.
+      const forward = -this.#vz[id]!;
+      const cap = tanMax * forward;
+      let vx = -(cx - this.#axisX[id]!) * invDc * forward;
+      if (vx > cap) vx = cap;
+      else if (vx < -cap) vx = -cap;
+      this.#vx[id] = vx;
+
+      const vy = this.#vy[id]!;
       this.px[id] = cx;
       this.py[id] = cy;
       this.pz[id] = cz;
-      this.x[id] = cx + this.#vx[id]! * dt;
-      this.y[id] = cy + this.#vy[id]! * dt;
+      this.x[id] = cx + vx * dt;
+      this.y[id] = cy + vy * dt;
       this.z[id] = cz + this.#vz[id]! * dt;
+
+      // The sprite's long axis tracks travel, and its nose offset in render()
+      // divides by speed — both move as the round turns, so both are refreshed
+      // rather than left at their spawn values.
+      // Plain sqrt rather than Math.hypot: this runs for every live bullet every
+      // tick, and hypot's overflow guarding costs several times more for values
+      // that can never overflow.
+      this.#invSpeed[id] = 1 / Math.sqrt(vx * vx + vy * vy + forward * forward);
+      this.#roll[id] = rollFor(vx, vy, this.#vz[id]!);
+
       const life = this.#life[id]! - dt;
       this.#life[id] = life;
       if (life <= 0) this.#release(id);
@@ -1095,6 +1266,7 @@ class Bullets implements BulletSystem, BulletView {
     tier: WeaponTier,
     age: number,
     flash: number,
+    axisX: number,
   ): void {
     if (this.#freeCount === 0) return;
     const t = this.tuning;
@@ -1103,7 +1275,15 @@ class Bullets implements BulletSystem, BulletView {
     const speed =
       (dart ? t.dartSpeed : t.tracerSpeed) * (1 + (Math.random() - 0.5) * t.speedJitter);
 
-    const vx = Math.sin(angle) * speed;
+    // Seed the inward lean at spawn rather than waiting for the first tick of
+    // `#advance`, so the sub-tick catch-up below places the round on the path it
+    // is actually going to fly.
+    const cap = Math.tan(Math.max(0, t.convergeMaxAngle)) * speed;
+    let lean = -(sx - axisX) * (1 / Math.max(0.25, t.convergeDistance)) * speed;
+    if (lean > cap) lean = cap;
+    else if (lean < -cap) lean = -cap;
+
+    const vx = Math.sin(angle) * speed + lean;
     const vz = -Math.cos(angle) * speed;
     const vy = (Math.random() - 0.5) * t.riseJitter;
 
@@ -1138,6 +1318,7 @@ class Bullets implements BulletSystem, BulletView {
     this.#maxLife[id] = maxLife;
     this.#life[id] = maxLife - age;
     this.#roll[id] = rollFor(vx, vy, vz);
+    this.#axisX[id] = axisX;
     this.#style[id] = dart ? STYLE_DART : STYLE_TRACER;
     this.damage[id] = dart ? t.dartDamage : t.tracerDamage;
     // Length tracks speed so a faster round is a longer streak, and a little
@@ -1148,7 +1329,7 @@ class Bullets implements BulletSystem, BulletView {
     // The caller decides — the flash stride is derived from the live shot rate
     // so one soldier flashes on every round and a thousand do not strobe.
     if (flash !== 0) {
-      const tint = dart ? TINT_CYAN : TINT_WARM;
+      const tint = dart ? FLAME_CYAN : FLAME_WARM;
       this.#muzzles.spawn(
         ox,
         oy,
@@ -1226,10 +1407,6 @@ function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning):
   return desired / Math.pow(1 + Math.pow(desired / max, k), 1 / k);
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
@@ -1249,13 +1426,152 @@ function mulberry32(seed: number): () => number {
 // ---------------------------------------------------------------------------
 // Materials & procedural textures
 //
-// Fog is off deliberately: additive blending toward a bright fog colour makes
-// distant bullets glow *brighter*, which is backwards. Bullets expire inside
+// ======================= WHY THE ROUNDS ARE NOT ADDITIVE ===================
+//
+// THE ROAD IS BRIGHT. That single fact decides the blend mode, and getting it
+// wrong is what made the tracers render as colourless white jets.
+//
+// Measured off the reference frames (docs/reference/part1, sampled over the
+// road well clear of any object) the road sits at rgb(0.70, 0.71, 0.73) — and
+// ours matches. Now measure what the reference's own bullets do against it:
+//
+//     tier 0/1 tracer   rgb(0.791, 0.562, 0.291)   saturation 0.645
+//     tier 2   dart     rgb(0.405, 0.803, 0.878)   saturation 0.537
+//
+// Look at the LOW channel in each. The tracer's blue is 0.291 and the dart's
+// red is 0.405, both far BELOW the 0.71 road they are drawn over. No
+// brighten-only blend can produce that. Additive (dst + src) and screen
+// (dst + src·(1−dst)) can only ever move a channel up from 0.727 toward 1.0,
+// so the widest gap either can open between channels is 1 − 0.727 = 0.273:
+//
+//     additive / screen, best possible   rgb(1.000, 0.727, 0.727)  sat 0.273
+//     the reference actually achieves                              sat 0.645
+//
+// Screen is a real improvement on additive — it cannot clip, so it reliably
+// reaches that 0.273 instead of overshooting every channel to 1.0 and going
+// white, which is why it was the right call for growthfx.ts. But it tops out
+// at less than half the saturation the tracers need, because a tracer has to
+// hold its blue channel DOWN and screen has no way to darken anything.
+//
+// So the rounds composite: (SRC_ALPHA, ONE_MINUS_SRC_ALPHA). Coverage, not
+// glow. That is the only blend that can push a channel below the background,
+// and it is plainly what the reference does. Consequences, all deliberate:
+//
+//   * COLOUR LIVES IN THE TEXTURE, not in the instance tint, because at high
+//     alpha the on-screen pixel IS the texel. The tints are 1.0 (see above).
+//   * INTENSITY LIVES IN ALPHA. Scaling RGB down under compositing walks a
+//     round toward black, not toward invisible.
+//   * "HOT" IS PAINTED, not multiplied: each ramp runs from a pale, barely
+//     saturated nose to a deeply saturated body, so the round still reads as a
+//     white-cored bolt without a single channel having to exceed 1.0.
+//
+// The impact burst stays ADDITIVE. It is a light source rather than an object,
+// it is supposed to blow out, and it lives 0.18 s — long enough to punch, too
+// short to need a hue.
+//
+// Fog is off on all of them: additive blending toward a bright fog colour makes
+// distant sprites glow *brighter*, which is backwards. Bullets expire inside
 // the fog's near plane instead.
 // ---------------------------------------------------------------------------
 
+/**
+ * Colour ramps, nose (0) to tail (1), as [t, r, g, b, a] in SRGB 0..1 — the
+ * literal on-screen colour of the round wherever it is opaque, because the
+ * instance tint is 1.0 and `toneMapped` is off.
+ *
+ * Kept as data rather than inline gradient stops so the composite over the road
+ * can be computed and checked against the reference numbers above without
+ * running the game.
+ */
+type Stop = readonly [number, number, number, number, number];
+
+/**
+ * The hot tip is SHORT and it is not white. The reference tracer averages
+ * rgb(0.791, 0.562, 0.291) — a saturated orange streak of only moderate
+ * brightness with a small hot tip, not a blazing white line with a warm edge.
+ * A long pale nose is the thing that drags the average toward grey, so the ramp
+ * is already deep orange by 12% of the streak's length.
+ */
+/**
+ * Note how little blue there is even in the hot tip. Saturation here is very
+ * nearly `1 − blue/red`, and blue is the channel the road pushes back up
+ * wherever alpha is short of 1 — so a pale, blue-ish "white hot" nose is
+ * precisely what costs the round its orange. The tip reads as heat because it
+ * is the brightest thing in frame at value 1.0, not because it is white.
+ */
+/* RAMP:TRACER */
+const TRACER_RAMP: readonly Stop[] = [
+  [0.0, 1.0, 0.94, 0.62, 0.0],
+  [0.03, 1.0, 0.92, 0.5, 0.98],
+  [0.1, 1.0, 0.7, 0.16, 0.98],
+  [0.28, 1.0, 0.48, 0.05, 0.98],
+  [0.72, 0.99, 0.36, 0.02, 0.94],
+  [0.9, 0.96, 0.3, 0.02, 0.66],
+  [1.0, 0.92, 0.26, 0.02, 0.0],
+];
+/* RAMP:END */
+
+/* RAMP:DART */
+const DART_RAMP: readonly Stop[] = [
+  [0.0, 0.9, 1.0, 1.0, 0.0],
+  [0.06, 0.8, 0.99, 1.0, 0.98],
+  [0.18, 0.4, 0.94, 1.0, 0.98],
+  [0.4, 0.09, 0.8, 1.0, 0.97],
+  [0.78, 0.05, 0.58, 0.92, 0.82],
+  [0.92, 0.04, 0.48, 0.86, 0.5],
+  [1.0, 0.03, 0.4, 0.82, 0.0],
+];
+/* RAMP:END */
+
+/**
+ * Cross-section opacity of the needle, centre (0) to edge (1).
+ *
+ * Tighter than a plain falloff, and the ramps above hold alpha near 1 for most
+ * of the streak's length rather than fading out across it. Both exist for the
+ * same measured reason: a long, wide, low-alpha skirt is a large area of pixels
+ * sitting a few percent off road grey, and averaging those in is what pulled
+ * the first attempt at this fix down to 0.37 saturation. A tracer is a dense
+ * bright dash with a quick fade at the tail, not a soft plume — which is also
+ * exactly what the reference frames show.
+ */
+/* RAMP:CROSS */
+const NEEDLE_CROSS: readonly (readonly [number, number])[] = [
+  [0.0, 1.0],
+  [0.45, 0.84],
+  [0.78, 0.3],
+  [1.0, 0.0],
+];
+/* RAMP:END */
+
+const stopsToGradient = (g: CanvasGradient, ramp: readonly Stop[]): void => {
+  for (const [t, r, gr, b, a] of ramp) {
+    g.addColorStop(
+      t,
+      `rgba(${Math.round(r * 255)},${Math.round(gr * 255)},${Math.round(b * 255)},${a})`,
+    );
+  }
+};
+
+/** Rounds and muzzle flames: coverage, so a channel can go below the road. */
+function compositeMaterial(map: THREE.CanvasTexture): THREE.MeshBasicMaterial {
+  const mat = new THREE.MeshBasicMaterial({
+    map,
+    transparent: true,
+    blending: THREE.NormalBlending,
+    // Off for the same reason as before: hundreds of overlapping sprites would
+    // z-fight and punch holes in one another. They still depth-test against the
+    // world, so a round behind a barrel is correctly hidden.
+    depthWrite: false,
+    depthTest: true,
+    fog: false,
+    toneMapped: false,
+  });
+  attachSpriteAlpha(mat);
+  return mat;
+}
+
 function additiveMaterial(map: THREE.CanvasTexture): THREE.MeshBasicMaterial {
-  return new THREE.MeshBasicMaterial({
+  const mat = new THREE.MeshBasicMaterial({
     map,
     transparent: true,
     blending: THREE.AdditiveBlending,
@@ -1264,6 +1580,8 @@ function additiveMaterial(map: THREE.CanvasTexture): THREE.MeshBasicMaterial {
     fog: false,
     toneMapped: false,
   });
+  attachSpriteAlpha(mat);
+  return mat;
 }
 
 function canvas2d(w: number, h: number): CanvasRenderingContext2D {
@@ -1297,21 +1615,49 @@ function needleTexture(): THREE.CanvasTexture {
   const H = 256;
   const ctx = canvas2d(W, H);
 
+  // TRACER_RAMP carries the colour AND the along-length opacity. It runs from a
+  // pale hot nose to a deeply saturated orange body: the nose is what reads as
+  // heat, the body is what reads as orange, and neither has to exceed 1.0.
+  const along = ctx.createLinearGradient(0, 0, 0, H);
+  stopsToGradient(along, TRACER_RAMP);
+  ctx.fillStyle = along;
+  ctx.fillRect(0, 0, W, H);
+
+  // Cross-section falloff, applied to alpha only so it thins the needle without
+  // touching its hue. Shaped rather than clipped, because a hard silhouette at
+  // 32 px across aliases badly once it is a few screen pixels wide.
+  const across = ctx.createLinearGradient(0, 0, W, 0);
+  for (const [u, a] of NEEDLE_CROSS) across.addColorStop(0.5 - u * 0.5, `rgba(0,0,0,${a})`);
+  for (const [u, a] of NEEDLE_CROSS) across.addColorStop(0.5 + u * 0.5, `rgba(0,0,0,${a})`);
+  ctx.globalCompositeOperation = "destination-in";
+  ctx.fillStyle = across;
+  ctx.fillRect(0, 0, W, H);
+
+  return finish(ctx);
+}
+
+/**
+ * Muzzle flame. Deliberately NEUTRAL: white RGB with a shaped alpha, so the
+ * per-instance tint sets the colour exactly (tint × white = tint under
+ * compositing). The flame has to be warm at tier 0/1 and cyan at tier 2, and
+ * tinting the orange needle texture cyan would just produce mud.
+ */
+function flameTexture(): THREE.CanvasTexture {
+  const W = 32;
+  const H = 128;
+  const ctx = canvas2d(W, H);
+
   const along = ctx.createLinearGradient(0, 0, 0, H);
   along.addColorStop(0.0, "rgba(255,255,255,0)");
-  along.addColorStop(0.05, "rgba(255,255,255,1)");
-  along.addColorStop(0.14, "rgba(255,247,214,1)");
-  along.addColorStop(0.36, "rgba(255,206,128,0.95)");
-  along.addColorStop(0.7, "rgba(255,170,96,0.45)");
-  along.addColorStop(1.0, "rgba(255,150,80,0)");
+  along.addColorStop(0.12, "rgba(255,255,255,0.95)");
+  along.addColorStop(0.45, "rgba(255,255,255,0.7)");
+  along.addColorStop(1.0, "rgba(255,255,255,0)");
   ctx.fillStyle = along;
   ctx.fillRect(0, 0, W, H);
 
   const across = ctx.createLinearGradient(0, 0, W, 0);
   across.addColorStop(0.0, "rgba(0,0,0,0)");
-  across.addColorStop(0.3, "rgba(0,0,0,0.28)");
   across.addColorStop(0.5, "rgba(0,0,0,1)");
-  across.addColorStop(0.7, "rgba(0,0,0,0.28)");
   across.addColorStop(1.0, "rgba(0,0,0,0)");
   ctx.globalCompositeOperation = "destination-in";
   ctx.fillStyle = across;
@@ -1321,29 +1667,45 @@ function needleTexture(): THREE.CanvasTexture {
 }
 
 /**
- * The tier-2 dart. frame_035 zoomed 6x: a blunt round nose leading, a long
- * tail tapering to a point, a pale core inside a cyan body. Built from three
- * concentric teardrops composited with `lighter` — stacking translucent passes
- * gives the glow falloff for free and avoids depending on `ctx.filter`, which
- * older mobile Safari does not have.
+ * The tier-2 dart. frame_035 zoomed 6x: a blunt round nose leading, a long tail
+ * tapering to a point, a pale core inside a cyan body.
+ *
+ * Built in two passes rather than by stacking coloured teardrops with `lighter`.
+ * Stacking translucent passes gives a nice glow falloff, but it BUILDS colour
+ * additively inside the canvas — every overlap climbs toward white, which is the
+ * same mistake at texture scale that additive blending was making at frame
+ * scale. So: shape first, in neutral white, then paint DART_RAMP through it, so
+ * the silhouette and the hue are independent and the hue is exactly what the
+ * table says.
  */
 function dartTexture(): THREE.CanvasTexture {
   const W = 64;
   const H = 160;
   const ctx = canvas2d(W, H);
   const cx = W / 2;
-  ctx.globalCompositeOperation = "lighter";
 
-  teardrop(ctx, cx, 6, W * 0.46, H * 0.9, "rgba(40,150,255,0.5)");
-  teardrop(ctx, cx, 9, W * 0.33, H * 0.82, "rgba(80,214,255,0.8)");
-  teardrop(ctx, cx, 13, W * 0.19, H * 0.6, "rgba(205,247,255,0.95)");
+  // Pass 1 — silhouette and soft edge, alpha only.
+  ctx.globalCompositeOperation = "lighter";
+  teardrop(ctx, cx, 6, W * 0.46, H * 0.9, "rgba(255,255,255,0.34)");
+  teardrop(ctx, cx, 9, W * 0.33, H * 0.82, "rgba(255,255,255,0.42)");
+  teardrop(ctx, cx, 13, W * 0.19, H * 0.6, "rgba(255,255,255,0.5)");
+
+  // Pass 2 — recolour. `source-in` keeps the alpha built above and replaces the
+  // RGB wholesale, which is what makes the ramp authoritative.
+  ctx.globalCompositeOperation = "source-in";
+  const along = ctx.createLinearGradient(0, 0, 0, H);
+  stopsToGradient(along, DART_RAMP);
+  ctx.fillStyle = along;
+  ctx.fillRect(0, 0, W, H);
 
   // White-hot pip inside the nose — this is what survives when the sprite is
-  // only a few pixels tall at the far end of the corridor.
-  const nose = ctx.createRadialGradient(cx, 26, 0, cx, 26, 14);
-  nose.addColorStop(0, "rgba(255,255,255,1)");
-  nose.addColorStop(0.5, "rgba(220,250,255,0.55)");
-  nose.addColorStop(1, "rgba(160,235,255,0)");
+  // only a few pixels tall at the far end of the corridor. Added last, over the
+  // top, so it lifts the nose toward white without lifting the body with it.
+  ctx.globalCompositeOperation = "lighter";
+  const nose = ctx.createRadialGradient(cx, 26, 0, cx, 26, 15);
+  nose.addColorStop(0, "rgba(150,240,255,0.85)");
+  nose.addColorStop(0.5, "rgba(90,200,235,0.35)");
+  nose.addColorStop(1, "rgba(0,0,0,0)");
   ctx.fillStyle = nose;
   ctx.fillRect(0, 0, W, 60);
 

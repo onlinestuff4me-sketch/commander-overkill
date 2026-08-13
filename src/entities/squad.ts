@@ -72,31 +72,63 @@ const UNIT_SCALE = 1.05;
  * Clump half-width grows with sqrt(count) because a crowd spreads over AREA,
  * not length.
  *
- * CALIBRATION, AND THE BUG THAT WAS IN IT. `frame_023` measures ~5.2 m across
- * at ~45 units, and the first cut turned that into `SPREAD = 2.6/sqrt(50)`.
- * That equated a MEASURED SPAN with the ellipse's SEMI-AXIS, which are not the
- * same number: the span a camera sees is the semi-axis plus the radial jitter
- * (×1.17 at the rim), plus the edge jitter and jostle, plus a whole unit's
- * half-width of body hanging off the outermost soldier. Those extras are worth
- * ~1.0 m per side, so the old constant produced a clump ~7.6 m across — wider
- * than the 6.8 m road, which is exactly why the rim units were standing on the
- * grass. Solving the same 5.2 m measurement for the semi-axis instead gives
- * 1.61 at 50 units, i.e. 1.61/sqrt(50).
+ * CALIBRATED FROM DENSITY, NOT FROM A SPAN. Two earlier cuts both calibrated
+ * this against a measured WIDTH, and both were wrong, in opposite directions,
+ * for the same reason: a span you read off a frame is not the ellipse's
+ * semi-axis, and a span you read off a frame is not even a world measurement.
+ * Density is the invariant worth matching, because it is what legibility
+ * actually depends on.
+ *
+ * MEASURED ACROSS THE REFERENCE FRAMES (helmet diameter used as the ruler, so
+ * the numbers are free of any assumption about the reference's camera):
+ *   - Per-unit screen size is CONSTANT: helmets are ~45 px at ~20 troops
+ *     (`frame_018`) and ~44 px at ~60 (`frame_035`). Units do not shrink to fit.
+ *   - Nearest-neighbour spacing is CONSTANT at ~1.0–1.1 helmet diameters, i.e.
+ *     one body width, i.e. ~0.58 m. It does NOT tighten as the army grows.
+ *   - Constant density means area ∝ n, so BOTH axes grow as sqrt(n). The crowd
+ *     does not grow width-first; it grows proportionally until the road stops it.
+ *   - Widening stops at ~11 abreast, and the reference does not deepen past
+ *     that — it SPLITS (see the divergence note on RADIUS_X_MAX).
+ *
+ * So this constant is set by the spacing it produces, not by a width:
+ * spacing = SPREAD * sqrt(PI * DEPTH_RATIO / 0.866). At 0.28 with the depth
+ * ratio below that is 0.67 m, converging to 0.61 m by 50 units as the width cap
+ * bites — against the reference's 0.58 m. Slightly looser than the reference on
+ * purpose: our camera is shallower (see DEPTH_RATIO), so the same world spacing
+ * buys less visible separation and has to be paid for in metres.
  */
-const SPREAD = 0.224;
+const SPREAD = 0.28;
 /**
- * Extra width at tiny counts, decaying as 1/n. Three soldiers do not pack —
- * they stand shoulder to shoulder, and `frame_009` measures ~1.7 m across where
- * the sqrt law alone predicts 1.3. Applied to width only, so small squads read
- * as a rank rather than a huddle. Below 1% by 100 units.
+ * Extra width at tiny counts, decaying as 1/n. Three soldiers do not pack — the
+ * reference's three (`frame_009`) stand ~1.2 m apart, twice the spacing its
+ * 50-strong clump uses, so density is not constant at the bottom of the curve.
+ * Applied to width only, so small squads read as a rank rather than a huddle.
+ * Below 3% by 100 units.
  */
-const SMALL_SQUAD_FLARE = 1.0;
-/** Depth:width of the silhouette. The reference reads ~5 deep by 9 wide. */
-const DEPTH_RATIO = 0.556;
-/** Hard cap on half-depth. The camera's bottom edge lands at z ≈ +2.8, and
- *  SQUAD_Z + this + the jitter and straggler budget has to stay inside it or
- *  the rear rank walks off the bottom of the screen. */
-const RADIUS_Z_MAX = 3.2;
+const SMALL_SQUAD_FLARE = 3.0;
+/**
+ * Depth:width of the ellipse, IN WORLD SPACE — and it is greater than 1, which
+ * looks wrong next to "the silhouette is wider than it is deep" until you
+ * account for the camera.
+ *
+ * Every "N deep by M wide" note taken off a reference frame, including this
+ * project's own "~5 deep by 9 wide", is a SCREEN reading. This camera sits only
+ * 22° above the horizon, so a metre of world depth covers 0.375 of the screen
+ * that a metre of world width does. Measuring the reference's own crowds in
+ * helmet diameters and dividing out its (much steeper, ~43°) camera puts its
+ * blob at roughly 1:1 in world space — near circular, and "wider than deep"
+ * purely as a projection artefact. To land the same ~1.5:1 on-screen read from
+ * 22° we need the world ellipse to run about 1.6:1 the other way. Feeding a
+ * screen ratio in here as a world ratio is what made the clump a flat rank.
+ */
+const DEPTH_RATIO = 1.6;
+/** Hard cap on half-depth, derived from the framing budget rather than picked:
+ *  the camera's bottom edge lands at z ≈ +2.8, and SQUAD_Z + rz*(1+jitter) +
+ *  the edge-jitter and straggler budget has to stay inside it or the rear rank
+ *  walks off the bottom of the screen. Solving that for rz gives 3.05. It used
+ *  to read 3.2, which was already 0.15 over budget and only never showed
+ *  because the old flat DEPTH_RATIO never reached it below ~330 units. */
+const RADIUS_Z_MAX = 3.05;
 /** Where the clump sits down the corridor. Bottom third of the frame. */
 const SQUAD_Z = -1.6;
 
@@ -116,14 +148,38 @@ const STRAGGLER_FRACTION = 0.18;
 /** How far a straggler trails behind the clump (+Z is away from the enemy). */
 const STRAGGLER_TRAIL = 0.55;
 
-/** Position spring. Low enough that individuals visibly lag the blob when the
- *  lane changes, then catch up — a rigid translation reads as a decal. */
-const SPRING_K = 34;
-/** <1 is underdamped, so units overshoot slightly and jostle on arrival. */
-const SPRING_DAMPING_RATIO = 0.86;
-/** Per-unit stiffness spread. Uniform stiffness = everyone lags identically =
- *  rigid again, just delayed. */
-const SPRING_K_SPREAD = 0.45;
+/**
+ * Position spring — this is the steering feel, and it is worth being precise
+ * about what it costs.
+ *
+ * Stiffness is an undamped frequency: w = sqrt(K), and a near-critically damped
+ * spring settles to 2% in about 5.8/w. The first cut ran K=34, so w=5.8 rad/s
+ * and the crowd took 0.77 s to arrive — most of a second of drifting after the
+ * thumb had already stopped. That is the sluggishness; it was never the input
+ * layer alone.
+ *
+ * K=620 puts w at 24.9 and the settle at 0.27 s, which is fast enough that the
+ * lead units are visibly moving on the frame the input arrives. Stability is not
+ * a concern at this stiffness: update() integrates semi-implicitly (velocity
+ * first, then position from the new velocity), which is stable while w*dt < 2,
+ * and the stiffest unit here sits at 0.5.
+ */
+const SPRING_K = 620;
+/**
+ * Just under critical. At 0.98 the theoretical overshoot is e^-15, i.e. none —
+ * the crowd cannot bounce past the target and oscillate. The jostle and the
+ * spread below supply the life that underdamping used to; bounce is not the
+ * same thing as life, and at this stiffness it would read as a wobble.
+ */
+const SPRING_DAMPING_RATIO = 0.98;
+/**
+ * Per-unit stiffness spread, and the thing that keeps the mass DEFORMING rather
+ * than translating as a slab now that everyone is fast. At ±50% the settle time
+ * runs 0.37 s for the laziest unit against 0.23 s for the keenest, so the blob
+ * still visibly stretches on the way and gathers up on arrival — the character
+ * the low stiffness used to buy, at a third of the delay.
+ */
+const SPRING_K_SPREAD = 0.5;
 
 /** Slow lateral/forward wander so the mass never looks frozen when standing still. */
 const JOSTLE_AMPLITUDE = 0.07;
@@ -163,9 +219,13 @@ const HP_BAR_WIDTH = 1.25;
 const HP_BAR_HEIGHT = 0.15;
 const HP_BAR_Y = 2.05;
 
-/** How fast the blob centre chases the steering input. Matches the Commander's
- *  follow so the two read as one vehicle. */
-const CENTER_FOLLOW = 12;
+/** How fast the blob centre chases the steering input. This is a first-order
+ *  lag stacked on top of the per-unit springs, so its cost is additive: at 12 it
+ *  spent 0.30 s reaching a new lane before a single soldier had finished
+ *  arriving. At 30 that is 0.10 s and the centre is effectively tracking the
+ *  thumb, which leaves ALL the visible lag where it belongs — in the units, who
+ *  deform as they follow. */
+const CENTER_FOLLOW = 30;
 
 /**
  * Uniform, straight off the reference: blue helmet, cream shirt, navy trousers.
@@ -194,12 +254,15 @@ const COLOR_TROUSERS = 0x242f57;
  *  one pair of legs from the next. */
 const COLOR_BOOT = 0x15171d;
 const COLOR_SKIN = 0xe8b98c;
-/** The rifle reads LIGHT in the reference, not dark — the barrel catches the sky
- *  and shows up as a pale sliver between the helmets. A gunmetal rifle vanishes
- *  under this backlighting. Wood stock behind it for the two-tone the reference
- *  weapons have. */
-const COLOR_RIFLE_METAL = 0xd8c8b4;
-const COLOR_RIFLE_WOOD = 0x9c6538;
+/** The reference's rifles read pale, but the reference draws a dark outline
+ *  around every weapon and we do not. Without that outline the only thing
+ *  separating a rifle from what is behind it is value — and what is behind it,
+ *  from this camera, is mostly the cream shoulders of the rank in front. A pale
+ *  barrel on a cream shoulder is invisible. This renders #667385 against the
+ *  shoulders' #ecdfc4, which reads against cream, against the blue helmets and
+ *  against the road. Wood stock behind it for the reference's two-tone. */
+const COLOR_RIFLE_METAL = 0x6f7684;
+const COLOR_RIFLE_WOOD = 0x7a4f2c;
 
 /** Baked-in forward lean. Costs nothing at runtime (it is part of the merged
  *  geometry) and does most of the work of selling "running" that a vertical bob
@@ -227,8 +290,15 @@ const BODY_LEAN = 0.12;
 /** Raw-geometry half-width of the widest part of a unit, and how high that
  *  widest part sits. Both are the shoulder yoke's top corners, and the geometry
  *  below is built FROM these rather than measured against them, so the two
- *  cannot drift apart. The height is what drives margin 3. */
-const UNIT_HALF_WIDTH = 0.32;
+ *  cannot drift apart. The height is what drives margin 3.
+ *
+ *  0.29 puts a soldier at 0.609 m across once UNIT_SCALE is applied, which is
+ *  the 0.58–0.60 m `REFERENCE.md` measures and the number its "~11 fit abreast
+ *  on a 6.8 m road" cap is built on. The first pass at this geometry drifted to
+ *  0.672 m while fitting a rifle and arms on, and 12% of extra width costs 23%
+ *  of the packing capacity — enough on its own to turn a legible crowd into a
+ *  slab. The rifle is deliberately NOT in this number; see the note on it below. */
+const UNIT_HALF_WIDTH = 0.29;
 const UNIT_SHOULDER_Y = 1.07;
 
 /** Mirrors the kerb `lane.ts` builds — a 0.35-thick, 0.4-tall box straddling
@@ -247,7 +317,7 @@ function cameraDepth(y: number, z: number): number {
   const dy = CAMERA_LOOK.y - CAMERA_POS.y;
   const dz = CAMERA_LOOK.z - CAMERA_POS.z;
   const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  return -((dy / len) * (y - CAMERA_POS.y) + (dz / len) * (z - CAMERA_POS.z));
+  return (dy / len) * (y - CAMERA_POS.y) + (dz / len) * (z - CAMERA_POS.z);
 }
 
 /**
@@ -276,11 +346,42 @@ const UNIT_X_LIMIT = (() => {
 const MIN_STEER_RANGE = 0.5;
 
 /**
+ * THE RIFLE IS NOT IN UNIT_HALF_WIDTH, DELIBERATELY. Angled out for legibility,
+ * the muzzle reaches 0.49 m from a soldier's centre — 1.7x his own half-width —
+ * so folding it into the clamp would cost 0.2 m of usable road on each side and
+ * shrink the steering range that is already the tightest thing here. It sits at
+ * y ≈ 1.2, three times the kerb's height, so at full lock a barrel passes OVER
+ * the kerb rather than a man standing on it. "No unit's body crosses the kerb"
+ * is the invariant; a weapon overhanging it is what the reference does too.
+ */
+
+/**
  * Hard cap on half-width — the largest ellipse whose rim units still fit inside
- * UNIT_X_LIMIT with MIN_STEER_RANGE left over. ~1.60, reached at ~50 units.
- * Past that the area the clump wanted has to go somewhere, so it goes backwards:
- * that is the reference's behaviour in the late run, and why `frame_035` splits
- * into two groups rather than one wider one.
+ * UNIT_X_LIMIT with MIN_STEER_RANGE left over. ~1.63, i.e. ~8.5 soldiers
+ * abreast, reached at ~30 units.
+ *
+ * WHERE OUR CURVE LEAVES THE REFERENCE'S, AND WHY. The reference does not
+ * deepen past its width cap — at ~60 units it SPLITS INTO TWO GROUPS, which is
+ * what the second HP bar in `frame_035` is, and each group then keeps its own
+ * width budget and its own legibility. We cannot express that: `core/types.ts`
+ * carries one `squadLane` and one `health`. So past the cap this does the only
+ * thing a single blob can and grows backwards, and the read degrades on a
+ * measurable schedule:
+ *
+ *   ~30 units  both caps still slack; ~76% of each helmet visible, on-screen
+ *              silhouette 1.4:1 wider than deep. Matches the reference.
+ *   ~43 units  RADIUS_Z_MAX binds. The blob stops growing entirely, the rear
+ *              rank reaches the bottom of the frame, and the silhouette falls to
+ *              ~1.0:1 — it stops being wider than deep. THIS IS THE BOUNDARY.
+ *   ~60 units  where the reference splits. We are at ~55% helmet visibility and
+ *              1 unit in 5 is effectively buried.
+ *   100+       ~38% visibility. A column, not a crowd. Known, not an oversight.
+ *
+ * The contract change needed is an array of groups rather than a scalar:
+ * `squadLane`/`health` become per-group, plus a product call on whether the
+ * player steers both groups with one input or picks between them. That also
+ * fixes the steering-range squeeze below, since two narrow blobs have room to
+ * move where one wide one does not.
  */
 const RADIUS_X_MAX =
   (UNIT_X_LIMIT - MIN_STEER_RANGE - EDGE_JITTER - JOSTLE_AMPLITUDE - SPRING_SLACK) /
@@ -781,9 +882,9 @@ class Squad implements SquadSystem {
 /** Rifle muzzle in unmodified unit space; scaled by UNIT_SCALE at the call site.
  *  Read straight off the rifle's front face after the pitch, yaw and body lean
  *  below — if the rifle moves, these move with it. */
-const MUZZLE_X = 0.239;
-const MUZZLE_Y = 0.969;
-const MUZZLE_Z = 0.863;
+const MUZZLE_X = 0.428;
+const MUZZLE_Y = 1.185;
+const MUZZLE_Z = 0.841;
 /** Just clear of the road plane at y=0, without needing polygonOffset. */
 const SHADOW_Y = 0.012;
 
@@ -795,13 +896,29 @@ interface Part {
 /** How far each leg swings out of the stride. Both legs at z=0 is what made the
  *  lower body read as one block. */
 const LEG_STRIDE = 0.16;
-/** Rifle attitude. Pitched up and yawed across to +X, which is the pose in
- *  `frame_000` — muzzle clearing the helmet, butt in at the chest. */
-const RIFLE_PITCH = 0.3;
-const RIFLE_YAW = -0.28;
-const RIFLE_X = 0.135;
-const RIFLE_Y = 0.95;
-const RIFLE_Z = -0.35;
+/**
+ * Rifle attitude, and it is set by where the barrel lands ON SCREEN rather than
+ * by what looks right in a modelling view.
+ *
+ * The first pass held it forward and barely canted, which is anatomically fine
+ * and completely invisible: projected, only 12% of the barrel escaped the
+ * soldier's OWN helmet and the muzzle cleared it by 3 px. The rifle was being
+ * eaten by the head in front of it — nothing to do with neighbours, it happened
+ * at three troops as readily as at fifty.
+ *
+ * Pitching it up and swinging it out to +X puts 62% of the barrel outside the
+ * helmet's screen disc with the tip clearing by 31 px — about one helmet radius,
+ * which is the protrusion `frame_009` and `frame_018` show. It lands at 28° off
+ * vertical on screen, the diagonal the reference reads as. Note the screen angle
+ * is not the world angle: 34° of world yaw becomes 28° of screen tilt because
+ * this camera compresses the forward axis.
+ */
+const RIFLE_PITCH = 0.65;
+const RIFLE_YAW = -0.6;
+const RIFLE_X = 0.21;
+const RIFLE_Y = 0.99;
+const RIFLE_Z = -0.33;
+const RIFLE_LENGTH = 0.9;
 
 /**
  * One soldier as a single vertex-coloured geometry, 181 triangles.
@@ -842,18 +959,18 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // boxes offset in Z read as legs from above where two boxes side by side read
   // as one slab. side -1 swings forward, side +1 trails.
   for (const side of [-1, 1]) {
-    const leg = new THREE.BoxGeometry(0.155, 0.44, 0.19);
+    const leg = new THREE.BoxGeometry(0.145, 0.44, 0.19);
     leg.rotateX(-side * LEG_STRIDE);
-    leg.translate(side * 0.115, 0.235, side * 0.05);
+    leg.translate(side * 0.105, 0.235, side * 0.05);
     parts.push({ geo: leg, color: COLOR_TROUSERS });
 
-    const boot = new THREE.BoxGeometry(0.175, 0.13, 0.26);
-    boot.translate(side * 0.115, 0.07, side * 0.085);
+    const boot = new THREE.BoxGeometry(0.16, 0.13, 0.26);
+    boot.translate(side * 0.105, 0.07, side * 0.085);
     parts.push({ geo: boot, color: COLOR_BOOT });
   }
 
   // --- torso and shoulder yoke ---------------------------------------------
-  const torso = new THREE.BoxGeometry(0.42, 0.54, 0.32);
+  const torso = new THREE.BoxGeometry(0.38, 0.54, 0.32);
   torso.translate(0, 0.7, 0.02);
   parts.push({ geo: torso, color: COLOR_SHIRT });
 
@@ -873,15 +990,16 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // rifle floats in front of the chest with nothing holding it, and a floating
   // rifle reads as a bug rather than as a weapon. The left arm crosses the body
   // to the fore-grip; the right stays out at the trigger.
-  const armL = new THREE.BoxGeometry(0.12, 0.12, 0.5);
+  const armL = new THREE.BoxGeometry(0.115, 0.115, 0.5);
   armL.rotateX(-0.14);
-  armL.rotateY(-0.57);
-  armL.translate(-0.035, 0.935, -0.21);
+  armL.rotateY(-0.62);
+  armL.translate(-0.02, 0.94, -0.2);
   parts.push({ geo: armL, color: COLOR_SHIRT });
 
-  const armR = new THREE.BoxGeometry(0.12, 0.12, 0.38);
-  armR.rotateX(-0.25);
-  armR.translate(0.2, 0.925, -0.18);
+  const armR = new THREE.BoxGeometry(0.115, 0.115, 0.4);
+  armR.rotateX(-0.3);
+  armR.rotateY(-0.2);
+  armR.translate(0.19, 0.95, -0.18);
   parts.push({ geo: armR, color: COLOR_SHIRT });
 
   // --- rifle ---------------------------------------------------------------
@@ -889,10 +1007,10 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // the two boxes cannot drift apart. Length is cartoon-long on purpose: the
   // muzzle has to clear the helmet on screen or the diagonal never breaks the
   // blob's outline, which is the entire point of drawing it.
-  const barrel = new THREE.BoxGeometry(0.05, 0.055, 0.72);
+  const barrel = new THREE.BoxGeometry(0.05, 0.055, RIFLE_LENGTH);
   barrel.translate(0, 0, -0.06);
   const stock = new THREE.BoxGeometry(0.062, 0.1, 0.22);
-  stock.translate(0, -0.012, 0.25);
+  stock.translate(0, -0.012, RIFLE_LENGTH / 2 - 0.1);
   for (const g of [barrel, stock]) {
     g.rotateX(RIFLE_PITCH);
     g.rotateY(RIFLE_YAW);
@@ -904,20 +1022,20 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // --- head and helmet -----------------------------------------------------
   // Head sits forward of the torso: that offset is what uncovers the shoulder
   // yoke behind the helmet and gives the cream crescent the reference has.
-  const head = new THREE.SphereGeometry(0.165, 6, 2);
+  const head = new THREE.SphereGeometry(0.15, 6, 2);
   head.translate(0, 1.11, -0.1);
   parts.push({ geo: head, color: COLOR_SKIN });
 
-  // Brim: a flat disc overhanging the dome by 0.05 all round, levelled against
+  // Brim: a flat disc overhanging the dome by ~0.05 all round, levelled against
   // the body lean the same way the yoke is. Nine triangles for the single
   // cheapest "that is a helmet, not a ball" cue available.
-  const brim = new THREE.CircleGeometry(0.285, 9);
+  const brim = new THREE.CircleGeometry(0.262, 9);
   brim.rotateX(-Math.PI / 2);
   brim.rotateX(BODY_LEAN);
   brim.translate(0, 1.15, -0.13);
   parts.push({ geo: brim, color: COLOR_HELMET });
 
-  const dome = new THREE.SphereGeometry(0.235, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.55);
+  const dome = new THREE.SphereGeometry(0.215, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.55);
   dome.translate(0, 1.14, -0.13);
   parts.push({ geo: dome, color: COLOR_HELMET });
 
