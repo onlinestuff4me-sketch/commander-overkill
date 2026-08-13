@@ -33,7 +33,14 @@ the camera steps back to hold it all — but **when they arrive is not**. At hig
 troop counts barrel rows and gate rows overlap in depth, which is legible but
 plainly unauthored.
 
-This is the largest remaining piece of decision-free work.
+This is the largest remaining piece of decision-free work, and there is a
+written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Steps 1
+and 2 there need no decisions; step 3 waits on Mischa answering how long a run
+should be, how big the army should get, and how often a run should fail.
+
+The specific defect to fix first: **gates and barrels are two independent
+spawners that both drop content at z = −58**, one every 16 m and one every
+4.2 s. When those cadences come back into phase they spawn on top of each other.
 
 ### 2. Decide the camera ANGLE — still blocks accurate calibration
 
