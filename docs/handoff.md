@@ -10,9 +10,9 @@ _Last updated: 2026-08-13, end of session 2._
 **Repo:** `onlinestuff4me-sketch/commander-overkill`, public, `main`.
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
-**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 30 passing;
-`npm run build` succeeds; the page loads and runs a 66-second unattended run
-with no console errors, at 59–89 draw calls and 52–69k triangles.
+**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 34 passing;
+`npm run build` succeeds; the page loads with no console errors. 78 draw calls
+and 139k triangles at 461 troops with the camera stepped back to 1.7.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -21,57 +21,26 @@ guardrails, the architecture invariants, and how to verify work.
 
 ## Resume here
 
-Ranked. The first is the only thing blocking a decision Mischa has to make.
+Ranked. Nothing here is blocked on Mischa except items 3 and 4, which are
+product calls rather than engineering ones.
 
-### 1. Does every soldier shoot, or only the front rank? — ask Mischa
+### 1. Author the content pacing — the last obviously-unfinished thing
 
-**This is the last real gap against the reference, and it is a product
-question, not a tuning one.** Everything needed to act on the answer is now in
-place; what is missing is the answer.
+`spawnRow()` in `main.ts` still fires a barrel row every 4.2 s and a walker pack
+every other row, forever, at three fixed lanes. Everything those rows contain is
+now authored — hit points derive from the weapon model, gate rows are shaped,
+the camera steps back to hold it all — but **when they arrive is not**. At high
+troop counts barrel rows and gate rows overlap in depth, which is legible but
+plainly unauthored.
 
-Measured, live rounds on screen:
+This is the largest remaining piece of decision-free work.
 
-| | ours | reference |
-|---|---|---|
-| 1 troop, tier 0 | 2 | 1–3 (`frame_000`) ✓ |
-| 50 troops, tier 1 | 175 | 3–6 (`frame_030`) ✗ |
-| 50 troops, tier 2 | 161 | "dozens" (`frame_035`) ≈ |
+### 2. Decide the camera ANGLE — still blocks accurate calibration
 
-Tier 0 matches and tier 2 is close enough to read right. **Tier 1 is out by
-thirty times**, and lowering the fire rate cannot close it. To put 5 rounds on
-screen at 50 troops the squad must fire ~10 shots/second in total. Spread over
-50 one-per-soldier streams that is a round every five seconds each, which at
-44 m/s puts 220 m between rounds in a stream — ten times the 22 m they survive.
-Every stream would be empty almost all the time and the "one countable column
-per soldier" look, which `frame_030` is the evidence for, would be gone.
-
-The two readings of the reference in our own docs cannot both be true:
-`REFERENCE.md` says tier 1 is "3–6 orange tracers, **fired from the front rank
-only**", while `bullets.ts` reads `frame_030` as "one column per soldier". Fifty
-shooters cannot produce six rounds. **The reference is firing from its front
-rank — about 11 men on an 11-wide road — at roughly 1 shot/soldier/second.**
-That is 11 shots/second and ~5 rounds live, which is exactly what the footage
-shows.
-
-**Why it needs Mischa:** it changes what growing your army *means*. Today damage
-is linear in troop count — twice the soldiers, twice the damage. Front-rank fire
-makes it grow with the *width* of the blob instead, so doubling the army adds
-about 40%. That is a game-design call about the power curve, not an
-implementation detail.
-
-Put it to him in his terms: *"When your army gets big, should every soldier
-visibly fire — a wall of bullets — or just the front row, like the reference,
-where you can still count the tracers? The front row also means a bigger army
-adds less extra firepower."*
-
-**It is now cheap either way.** Barrel hit points derive from the weapon model
-(below), so the whole difficulty curve re-scales itself. The change is
-`sampleShooters` in `entities/squad.ts` plus `tier1RatePerShooter`; nothing else
-needs re-tuning by hand.
-
-### 2. Decide the camera angle — still blocks accurate calibration
-
-Unchanged from last session, still undecided, still needs Mischa.
+Unchanged, still undecided, still needs Mischa. Note this is the camera's
+ANGLE, which is separate from the stepped zoom added this session — the zoom
+dollies along the existing view axis precisely so it does not touch the angle
+or any of the bases baked from it.
 
 **The reference camera sits ~43° above the horizon. Ours sits at 22°**
 (`src/core/renderer.ts`, `CAMERA_POS`/`CAMERA_LOOK`). We *compensate* inside
@@ -84,31 +53,26 @@ their camera and re-applied through ours.
 against the current framing. Changing the camera invalidates all of it and needs
 a re-measure pass per module. Treat it as its own milestone, not a one-line edit.
 
-### 3. The squad splits at ~60 in the reference; we cannot express it
+### 3. The squad splits at ~60 in the reference; we still cannot express it
 
 The road fits ~11 units abreast, so a single blob caps out near 70 troops. The
 reference does not solve this by deepening — **it splits into two groups at ~60**,
 which is what the second health bar in `frame_035` is.
 
-Our curve diverges at **~43 troops**, where `RADIUS_Z_MAX` binds and the
-silhouette stops being wider than deep. Past 60 we are a column (55% of units
-visible at 60, 37% at 100). It also collapses steering range as the army grows —
-±2.58 m at 1 troop, ±0.72 m at 20, ±0.50 m at 50+.
+**The steering half of this is fixed** — the centre now travels the full road at
+every size, and a crowd wider than the road simply overhangs it, which is what
+`reference-clip-1a.mov` shows. What remains is that one blob past ~120 troops
+can only get deeper, and deep is the axis this camera reads worst.
 
-**Contract change required:** `squadLane` and `health` in `src/core/types.ts`
-become per-group. **Product question for Mischa:** does one input steer both
-groups together, or select between them? Recovering steering range means the
-split, not a looser containment clamp — do not loosen the clamp.
+**Contract change required if it is ever wanted:** `squadLane` and `health` in
+`src/core/types.ts` become per-group. **Product question for Mischa:** does one
+input steer both groups together, or select between them?
 
-### 4. Content pacing is still a fixed metronome
+Worth saying plainly: the stepped camera zoom may have made this unnecessary.
+461 troops now fit on screen as one crowd. Do not build the split until
+something actually fails without it.
 
-`spawnRow()` in `main.ts` fires a barrel row every 4.2 s and a walker pack every
-other row, forever. Barrel *hit points* are now authored and derived; **when
-they arrive is not.** A late-run frame has barrel rows and gate rows overlapping
-in depth, which is legible but plainly unauthored. This is the next piece of
-straightforward, decision-free work if the questions above are still open.
-
-### 5. Nothing from the RPG layer exists yet
+### 4. Nothing from the RPG layer exists yet
 
 The brief's actual differentiator is untouched: commander skills on cooldowns,
 tactical airstrikes, unit evolution trees, formations, the progression shop, and
@@ -124,14 +88,15 @@ against the `WorldState`/`System` contract without a single interface change.
 
 | Module | State |
 |---|---|
-| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Contained to the road at every count. |
-| `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, convergent fire, three weapon tiers, pooled at 768. Exports the derived damage model. |
+| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. |
+| `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, three weapon tiers, pooled at 768. Fires a **parallel curtain** — convergence is off. Exports the derived damage model. |
 | `mechanics/gates.ts` | Segmented red/blue barriers, heavy outlined numerals, the climbing blue reward, burst on pass. Row composition is a pure exported function. |
-| `mechanics/pacing.ts` | Barrel hit points and payouts. Pure arithmetic, no three.js, fully tested. |
+| `mechanics/pacing.ts` | Barrel hit points, payouts, and the lane-coverage model. Pure arithmetic, no three.js, fully tested. |
 | `entities/barrels.ts` | Numbered destructible cover that counts down under fire, chunky plank debris, riders that drop when it dies. |
 | `entities/enemies.ts` | Instanced walkers, gold rim-lit elites, motorcycle variant, HP bars. |
-| `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit `+1` popups with screen-space separation, orbiting cyan swirl. |
+| `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
+| `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis. Scales the squad depth cap and the fog with it. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
 
 ---
@@ -141,13 +106,20 @@ against the `WorldState`/`System` contract without a single interface change.
 **Barrel hit points are derived, not fitted.** This is the change most likely to
 be undone by accident, so it is worth understanding before touching a fire rate.
 
-`damagePerPass(tier, troops, tuning)` in `mechanics/bullets.ts` predicts what a
-barrel standing in the squad's lane loses over one full approach. It is
+`damagePerPass(tier, troops, tuning)` in `mechanics/bullets.ts` is the army's
+TOTAL output over one barrel-approach, wherever it lands. It is
 `shots/second × damage/bullet × 4.25`, and that 4.25 is **measured, not
 derived** — damage divided by the shot rate that produced it is flat at 4.25
 seconds across every tier and every count from 1 to 1200, to within 4%. It was
 then confirmed predictively: after tier 2 was re-tuned it called the new numbers
 to under 1% before they were measured.
+
+`laneCoverage(halfWidth)` is the second half, and it exists because the fire
+stopped converging: a barrel intercepts only the share of a curtain that can be
+over 5 m wide, so total output and where it lands are modelled separately. Keep
+them separate — folding them together lets an error in one hide inside the
+other. Measured against the probe: 0.69 at 20 troops (model 0.73), 0.57 at 120
+(model 0.51).
 
 `barrelHp()` in `mechanics/pacing.ts` takes the **lower** of an authored ladder
 (`4 × row^1.5`, capped at 250 so the numeral stays readable) and 55% of that
@@ -216,6 +188,24 @@ through a rigid-body solver on a mobile browser is a performance trap. Rapier
 goes in when there are *tens* of bodies worth solving — destructible fortress
 debris, boss rigid bodies. Not before. See `specs/tech-stack.md`.
 
+**The "bullet density gap" is closed, and it was a reference problem.** An
+earlier session read `frame_030` of Part1.mov as "3–6 tracers at ~50 soldiers"
+and concluded our ~175 was 30x too dense, which would have needed a front-rank
+firing model and a rewrite of how damage scales with army size.
+`reference-media/reference-clip-1a.mov` shows ~15 dense parallel columns at a
+much larger army. Our model was closer to right than the note claimed. **Do not
+reintroduce a front-rank shooter model on the strength of that old note.**
+
+**Fire travels as a parallel curtain; `convergeDistance` is 0.** Convergence
+focused all fire onto the squad's axis, which made "every column registers on
+whatever it crosses" impossible. It is kept in the code as the right model for a
+focused-fire powerup, and nothing else should switch it on by default.
+
+**The crowd may leave the road.** "No unit stands on the grass" was an invariant
+derived from the kerb; the newer reference overhangs the screen edge routinely.
+Steering moves the CENTRE across the full road half-width and the overhang is
+allowed. Do not reintroduce a containment clamp to "fix" it.
+
 **Damage is 1 per bullet except for tier 2 darts, which are 2.** The 1:1 rule
 existed so "bullets fired" and "damage dealt" were the same number, which is
 genuinely useful while debugging. It was given up for tier 2 on purpose: halving
@@ -246,15 +236,13 @@ ships, pinned by postcss. Revisit when postcss bumps.
 
 ## Open questions for Mischa
 
-1. **Does every soldier shoot, or only the front rank?** (#1 above — the one
-   that is actually blocking.)
-2. **Camera angle** — match the reference's 43°, or keep compensating? (#2)
-3. **Squad split** — one input steering both groups, or selecting between them? (#3)
-4. **Is there a hero avatar?** The reference has none — the squad *is* the
+1. **Camera angle** — match the reference's 43°, or keep compensating? (#2)
+2. **Squad split** — one input steering both groups, or selecting between them? (#3)
+3. **Is there a hero avatar?** The reference has none — the squad *is* the
    player — but the brief specs a named Commander with a skill tree.
    `entities/commander.ts` exists and is deliberately **not mounted**.
-5. **Do troops persist between runs**, or reset with only upgrades carrying over?
-6. **Is the corridor always a bridge**, or does the environment vary by stage?
+4. **Do troops persist between runs**, or reset with only upgrades carrying over?
+5. **Is the corridor always a bridge**, or does the environment vary by stage?
    Current environment is placeholder grass and sky, not the reference's bridge.
 
 ---
@@ -279,3 +267,9 @@ ships, pinned by postcss. Revisit when postcss bumps.
 - **Environment art is placeholder.** Grass and blue sky, not a bridge over water.
 - **No favicon**, so every page load logs a 404 in the console. Harmless, but it
   is the one console error a verification pass will see.
+- **The reference media is 25 MB in the repo** (`reference-media/`), a 20 MB
+  HEVC clip plus 33 extracted frames. Mischa asked for it in the repo. Note the
+  repo is public.
+- **`tools/extract-frames.swift` is macOS-only.** On Linux use ffmpeg; the
+  Playwright-bundled build is a webm-only stub and cannot read the .mov, so
+  `apt-get install ffmpeg` first.
