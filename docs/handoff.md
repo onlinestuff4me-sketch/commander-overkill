@@ -34,9 +34,10 @@ troop counts barrel rows and gate rows overlap in depth, which is legible but
 plainly unauthored.
 
 This is the largest remaining piece of decision-free work, and there is a
-written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Steps 1
-and 2 there need no decisions; step 3 waits on Mischa answering how long a run
-should be, how big the army should get, and how often a run should fail.
+written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Nothing
+in it is blocked: Mischa has answered the three questions it asked. A run is
+**90 s to 2 min**, a strong run ends at **300–500 troops**, and **~1 in 3 runs
+should fail**. Those are the targets the curve is built against.
 
 The specific defect to fix first: **gates and barrels are two independent
 spawners that both drop content at z = −58**, one every 16 m and one every
