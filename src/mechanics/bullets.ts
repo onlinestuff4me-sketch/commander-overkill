@@ -303,7 +303,14 @@ function defaultTuning(): BulletTuning {
     // shows 1-3), at tier 2 ~6.5 darts spaced 3.4 m apart.
     tier0RatePerShooter: 5,
     tier1RatePerShooter: 7,
-    tier2RatePerShooter: 10,
+    // HALVED, and `dartDamage` doubled to match, so the firehose is the same
+    // weapon with half as much of it in the air. Measured: 310 darts live at 50
+    // troops became 161, and 541 at 120 became 361, while damage per pass did
+    // not drop — it rose slightly, because a lower nominal rate sits further
+    // under the governor's soft clip and loses less to it. The gap inside one
+    // stream goes 3.4 m → 6.8 m, still three darts to a stream over the 22 m
+    // range, so it keeps reading as a stream rather than as countable rounds.
+    tier2RatePerShooter: 5,
 
     maxLiveBullets: 620,
     saturationKnee: 3,
@@ -353,7 +360,17 @@ function defaultTuning(): BulletTuning {
     brightness: 1,
 
     tracerDamage: 1,
-    dartDamage: 1,
+    /**
+     * TWO, not one. Damage is otherwise 1 per round across the board so that
+     * "bullets fired" and "damage dealt" are the same number — a genuinely
+     * useful property while debugging. It is given up here on purpose: cutting
+     * the tier 2 rate to halve the on-screen density would otherwise halve the
+     * firehose's damage and make the upgrade a downgrade, and damage is the one
+     * lever that changes the numbers without changing the picture. Barrel hit
+     * points read this through `damagePerPass`, so nothing needs re-tuning by
+     * hand when it moves.
+     */
+    dartDamage: 2,
   };
 }
 
@@ -1390,7 +1407,7 @@ class Bullets implements BulletSystem, BulletView {
  * same on-screen population — which is correct, and is why this is computed per
  * tier rather than hard-coded.
  */
-function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning): number {
+export function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning): number {
   const n = Math.max(0, Math.floor(troops));
   if (n === 0) return 0;
 
@@ -1405,6 +1422,49 @@ function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning):
 
   const k = Math.max(0.5, t.saturationKnee);
   return desired / Math.pow(1 + Math.pow(desired / max, k), 1 / k);
+}
+
+/**
+ * Rounds in the air at once, at steady state. `live ≈ rate × flightTime` — the
+ * governor's own identity, read back out. This is the number to compare against
+ * a reference frame when asking "is our fire too dense?".
+ */
+export function liveBullets(tier: WeaponTier, troops: number, t: BulletTuning): number {
+  const speed = tier === 2 ? t.dartSpeed : t.tracerSpeed;
+  return totalShotsPerSecond(tier, troops, t) * (t.range / Math.max(1e-3, speed));
+}
+
+/**
+ * Seconds of on-target fire a single barrel absorbs over one full approach.
+ *
+ * A barrel is on screen for ~10 s but only shootable for the last stretch, and
+ * the exact figure moves with the blob's depth (the muzzle line rides its front
+ * edge) and with how much of the cone the barrel's 1.7 m face intercepts.
+ * MEASURED, not derived: `__overkill.damageCurve()` in a real browser, damage
+ * divided by the shot rate that produced it —
+ *
+ *     tier 0    1,2,3 troops        4.40, 4.30, 4.33
+ *     tier 1    5..30 troops        4.40, 4.21, 4.18, 4.14, 4.10
+ *     tier 2    50,80,120 troops    4.29, 4.30, 4.29
+ *
+ * Flat to ±4% across every tier and every count, which is why one constant is
+ * honest here. Re-measure it if the scroll speed, the bullet range or the
+ * convergence distance move — all three feed it.
+ */
+export const EFFECTIVE_PASS_SECONDS = 4.25;
+
+/**
+ * Damage one barrel standing in the squad's lane takes on one full approach.
+ *
+ * This exists so barrel hit points can be DERIVED from the weapon model instead
+ * of hand-fitted to it. Hand-fitted numbers were the standing problem: every
+ * change to a fire rate silently invalidated the HP curve, so the two had to be
+ * retuned together and in practice neither was. Route HP through here and a
+ * rate change carries itself.
+ */
+export function damagePerPass(tier: WeaponTier, troops: number, t: BulletTuning): number {
+  const perBullet = tier === 2 ? t.dartDamage : t.tracerDamage;
+  return totalShotsPerSecond(tier, troops, t) * perBullet * EFFECTIVE_PASS_SECONDS;
 }
 
 function clamp01(v: number): number {

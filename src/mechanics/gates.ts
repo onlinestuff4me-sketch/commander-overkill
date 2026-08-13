@@ -121,6 +121,25 @@ const BURST_LIFE = 1.6;
 
 /** Auto-spawn: chance a row contains a blue segment at all (frame_018 has none). */
 const REWARD_ROW_CHANCE = 0.72;
+
+/**
+ * THE OPENING IS AUTHORED, NOT ROLLED.
+ *
+ * Below this many troops every auto row is guaranteed a blue segment, and the
+ * penalties stay in the mildest pool no matter how long the run has been going.
+ *
+ * The reference opens on a SINGLE soldier, and it gets away with that because
+ * its first rows always offer somewhere survivable to stand. Ours rolled every
+ * row independently at `REWARD_ROW_CHANCE`, so roughly one in four was all-red —
+ * unavoidable death for a small squad, and the reason the prototype had to open
+ * at eight troops instead of one. Guaranteeing the option is what buys the
+ * reference's opening beat back.
+ *
+ * This is a floor on survivability, not on difficulty: crossing a red segment
+ * still costs, the blue still has to be steered to, and the guarantee lapses the
+ * moment the squad is big enough to eat a bad row.
+ */
+export const MERCY_TROOPS = 10;
 /** Penalties escalate every 25s of run time. Index = difficulty tier. */
 const PENALTY_POOLS: readonly (readonly number[])[] = [
   [-1, -1, -2, -3, -4, -5],
@@ -175,6 +194,51 @@ export interface GateOptions {
   autoSpawn?: boolean;
   /** Seed for spawn variety and burst jitter. Fixed by default — runs must repeat. */
   seed?: number;
+}
+
+/**
+ * The segment values for one procedurally-shaped row, written into `out`.
+ *
+ * Pure, exported and free of three.js on purpose: this is the whole of the
+ * game's difficulty pacing, and it is the one part of the gate module that can
+ * be checked without a GPU. `out` is a caller-owned scratch array so the live
+ * path allocates nothing; its length is set to the segment count.
+ *
+ * Penalty magnitude escalates in tiers with run time, and roughly one row in
+ * four carries no reward at all — which is what makes an all-red row
+ * (`frame_018`) land as a genuine "pick your loss" moment rather than as a bug.
+ * Below `MERCY_TROOPS` neither of those applies; see the note there.
+ */
+export function composeAutoRow(
+  rng: () => number,
+  elapsed: number,
+  troops: number,
+  out: number[],
+): number {
+  // A squad this small cannot absorb a wrong answer, so it is not asked one:
+  // the penalties stay mild and a blue segment is always on the board.
+  const mercy = troops < MERCY_TROOPS;
+  const tier = mercy ? 0 : Math.min(PENALTY_POOLS.length - 1, Math.floor(elapsed / 25));
+  const pool = PENALTY_POOLS[tier] ?? PENALTY_POOLS[0]!;
+
+  const shape = rng();
+  const count = shape < 0.18 ? 2 : shape < 0.86 ? 3 : 4;
+  // Both draws happen unconditionally so the seeded stream advances by the same
+  // amount either way — mercy forces the OUTCOME without shifting the sequence,
+  // which is what keeps a seeded run reproducible across the threshold. Rolling
+  // only when needed would desync every row after the squad crossed it.
+  const rolled = rng() < REWARD_ROW_CHANCE;
+  const pick = Math.floor(rng() * count);
+  const rewardAt = rolled || mercy ? pick : -1;
+
+  for (let i = 0; i < count; i++) {
+    out[i] =
+      i === rewardAt
+        ? (REWARD_STARTS[Math.floor(rng() * REWARD_STARTS.length)] ?? 2)
+        : (pool[Math.floor(rng() * pool.length)] ?? -1);
+  }
+  out.length = count;
+  return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,28 +661,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
   // Reused every spawn so auto-pacing never allocates inside update().
   const autoBuffer: number[] = [0, 0, 0, 0];
 
-  /**
-   * One procedurally-shaped row. Penalty magnitude escalates in tiers with run
-   * time; roughly one row in four carries no reward at all, which is what makes
-   * an all-red row (frame_018) land as a genuine "pick your loss" moment rather
-   * than a bug.
-   */
-  function autoRow(elapsed: number, z: number): void {
-    const tier = Math.min(PENALTY_POOLS.length - 1, Math.floor(elapsed / 25));
-    const pool = PENALTY_POOLS[tier] ?? PENALTY_POOLS[0];
-    if (!pool) return;
-
-    const shape = rng();
-    const count = shape < 0.18 ? 2 : shape < 0.86 ? 3 : 4;
-    const rewardAt = rng() < REWARD_ROW_CHANCE ? Math.floor(rng() * count) : -1;
-
-    for (let i = 0; i < count; i++) {
-      autoBuffer[i] =
-        i === rewardAt
-          ? (REWARD_STARTS[Math.floor(rng() * REWARD_STARTS.length)] ?? 2)
-          : (pool[Math.floor(rng() * pool.length)] ?? -1);
-    }
-    autoBuffer.length = count;
+  function autoRow(elapsed: number, z: number, troops: number): void {
+    composeAutoRow(rng, elapsed, troops, autoBuffer);
     spawnRow(autoBuffer, z);
   }
 
@@ -632,14 +676,15 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         primed = true;
         // Open with the corridor already stacked, the way frame_000 does — the
         // first decision should never be the only thing on screen.
-        for (let i = 0; i < PRIME_ROWS; i++) autoRow(world.elapsed, SPAWN_Z + i * ROW_GAP);
+        for (let i = 0; i < PRIME_ROWS; i++)
+          autoRow(world.elapsed, SPAWN_Z + i * ROW_GAP, world.troops);
       }
 
       if (autoSpawn) {
         spawnCarry += speed * dt;
         if (spawnCarry >= ROW_GAP) {
           spawnCarry -= ROW_GAP;
-          autoRow(world.elapsed, SPAWN_Z);
+          autoRow(world.elapsed, SPAWN_Z, world.troops);
         }
       }
 
