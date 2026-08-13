@@ -15,11 +15,27 @@
  *   swirl.render(alpha, world);           // once per frame
  *   swirl.dispose();
  *
- * One additive draw call for the whole effect. Ribbons and light shafts are the
- * same primitive — a polyline widened into a camera-facing strip in the vertex
+ * One draw call for the whole effect. Ribbons and light shafts are the same
+ * primitive — a polyline widened into a camera-facing strip in the vertex
  * shader — so they share one geometry, one material and one buffer upload.
  * Nothing allocates after construction; `play` only rerolls numbers already in
  * the pool.
+ *
+ * TWO THINGS HERE ARE COUNTER-INTUITIVE AND BOTH ARE SCARS:
+ *
+ * 1. The orbit planes are kept NEAR-HORIZONTAL. A steeply tilted orbit is
+ *    geometrically a fine circle and visually a straight line: this camera sits
+ *    22° above a blob 13m away, so a plane rolled 60°+ off horizontal projects
+ *    to a sliver ~5:1 elongated, and any arc you cut out of it reads as a
+ *    laser beam slashing across the crowd. Curvature you cannot see is not
+ *    curvature. See ARC PROJECTION below for the arithmetic.
+ *
+ * 2. The blending is SCREEN, not additive. Additive over the reference's pale
+ *    grey road (~0xb9bcc1) clips every channel to 1.0 and the ribbons come out
+ *    white — the one colour they must not be. Screen (`src + dst*(1-src)`)
+ *    cannot exceed 1 and a low-red source therefore *holds red down* while
+ *    green and blue climb, which is what keeps the ribbons cyan on a light
+ *    background. Over black the two blends are identical, so nothing is lost.
  */
 
 import * as THREE from "three";
@@ -34,8 +50,14 @@ const ARC_COUNT = 8;
  * `frame_023`, one per few units. Set to 0 for ribbons only.
  */
 const MOTE_COUNT = 12;
-/** Points along each strip. 18 keeps a 200° arc smooth at phone resolution. */
-const POINTS = 18;
+/**
+ * Points along each strip. A ribbon now spans up to 280°, and 18 points across
+ * that is a 16° step: on the widest ring that is a chain of chords deviating
+ * ~4px from the true curve, which is half of why the first pass read as "hard
+ * lines". 44 holds the deviation near a pixel even on the largest ring, at
+ * which point the polyline is a curve as far as the eye is concerned.
+ */
+const POINTS = 44;
 
 /** Seconds the swirl lasts. Deliberately longer than a floater's ~1.0s so the
  *  energy outlives the numbers and the beat has a tail. */
@@ -45,40 +67,115 @@ const FADE_IN = 0.1;
 /** Fraction of DURATION spent at full brightness before the fade begins. */
 const FADE_FROM = 0.42;
 
+/**
+ * ARC PROJECTION — why the tilt range is small, in numbers.
+ *
+ * The camera sits at (0, 7.5, 9.5) looking at (0, 0, -9), so a world offset
+ * near the squad lands on screen at roughly
+ *
+ *     screen-x ∝ dx                      screen-y ∝ 0.93·dy − 0.38·dz
+ *
+ * Depth is foreshortened to about 40% and height is nearly 1:1. Take a ring of
+ * radius R whose plane is rolled `T` off horizontal. Its screen ellipse has a
+ * horizontal semi-axis of R and a vertical semi-axis of
+ *
+ *     R · SQUASH · (0.93·sin T + 0.38·cos T)
+ *
+ * At T = 1.2 rad (the old TILT_MAX) the *horizontal* axis collapses instead —
+ * the plane is edge-on — and the ellipse degenerates to about 5:1, i.e. a
+ * straight diagonal stripe. At T ≈ 0.2–0.6 rad the ratio lands between 2.7:1
+ * and 1.6:1, which is a shape the eye reads as a hoop seen from above. That is
+ * the whole fix for "the arcs look like chords".
+ */
+
 /** Orbit radius as a fraction of the blob radius, start and end. The flare
- *  outward is what makes the swirl feel like it is releasing something. */
-const RADIUS_IN = 0.55;
-const RADIUS_OUT = 1.18;
-/** Metres the orbit climbs over its life. Turns a ring into a vortex. */
-const LIFT_MIN = 0.25;
-const LIFT_MAX = 0.7;
-/** Orbit plane tilt off horizontal, radians. The spread is what puts some arcs
- *  edge-on down the left of the blob and others flat across the bottom. */
-const TILT_MIN = 0.15;
-const TILT_MAX = 1.2;
-/** Orbit ellipse squash, matching a blob that is wider than it is deep. */
-const SQUASH = 0.72;
-/** Radians/second the arcs sweep, ±. Roughly half a turn per effect. */
-const SPIN_MIN = 1.6;
-const SPIN_MAX = 3.4;
-/** Arc length, radians. ~110°–210°, as measured off the reference. */
-const SPAN_MIN = 1.9;
-const SPAN_MAX = 3.6;
+ *  outward is what makes the swirl feel like it is releasing something.
+ *  RADIUS_OUT > 1 so the ring's flanks clear the blob's edge and stay visible
+ *  even while its far side is buried in the crowd. */
+const RADIUS_IN = 0.72;
+const RADIUS_OUT = 1.22;
+/** Per-arc radius multiplier. Without this all eight arcs share one radius and
+ *  the swirl reads as a single fat ring instead of nested crescents. */
+const RSCALE_MIN = 0.78;
+const RSCALE_MAX = 1.24;
+/** Metres the orbit climbs over its life. Turns a ring into a vortex. Kept
+ *  small: a ring that climbs clear of the crowd stops being occluded by it,
+ *  and the occlusion IS the orbit cue. */
+const LIFT_MIN = 0.08;
+const LIFT_MAX = 0.42;
+/** Per-arc height offset off ARC_HEIGHT, metres. Stacks the ribbons through
+ *  the crowd's own vertical extent rather than all at one waistline. */
+const Y0_MIN = -0.3;
+const Y0_MAX = 0.6;
+/**
+ * Orbit plane tilt off horizontal, radians (~10°–36°), and ALWAYS POSITIVE.
+ *
+ * The sign is not cosmetic. The screen ellipse's vertical semi-axis is
+ * proportional to `0.93·sin T + 0.38·cos T`: at positive T the tilt term and
+ * the depth-foreshortening term ADD and the hoop opens up, and at negative T
+ * they SUBTRACT and cancel exactly at T ≈ −0.4 rad — a ring rolled backwards
+ * by ~23° contains the view direction and projects to a literal straight line.
+ * That degenerate band sits right in the middle of the range this file wants,
+ * so "randomise the sign for variety" is a trap. Variety comes from YAW_MAX.
+ *
+ * Past ~0.8 rad the ellipse degenerates the other way, edge-on, which is what
+ * the first pass (TILT_MAX = 1.2) was doing.
+ */
+const TILT_MIN = 0.18;
+const TILT_MAX = 0.62;
+/** Yaw of the ring's wide axis off "across the road", radians. Bounded so the
+ *  long axis never swings down-road, where perspective would foreshorten it
+ *  into a sliver — the same degeneracy as a steep tilt, by another route. */
+const YAW_MAX = 0.55;
+/** Orbit ellipse squash along the depth axis, matching a blob that is wider
+ *  than it is deep (squad DEPTH_RATIO is 0.556). Raised from 0.72 because the
+ *  camera already foreshortens depth to ~40%: squashing hard in world space on
+ *  top of that is what flattened the screen ellipse. */
+const SQUASH = 0.74;
+/** Radians/second the arcs sweep. About a third of a turn per effect — slower
+ *  than the first pass, because a fast sweep on a long arc smears. */
+const SPIN_MIN = 0.9;
+const SPIN_MAX = 2.0;
+/**
+ * Arc length, radians (~189°–281°). Deliberately > π: a span of at least half
+ * a turn GUARANTEES the ribbon covers both the near and the far side of the
+ * ring, so a meaningful stretch of every arc is behind the crowd and gets
+ * depth-clipped by it. Short arcs could sit entirely in front, which is what
+ * made the first pass read as decals painted over the blob.
+ */
+const SPAN_MIN = 3.3;
+const SPAN_MAX = 4.9;
 
 /** Ribbon half-width as a fraction of blob radius, with a floor so a small
  *  squad's swirl is still a visible line rather than a subpixel shimmer. */
-const ARC_WIDTH_FRAC = 0.023;
-const ARC_WIDTH_MIN = 0.035;
-const MOTE_WIDTH_FRAC = 0.015;
-const MOTE_WIDTH_MIN = 0.022;
+const ARC_WIDTH_FRAC = 0.035;
+const ARC_WIDTH_MIN = 0.05;
 
-/** Height of the orbit centre above the squad's ground position. */
-const ARC_HEIGHT = 0.8;
+/** Height of the orbit centre above the squad's ground position. Chest height
+ *  on a ~1.35m unit, so the ring threads the crowd instead of hovering over
+ *  it. */
+const ARC_HEIGHT = 0.62;
 /** Blob footprint is wider than deep; shafts spawn inside that ellipse. */
 const FOOTPRINT_DEPTH = 0.62;
-/** Shaft length and climb, as fractions of blob radius. */
-const MOTE_LEN = 0.3;
-const MOTE_RISE = 0.9;
+/**
+ * Shaft length, climb and thickness — ABSOLUTE METRES, not fractions of the
+ * blob radius.
+ *
+ * This is the bug that produced the "oversized white glyph" report. These three
+ * were fractions of `radius`, but `radius` is the blob's HALF-WIDTH: it grows
+ * with troop count (0.368·√n, up to 2.9m) while the thing the shafts actually
+ * rise through — a soldier — is 1.35m tall no matter how many of them there
+ * are. Scaling a vertical quantity by a horizontal one meant that at ~50 troops
+ * (radius ≈ 2.5) a shaft was 0.75m long and climbed to 2.2m, i.e. a bright bar
+ * roughly three times the height of a "+1" glyph's ink, sitting at exactly HP
+ * bar height on either side of the blob centre. Blown to flat white by the old
+ * additive core, that is indistinguishable from a clipped, oversized "1".
+ */
+const MOTE_LEN_MIN = 0.28;
+const MOTE_LEN_MAX = 0.5;
+const MOTE_RISE_MIN = 0.75;
+const MOTE_RISE_MAX = 1.35;
+const MOTE_WIDTH = 0.028;
 const MOTE_LIFE_MIN = 0.45;
 const MOTE_LIFE_MAX = 0.8;
 /** Shafts are staggered so they read as many small events, not one flash. */
@@ -91,11 +188,33 @@ const FOLLOW = 6;
 
 const DEFAULT_RADIUS = 1.8;
 
-/** Body colour. Sampled between the periwinkle ribbon glow and the cyan-white
- *  shaft cores in `frame_023`; the hot core is added in the shader. */
-const COLOR = 0x86c9ff;
-/** Overall additive gain. The one knob to turn if the swirl blows out. */
-const INTENSITY = 1.15;
+/**
+ * Body colour — SATURATED cyan, and the red channel is the load-bearing part.
+ *
+ * The road this draws over is a pale grey around 0xb9bcc1, i.e. ~0.73 in every
+ * channel. Any blend that only ever *adds* pushes all three channels toward
+ * 1.0 together, and three equal channels is white by definition — which is how
+ * 0x86c9ff (red already at 0.53) came out as white laser lines. Holding red at
+ * 0.12 means the road's red barely moves while green and blue saturate, and
+ * the difference between them is the cyan the eye actually reads.
+ *
+ * Verified against a mid-grey background, not against black: on black almost
+ * any blue survives, which is why the first pass looked correct in isolation.
+ */
+const COLOR = 0x1fb6ff;
+/**
+ * Hot filament colour. Icy, NOT white — a pure-white core over a bright road
+ * screens to pure white and takes the hue of the whole ribbon with it. Its red
+ * is the lowest number in this file for a reason: screening over a 0.73 grey
+ * road can only shift a channel by (1 − 0.73), so the *entire* colour budget
+ * available is 27% saturation, and it is spent by holding red down.
+ */
+const CORE_COLOR = 0x17eaff;
+/** Overall gain. The one knob to turn if the swirl looks weak or blown out.
+ *  Above 1 on purpose: under screen blending, driving green and blue to
+ *  saturation while red is pinned low is what BUYS the cyan, where under the
+ *  old additive blend the same move bought white. */
+const INTENSITY = 1.35;
 
 const TAU = Math.PI * 2;
 
@@ -128,19 +247,25 @@ void main() {
 
 const FRAG = `
 uniform vec3 uColor;
+uniform vec3 uCore;
 uniform float uIntensity;
 varying float vSide;
 varying float vAlpha;
 void main() {
   // Falloff across the strip, done analytically so the effect needs no
-  // texture: a soft body with a hot near-white filament down the middle.
+  // texture: a soft body with a hot filament down the middle. The body
+  // exponent is 1.6 rather than 2.0 so the cyan skirt is wide enough to be
+  // seen at all — at e^2 essentially only the core survives, and a ribbon
+  // whose only visible part is its hot core is a white line.
   float e = 1.0 - abs(vSide);
-  float body = e * e;
-  float core = pow(e, 8.0);
-  vec3 col = mix(uColor, vec3(1.0), core);
-  // Additive blending is (SRC_ALPHA, ONE) in three, so everything has to live
-  // in rgb and alpha stays at 1.
-  gl_FragColor = vec4(col * ((body * 0.75 + core) * vAlpha * uIntensity), 1.0);
+  float body = pow(e, 1.6);
+  float core = pow(e, 5.0);
+  vec3 col = mix(uColor, uCore, core);
+  float gain = (body * 0.9 + core * 0.5) * vAlpha * uIntensity;
+  // Screen blending is (ONE, ONE_MINUS_SRC_COLOR), so the source must be
+  // clamped into [0,1] to mean anything: a channel over 1 does not "add more",
+  // it just pins that channel to white and destroys the hue.
+  gl_FragColor = vec4(clamp(col * gain, 0.0, 1.0), 1.0);
 }
 `;
 
@@ -158,7 +283,13 @@ export interface GrowthFxSystem extends System {
   dispose(): void;
 }
 
-/** One orbiting ribbon: an arc of a tilted, squashed circle around the blob. */
+/**
+ * One orbiting ribbon: an arc of a tilted, squashed circle around the blob.
+ * `u` is the ring's wide axis (unit length, roughly across the road) and `v`
+ * its depth axis with SQUASH already baked into its LENGTH — so `render` never
+ * applies the squash a second time, which is the sort of thing that silently
+ * flattens an ellipse into a line.
+ */
 interface Arc {
   readonly u: THREE.Vector3;
   readonly v: THREE.Vector3;
@@ -166,6 +297,10 @@ interface Arc {
   spin: number;
   span: number;
   lift: number;
+  /** Per-arc radius multiplier, so the eight ribbons nest instead of stacking. */
+  rscale: number;
+  /** Per-arc height offset off ARC_HEIGHT. */
+  y0: number;
 }
 
 /** One rising light shaft inside the blob. */
@@ -198,8 +333,6 @@ function randRange(lo: number, hi: number): number {
 function smoothstep(u: number): number {
   return u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
 }
-
-const _normal = new THREE.Vector3();
 
 // ------------------------------------------------------------------- system
 
@@ -243,6 +376,8 @@ class GrowthFx implements GrowthFxSystem {
         spin: 0,
         span: SPAN_MIN,
         lift: 0,
+        rscale: 1,
+        y0: 0,
       });
     }
     for (let i = 0; i < MOTE_COUNT; i++) {
@@ -317,12 +452,25 @@ class GrowthFx implements GrowthFxSystem {
     this.#mat = new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: new THREE.Color(COLOR) },
+        uCore: { value: new THREE.Color(CORE_COLOR) },
         uIntensity: { value: INTENSITY },
       },
       vertexShader: VERT,
       fragmentShader: FRAG,
       transparent: true,
-      blending: THREE.AdditiveBlending,
+      // SCREEN, not additive: dst' = src + dst·(1 − src). Identical to additive
+      // over black, but it cannot exceed 1, so a low-red source keeps red near
+      // the background's value while green and blue saturate — the ribbon stays
+      // cyan on the pale road instead of clipping to white. Alpha is left alone
+      // (Zero/One) because the swirl has no business writing the framebuffer's
+      // alpha channel.
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcColorFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
       depthWrite: false,
       // Depth-tested on purpose: the arcs passing BEHIND the near units is the
       // cue that sells "orbiting the mass" rather than "drawn on top of it".
@@ -352,22 +500,39 @@ class GrowthFx implements GrowthFxSystem {
     this.#playing = true;
     this.#mesh.visible = true;
 
+    // One sweep direction for the whole burst. Counter-rotating ribbons read as
+    // debris; a shared direction reads as a vortex, which is the note.
+    const dir = rand() < 0.5 ? -1 : 1;
+
     for (const a of this.#arcs) {
+      // Build the ring in the ground plane — wide axis across the road, depth
+      // axis squashed — then roll it by `tilt` about that wide axis and yaw the
+      // whole thing a little. Constructing it this way is what guarantees the
+      // ring stays wider than it is deep no matter which angles come up; the
+      // previous version picked an arbitrary azimuth first, which let the wide
+      // axis point straight down the road where perspective erased it.
+      // Tilt sign is fixed positive on purpose — see TILT_MIN/TILT_MAX.
       const tilt = randRange(TILT_MIN, TILT_MAX);
-      const az = rand() * TAU;
-      // u is horizontal and v carries the tilt, so the orbit plane is a
-      // circle rolled off the ground plane by `tilt` about the `az` bearing.
-      _normal.set(Math.sin(tilt) * Math.cos(az), Math.cos(tilt), Math.sin(tilt) * Math.sin(az));
-      a.u.set(-Math.sin(az), 0, Math.cos(az));
-      a.v.crossVectors(_normal, a.u);
+      const yaw = (rand() * 2 - 1) * YAW_MAX;
+      const ct = Math.cos(tilt);
+      const st = Math.sin(tilt);
+      const cy = Math.cos(yaw);
+      const sy = Math.sin(yaw);
+      a.u.set(cy, 0, -sy);
+      a.v.set(SQUASH * ct * sy, -SQUASH * st, SQUASH * ct * cy);
       a.phase = rand() * TAU;
-      a.spin = randRange(SPIN_MIN, SPIN_MAX) * (rand() < 0.5 ? -1 : 1);
+      a.spin = randRange(SPIN_MIN, SPIN_MAX) * dir;
       a.span = randRange(SPAN_MIN, SPAN_MAX);
       a.lift = randRange(LIFT_MIN, LIFT_MAX);
+      a.rscale = randRange(RSCALE_MIN, RSCALE_MAX);
+      a.y0 = randRange(Y0_MIN, Y0_MAX);
     }
 
     for (const m of this.#motes) {
       const bearing = rand() * TAU;
+      // Footprint DOES scale with the blob — this one is a horizontal quantity,
+      // so a wider squad spreads its shafts wider. Length and climb below do
+      // not; see the MOTE_LEN_* comment.
       const r = radius * Math.sqrt(rand());
       m.ox = Math.cos(bearing) * r;
       m.oz = Math.sin(bearing) * r * FOOTPRINT_DEPTH;
@@ -379,8 +544,8 @@ class GrowthFx implements GrowthFxSystem {
       m.dx = lx * inv;
       m.dy = inv;
       m.dz = lz * inv;
-      m.len = radius * MOTE_LEN * randRange(0.7, 1.35);
-      m.rise = radius * MOTE_RISE * randRange(0.8, 1.3);
+      m.len = randRange(MOTE_LEN_MIN, MOTE_LEN_MAX);
+      m.rise = randRange(MOTE_RISE_MIN, MOTE_RISE_MAX);
       m.delay = rand() * MOTE_STAGGER;
       m.life = randRange(MOTE_LIFE_MIN, MOTE_LIFE_MAX);
     }
@@ -416,7 +581,6 @@ class GrowthFx implements GrowthFxSystem {
     const grow = 1 - (1 - k) * (1 - k);
     const orbit = R * (RADIUS_IN + (RADIUS_OUT - RADIUS_IN) * grow);
     const arcWidth = Math.max(ARC_WIDTH_MIN, R * ARC_WIDTH_FRAC) * env;
-    const moteWidth = Math.max(MOTE_WIDTH_MIN, R * MOTE_WIDTH_FRAC);
 
     const cx = this.#shown.x;
     const cy = this.#shown.y + ARC_HEIGHT;
@@ -427,19 +591,21 @@ class GrowthFx implements GrowthFxSystem {
 
     for (const a of this.#arcs) {
       const start = a.phase + a.spin * t;
-      const y = cy + a.lift * grow;
+      const rad = orbit * a.rscale;
+      const y = cy + a.y0 + a.lift * grow;
       for (let j = 0; j < POINTS; j++) {
         const ang = start + (j / (POINTS - 1)) * a.span;
         const c = Math.cos(ang);
-        const s = Math.sin(ang) * SQUASH;
-        const px = cx + a.u.x * c * orbit + a.v.x * s * orbit;
-        const py = y + a.u.y * c * orbit + a.v.y * s * orbit;
-        const pz = cz + a.u.z * c * orbit + a.v.z * s * orbit;
+        const s = Math.sin(ang);
+        // No SQUASH here — it is already baked into |a.v| (see the Arc doc).
+        const px = cx + (a.u.x * c + a.v.x * s) * rad;
+        const py = y + (a.u.y * c + a.v.y * s) * rad;
+        const pz = cz + (a.u.z * c + a.v.z * s) * rad;
         // Tangent is the derivative of the point in the angle — not
         // normalised, because the shader normalises the projection anyway.
-        const tx = -a.u.x * Math.sin(ang) + a.v.x * c * SQUASH;
-        const ty = -a.u.y * Math.sin(ang) + a.v.y * c * SQUASH;
-        const tz = -a.u.z * Math.sin(ang) + a.v.z * c * SQUASH;
+        const tx = -a.u.x * s + a.v.x * c;
+        const ty = -a.u.y * s + a.v.y * c;
+        const tz = -a.u.z * s + a.v.z * c;
 
         this.#pos[p] = px;
         this.#pos[p + 1] = py;
@@ -493,7 +659,7 @@ class GrowthFx implements GrowthFxSystem {
         this.#tan[p + 5] = m.dz;
         p += 6;
 
-        const wj = moteWidth * shaft * (this.#widthProfile[j] ?? 0);
+        const wj = MOTE_WIDTH * shaft * (this.#widthProfile[j] ?? 0);
         const aj = shaft * (this.#alphaProfile[j] ?? 0);
         this.#wid[q] = wj;
         this.#wid[q + 1] = wj;

@@ -21,7 +21,7 @@ import type { System, WeaponTier } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
 import { createCorridor } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
-import { createBullets } from "./mechanics/bullets";
+import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
 import { createGates } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
@@ -151,6 +151,14 @@ function resetRun(): void {
   rowIndex = 0;
 }
 
+/**
+ * Muzzle scratch buffer, allocated once. One entry per possible stream: the
+ * squad reports where each soldier's rifle actually is, and bullets fires one
+ * stream from each, which is what makes "20 troops = 20 streams" true by
+ * construction rather than by a rate curve pretending to be density.
+ */
+const shooters = Array.from({ length: MAX_STREAMS }, () => new THREE.Vector3());
+
 /** Hoisted so the per-tick rider seating allocates nothing. */
 function seatRider(_id: number, tag: number, x: number, topY: number, z: number): void {
   if (tag >= 0) enemies.pin(tag, x, topY, z);
@@ -229,6 +237,9 @@ function tick(dt: number): void {
       squad.center.z - squad.radiusZ,
       squad.radiusX,
     );
+    // setMuzzle still supplies the blob centre and width for aim; setShooters
+    // is what gives each soldier its own stream origin.
+    bullets.setShooters(shooters, squad.sampleShooters(shooters, MAX_STREAMS));
     bullets.update(dt, world);
 
     // 3. Targets move, then get shot — so a hit lands where the barrel is now,

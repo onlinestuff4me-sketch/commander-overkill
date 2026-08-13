@@ -44,8 +44,8 @@
  * ---------------------------------------------------------------------------
  * Four draw calls total at any troop count: one InstancedMesh for the whole
  * body (all parts merged into one vertex-coloured geometry), one for the drop
- * shadows, two for the HP bar. ~143 triangles per unit, so 1200 troops is
- * ~172k tris in a single instanced call — vertex work a phone eats for
+ * shadows, two for the HP bar. 181 triangles per unit, so 1200 troops is
+ * ~217k tris in a single instanced call — vertex work a phone eats for
  * breakfast. All per-unit state lives in preallocated typed arrays and nothing
  * in update()/render() allocates.
  */
@@ -70,10 +70,20 @@ const UNIT_SCALE = 1.05;
 
 /**
  * Clump half-width grows with sqrt(count) because a crowd spreads over AREA,
- * not length. Calibrated on `frame_023`: ~45 units measured 5.2 m across, so
- * half-width 2.6 at 50 units → 2.6/sqrt(50).
+ * not length.
+ *
+ * CALIBRATION, AND THE BUG THAT WAS IN IT. `frame_023` measures ~5.2 m across
+ * at ~45 units, and the first cut turned that into `SPREAD = 2.6/sqrt(50)`.
+ * That equated a MEASURED SPAN with the ellipse's SEMI-AXIS, which are not the
+ * same number: the span a camera sees is the semi-axis plus the radial jitter
+ * (×1.17 at the rim), plus the edge jitter and jostle, plus a whole unit's
+ * half-width of body hanging off the outermost soldier. Those extras are worth
+ * ~1.0 m per side, so the old constant produced a clump ~7.6 m across — wider
+ * than the 6.8 m road, which is exactly why the rim units were standing on the
+ * grass. Solving the same 5.2 m measurement for the semi-axis instead gives
+ * 1.61 at 50 units, i.e. 1.61/sqrt(50).
  */
-const SPREAD = 0.368;
+const SPREAD = 0.224;
 /**
  * Extra width at tiny counts, decaying as 1/n. Three soldiers do not pack —
  * they stand shoulder to shoulder, and `frame_009` measures ~1.7 m across where
@@ -83,10 +93,6 @@ const SPREAD = 0.368;
 const SMALL_SQUAD_FLARE = 1.0;
 /** Depth:width of the silhouette. The reference reads ~5 deep by 9 wide. */
 const DEPTH_RATIO = 0.556;
-/** Hard cap on half-width: past this the clump would stand on the kerb. Hitting
- *  it at ~62 units is why the reference squad grows BACKWARDS after that, and
- *  why `frame_035` splits into two groups instead of one wider one. */
-const RADIUS_X_MAX = 2.9;
 /** Hard cap on half-depth. The camera's bottom edge lands at z ≈ +2.8, and
  *  SQUAD_Z + this + the jitter and straggler budget has to stay inside it or
  *  the rear rank walks off the bottom of the screen. */
@@ -97,6 +103,10 @@ const SQUAD_Z = -1.6;
 /** Per-unit target jitter, world units. This is what makes the edge ragged
  *  instead of a clean ellipse — the single biggest "is it a grid?" tell. */
 const EDGE_JITTER = 0.26;
+/** Peak-to-peak spread on a slot's radial position, as a fraction of its ring
+ *  radius. Named rather than inlined because the containment maths below has to
+ *  know how far past the ellipse a rim unit can be asked to stand. */
+const RADIAL_JITTER = 0.34;
 /** Share of that jitter the units at the very centre get. The reference clump
  *  is packed in the middle and loose at the rim, and applying jitter flat makes
  *  a solo soldier wander off the lane line for no reason. */
@@ -118,6 +128,10 @@ const SPRING_K_SPREAD = 0.45;
 /** Slow lateral/forward wander so the mass never looks frozen when standing still. */
 const JOSTLE_AMPLITUDE = 0.07;
 const JOSTLE_RATE = 1.3;
+/** Slack the containment maths leaves for the spring. At damping ratio 0.86 the
+ *  step overshoot is only ~0.5%, but the centre moves continuously, so units
+ *  settle from behind and can tick a little past their target on arrival. */
+const SPRING_SLACK = 0.06;
 
 /** Run-in-place bob. abs(sin) doubles the rate, so ~2.7 footfalls/second. */
 const BOB_HEIGHT = 0.105;
@@ -153,17 +167,124 @@ const HP_BAR_Y = 2.05;
  *  follow so the two read as one vehicle. */
 const CENTER_FOLLOW = 12;
 
-/** Uniform, straight off the reference: blue helmet, cream shirt, navy trousers. */
+/**
+ * Uniform, straight off the reference: blue helmet, cream shirt, navy trousers.
+ * The cream/blue/navy contrast is the whole reason a player can tell their own
+ * crowd from the tan/brown enemies at a glance, so the shirt is the one colour
+ * on this unit that is not allowed to drift.
+ *
+ * WHY THE SHIRT IS AUTHORED AS A PEACH AND NOT AS A CREAM. These are vertex
+ * colours on a Lambert material, so what lands on screen is albedo × irradiance,
+ * and the scene's irradiance is not white. `renderer.ts` fills with
+ * `HemisphereLight(0xcfefff, 0x4a7a3a, 1.5)` — a GREEN ground bounce — and
+ * deliberately puts the key light up-screen so it backlights the crowd. Every
+ * surface the camera can see therefore gets sky+ground fill and, on the up-facing
+ * shoulders that carry the read, irradiance works out to roughly
+ * (0.84, 0.95, 1.02): 14% greener and 21% bluer than neutral. An honest cream
+ * albedo (the old 0xe8dcbc) comes out the far side at #D7D7BE — the grey-green
+ * olive that was on screen. Pre-dividing the target cream by that irradiance is
+ * what gives 0xffe4c2, which renders as #ECE0C4. If the lighting in
+ * `renderer.ts` ever loses its green ground bounce, re-derive this — do not
+ * hand-tweak it.
+ */
 const COLOR_HELMET = 0x3f8ede;
-const COLOR_SHIRT = 0xe8dcbc;
+const COLOR_SHIRT = 0xffe4c2;
 const COLOR_TROUSERS = 0x242f57;
+/** The only near-black on the unit. In a packed clump the boots are what tell
+ *  one pair of legs from the next. */
+const COLOR_BOOT = 0x15171d;
 const COLOR_SKIN = 0xe8b98c;
-const COLOR_RIFLE = 0x30353f;
+/** The rifle reads LIGHT in the reference, not dark — the barrel catches the sky
+ *  and shows up as a pale sliver between the helmets. A gunmetal rifle vanishes
+ *  under this backlighting. Wood stock behind it for the two-tone the reference
+ *  weapons have. */
+const COLOR_RIFLE_METAL = 0xd8c8b4;
+const COLOR_RIFLE_WOOD = 0x9c6538;
 
 /** Baked-in forward lean. Costs nothing at runtime (it is part of the merged
  *  geometry) and does most of the work of selling "running" that a vertical bob
  *  alone cannot. */
 const BODY_LEAN = 0.12;
+
+// ---------------------------------------------------------------------------
+// CONTAINMENT — derived, not tuned
+//
+// "No unit stands on the grass" is three separate margins, and the first cut
+// only had a fraction of the first one:
+//
+//   1. the blob's own reach — the ellipse PLUS the radial jitter, edge jitter,
+//      jostle and spring slack that sit on top of it,
+//   2. the unit's own body — a soldier clamped by his navel still puts a
+//      shoulder over the kerb,
+//   3. perspective — a soldier is 1.2 m tall and the camera is only 34° above
+//      him, so his shoulders project further from the road's centreline than his
+//      boots do. Feet inside the kerb is not the same as body inside the kerb,
+//      and it is worse the nearer the camera he stands.
+//
+// Everything below falls out of those three; nothing here is eyeballed.
+// ---------------------------------------------------------------------------
+
+/** Raw-geometry half-width of the widest part of a unit, and how high that
+ *  widest part sits. Both are the shoulder yoke's top corners, and the geometry
+ *  below is built FROM these rather than measured against them, so the two
+ *  cannot drift apart. The height is what drives margin 3. */
+const UNIT_HALF_WIDTH = 0.32;
+const UNIT_SHOULDER_Y = 1.07;
+
+/** Mirrors the kerb `lane.ts` builds — a 0.35-thick, 0.4-tall box straddling
+ *  ±CORRIDOR_HALF_WIDTH. Its inner face is the line a body may not cross. These
+ *  two numbers are the only thing this module duplicates from that file; if the
+ *  kerb changes shape, they change with it. */
+const KERB_INSET = 0.2;
+const KERB_TOP_Y = 0.4;
+
+/**
+ * Depth of a world point along the camera's forward axis. The camera never
+ * moves, so this is a fixed function of (y, z) and runs once at module load.
+ */
+function cameraDepth(y: number, z: number): number {
+  const dx = CAMERA_LOOK.x - CAMERA_POS.x;
+  const dy = CAMERA_LOOK.y - CAMERA_POS.y;
+  const dz = CAMERA_LOOK.z - CAMERA_POS.z;
+  const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  return -((dy / len) * (y - CAMERA_POS.y) + (dz / len) * (z - CAMERA_POS.z));
+}
+
+/**
+ * Hard limit on a unit's centre X. A point's horizontal screen position is
+ * x / depth, so the kerb's inner face defines a SLOPE, and anything standing
+ * higher than the kerb has to come further in to stay behind that slope.
+ * Evaluated at the nearest z the blob can reach, because near the camera the
+ * depth is smallest and the outward drift is therefore largest. Works out to
+ * ~2.77 — a good 0.4 tighter than the naive `CORRIDOR_HALF_WIDTH - 0.25`.
+ */
+const UNIT_X_LIMIT = (() => {
+  const zNear =
+    SQUAD_Z + RADIUS_Z_MAX * (1 + RADIAL_JITTER / 2) + EDGE_JITTER + STRAGGLER_TRAIL;
+  const kerbSlope = (CORRIDOR_HALF_WIDTH - KERB_INSET) / cameraDepth(KERB_TOP_Y, zNear);
+  return (
+    kerbSlope * cameraDepth(UNIT_SHOULDER_Y * UNIT_SCALE, zNear) - UNIT_HALF_WIDTH * UNIT_SCALE
+  );
+})();
+
+/**
+ * Steering swing we refuse to trade away no matter how big the squad gets. A
+ * clump as wide as the road cannot steer, which is honest physics and is what
+ * makes big squads feel unwieldy — but zero is not a difficulty curve, it is a
+ * broken control, so the clump stops widening before it eats the last of it.
+ */
+const MIN_STEER_RANGE = 0.5;
+
+/**
+ * Hard cap on half-width — the largest ellipse whose rim units still fit inside
+ * UNIT_X_LIMIT with MIN_STEER_RANGE left over. ~1.60, reached at ~50 units.
+ * Past that the area the clump wanted has to go somewhere, so it goes backwards:
+ * that is the reference's behaviour in the late run, and why `frame_035` splits
+ * into two groups rather than one wider one.
+ */
+const RADIUS_X_MAX =
+  (UNIT_X_LIMIT - MIN_STEER_RANGE - EDGE_JITTER - JOSTLE_AMPLITUDE - SPRING_SLACK) /
+  (1 + RADIAL_JITTER / 2);
 
 /** Vogel/sunflower spiral. Consecutive slots land ~137.5° apart, so any prefix
  *  of the slot order is already spatially spread — which is what makes
@@ -195,9 +316,13 @@ export interface SquadSystem extends System {
   /** Clamped to [0, MAX_TROOPS]. `world.troops` re-asserts on the next update(). */
   setCount(n: number): void;
   /**
-   * Front-rank muzzle positions, for bullets and muzzle VFX. Writes into the
-   * caller's preallocated vectors and returns how many were filled. O(n), no
-   * allocation.
+   * Muzzle positions sampled evenly across the WHOLE blob — one per soldier up
+   * to `max`, strided so the sample spans the full ellipse rather than its
+   * innermost units. Writes into the caller's preallocated vectors and returns
+   * how many were filled. O(n), no allocation.
+   *
+   * Index `k` maps to a stable soldier for a given count, so callers may treat
+   * `k` as a persistent stream identity.
    */
   sampleShooters(out: THREE.Vector3[], max: number): number;
 }
@@ -280,7 +405,7 @@ class Squad implements SquadSystem {
       const spiral = i * GOLDEN_ANGLE;
       this.#slotAngle[i] =
         spiral + ANGLE_WIDTH_BIAS * Math.sin(2 * spiral) + (rand() - 0.5) * 1.1;
-      this.#slotRadialJitter[i] = (rand() - 0.5) * 0.34;
+      this.#slotRadialJitter[i] = (rand() - 0.5) * RADIAL_JITTER;
       this.#slotJitterX[i] = (rand() - 0.5) * 2 * EDGE_JITTER;
       this.#slotJitterZ[i] = (rand() - 0.5) * 2 * EDGE_JITTER;
       this.#slotTrail[i] = rand() < STRAGGLER_FRACTION ? rand() * STRAGGLER_TRAIL : 0;
@@ -386,19 +511,34 @@ class Squad implements SquadSystem {
   }
 
   sampleShooters(out: THREE.Vector3[], max: number): number {
-    // Front band only — the reference fires from the leading rank, not from
-    // inside the mass where the muzzle flashes would be buried. The slack term
-    // keeps a one-man squad inside its own front rank: a band defined purely as
-    // a fraction of the depth is empty when there is no depth, and `frame_000`
-    // is a single soldier firing.
-    const band = this.center.z - this.#radiusZ * 0.35 + FRONT_BAND_SLACK;
+    // EVERY SOLDIER FIRES. This returned the leading rank only, on the theory
+    // that muzzle flashes inside the mass would be buried. The reference gives
+    // each soldier its own stream, and a front-band filter cannot express that:
+    // at 3 troops the band can hold a single man, so a 3-troop squad would
+    // report one shooter and produce one stream where there should be three.
     const limit = Math.min(max, out.length, this.#count);
+    if (limit <= 0) return 0;
+
+    // STRIDE, DO NOT TAKE A PREFIX. Slot order is a Vogel spiral with
+    // r = sqrt(i / (n-1)), so the first N slots are the INNERMOST N units. A
+    // prefix would collapse every stream onto the middle of the blob at high
+    // counts; striding samples the whole ellipse.
+    //
+    // The index is a pure function of (k, count), so stream k keeps the same
+    // soldier frame to frame. That stability is load-bearing: bullets treats k
+    // as a persistent stream identity and holds most of its aim error for the
+    // stream's life, so a reshuffle would visibly teleport the stream.
+    const stride = this.#count / limit;
     let written = 0;
-    for (let i = 0; i < this.#count && written < limit; i++) {
-      if (this.#posZ[i]! > band) continue;
+    for (let k = 0; k < limit; k++) {
+      const i = Math.min(this.#count - 1, Math.floor(k * stride));
       const v = out[written];
       if (v === undefined) break;
-      v.set(this.#posX[i]!, MUZZLE_Y * UNIT_SCALE + this.#bob[i]!, this.#posZ[i]! - MUZZLE_Z * UNIT_SCALE);
+      v.set(
+        this.#posX[i]! + MUZZLE_X * UNIT_SCALE,
+        MUZZLE_Y * UNIT_SCALE + this.#bob[i]!,
+        this.#posZ[i]! - MUZZLE_Z * UNIT_SCALE,
+      );
       written++;
     }
     return written;
@@ -416,7 +556,12 @@ class Squad implements SquadSystem {
     // Big clumps cannot use the full lane range without standing on the grass.
     // Shrinking the range with the blob is the honest consequence of being
     // wide, and it is what makes the reference's big squads feel unwieldy.
-    const limit = Math.max(0, CORRIDOR_HALF_WIDTH - this.#radiusX * 0.7);
+    //
+    // This is the FIRST of two containment gates and the one that does the real
+    // work: keep the centre far enough in that no target is ever placed outside
+    // the road, and the per-unit clamp below stays a safety net instead of
+    // becoming a wall the rim units pile up against.
+    const limit = Math.max(0, UNIT_X_LIMIT - this.#halfExtent());
     const targetX = clamp(laneToX(world.squadLane), -limit, limit);
 
     this.#prevCenterX = this.#centerX;
@@ -432,7 +577,6 @@ class Squad implements SquadSystem {
     // pins slot 0 at the centre and the NEWEST slot at the rim — which is both
     // "no grid" and "new units appear at the edge" from one expression.
     const rDenom = count > 1 ? count - 1 : 1;
-    const laneCap = CORRIDOR_HALF_WIDTH - 0.25;
     const t = this.#time;
 
     for (let i = 0; i < n; i++) {
@@ -459,7 +603,14 @@ class Squad implements SquadSystem {
         // Pop in slightly outside the rim, then let the spring pull it in. The
         // growth team's +1 floater fires over the top of this.
         this.#live[i] = 1;
-        this.#posX[i] = this.#centerX + (tx - this.#centerX) * 1.18;
+        // Clamped like any other position: the 1.18 overshoot is the one place
+        // a unit is deliberately placed OUTSIDE the blob's own reach, so it is
+        // also the one place that would put a body on the kerb for free.
+        this.#posX[i] = clamp(
+          this.#centerX + (tx - this.#centerX) * 1.18,
+          -UNIT_X_LIMIT,
+          UNIT_X_LIMIT,
+        );
         this.#posZ[i] = SQUAD_Z + (tz - SQUAD_Z) * 1.18;
         this.#prevX[i] = this.#posX[i]!;
         this.#prevZ[i] = this.#posZ[i]!;
@@ -473,12 +624,27 @@ class Squad implements SquadSystem {
       // --- position spring ---
       const k = this.#slotSpringK[i]!;
       const c = 2 * Math.sqrt(k) * SPRING_DAMPING_RATIO;
-      let vx = this.#velX[i]! + ((tx - this.#posX[i]!) * k - this.#velX[i]! * c) * dt;
-      let vz = this.#velZ[i]! + ((tz - this.#posZ[i]!) * k - this.#velZ[i]! * c) * dt;
-      this.#velX[i] = vx;
+      const vx = this.#velX[i]! + ((tx - this.#posX[i]!) * k - this.#velX[i]! * c) * dt;
+      const vz = this.#velZ[i]! + ((tz - this.#posZ[i]!) * k - this.#velZ[i]! * c) * dt;
       this.#velZ[i] = vz;
-      this.#posX[i] = clamp(this.#posX[i]! + vx * dt, -laneCap, laneCap);
       this.#posZ[i] = this.#posZ[i]! + vz * dt;
+
+      // Second containment gate. The centre limit above means this almost never
+      // fires; it exists for the frames where it can — a hard steer where the
+      // spring is still carrying units outward after the centre has already
+      // stopped. Kill the outward velocity too, or a unit parks on the limit
+      // with stored momentum and snaps when it is finally released.
+      const nx = this.#posX[i]! + vx * dt;
+      if (nx > UNIT_X_LIMIT) {
+        this.#posX[i] = UNIT_X_LIMIT;
+        this.#velX[i] = vx < 0 ? vx : 0;
+      } else if (nx < -UNIT_X_LIMIT) {
+        this.#posX[i] = -UNIT_X_LIMIT;
+        this.#velX[i] = vx > 0 ? vx : 0;
+      } else {
+        this.#posX[i] = nx;
+        this.#velX[i] = vx;
+      }
 
       // --- pop scale ---
       const goal = alive ? 1 : 0;
@@ -570,6 +736,26 @@ class Squad implements SquadSystem {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Furthest from the blob centre that a unit's TARGET can be placed. Every term
+   * the layout adds on top of the ellipse belongs in this sum — if one goes
+   * missing, the steering limit built on it is a lie and the rim walks onto the
+   * grass. Mirrors the `tx` expression in update() exactly, at its worst case.
+   *
+   * A lone soldier is not on the rim (rNorm is 0 at count ≤ 1), so he gets the
+   * core's tightened jitter and keeps nearly the whole road to steer with.
+   */
+  #halfExtent(): number {
+    const rim = this.#count > 1 ? 1 : 0;
+    const loose = CORE_TIGHTNESS + (1 - CORE_TIGHTNESS) * rim;
+    return (
+      this.#radiusX * rim * (1 + RADIAL_JITTER / 2) +
+      EDGE_JITTER * loose +
+      JOSTLE_AMPLITUDE +
+      SPRING_SLACK
+    );
+  }
+
   /** Clump ellipse from troop count. Only runs when the count actually moves. */
   #reshape(): void {
     if (this.#shapedFor === this.#count) return;
@@ -581,7 +767,7 @@ class Squad implements SquadSystem {
 
     // Once the road stops the clump getting wider, the area it wanted has to go
     // somewhere — so it goes backwards, and density only starts climbing after
-    // the depth cap too. This is the reference's behaviour past ~60 units.
+    // the depth cap too. This is the reference's behaviour past ~50 units.
     const squeeze = idealX > 0 ? idealX / Math.max(this.#radiusX, 1e-4) : 1;
     this.#radiusZ = Math.min(RADIUS_Z_MAX, SPREAD * DEPTH_RATIO * root * squeeze);
   }
@@ -591,12 +777,13 @@ class Squad implements SquadSystem {
 // geometry
 // ---------------------------------------------------------------------------
 
-/** Depth added to the front-rank band so tiny squads still have a front rank. */
-const FRONT_BAND_SLACK = 0.3;
 
-/** Rifle muzzle in unmodified unit space; scaled by UNIT_SCALE at the call site. */
-const MUZZLE_Y = 0.77;
-const MUZZLE_Z = 0.53;
+/** Rifle muzzle in unmodified unit space; scaled by UNIT_SCALE at the call site.
+ *  Read straight off the rifle's front face after the pitch, yaw and body lean
+ *  below — if the rifle moves, these move with it. */
+const MUZZLE_X = 0.239;
+const MUZZLE_Y = 0.969;
+const MUZZLE_Z = 0.863;
 /** Just clear of the road plane at y=0, without needing polygonOffset. */
 const SHADOW_Y = 0.012;
 
@@ -605,59 +792,133 @@ interface Part {
   color: number;
 }
 
+/** How far each leg swings out of the stride. Both legs at z=0 is what made the
+ *  lower body read as one block. */
+const LEG_STRIDE = 0.16;
+/** Rifle attitude. Pitched up and yawed across to +X, which is the pose in
+ *  `frame_000` — muzzle clearing the helmet, butt in at the chest. */
+const RIFLE_PITCH = 0.3;
+const RIFLE_YAW = -0.28;
+const RIFLE_X = 0.135;
+const RIFLE_Y = 0.95;
+const RIFLE_Z = -0.35;
+
 /**
- * One soldier as a single vertex-coloured geometry, ~143 triangles.
+ * One soldier as a single vertex-coloured geometry, 181 triangles.
  *
- * Segment counts are as low as they go before the helmet stops reading as a
- * dome from directly above — and from this camera the helmet IS the unit. At
- * 1200 instances every extra triangle here costs 1200 on the GPU, so the head
- * is a 6-segment sphere and the torso is a 7-segment cylinder and nobody will
- * ever be able to tell.
+ * WHAT THIS IS BUILT TO SURVIVE. A unit is ~40 px tall in a 50-strong clump and
+ * the camera sits 34° above it, so this is a silhouette problem, not a modelling
+ * one. Four things carry the read, in order:
+ *
+ *   1. THE RIFLE. A long pale diagonal breaking out of the blob's outline. It is
+ *      the only part of the unit that is not a rounded lump, so it is the whole
+ *      difference between "soldiers" and "marbles" — see the crowd in
+ *      `frame_023`, where the rifles are the only straight lines on screen.
+ *   2. THE HELMET, dome plus a brim that overhangs it. From above the crowd is a
+ *      field of blue discs; the brim is what makes each disc a helmet rather than
+ *      a ball, and it costs nine triangles.
+ *   3. THE CREAM SHOULDERS behind the helmet. The head sits forward of the body,
+ *      so a wide yoke shows as a bright crescent — and it is deliberately built
+ *      as an UP-FACING slab, because with this scene's backlighting a vertical
+ *      face gets nothing but green ground bounce and goes olive no matter what
+ *      colour it is authored. Cream that has to read must face the sky.
+ *   4. TWO LEGS AND TWO BOOTS in a stride. In a packed clump the near-black boots
+ *      are the only thing separating one unit's legs from the next one's.
+ *
+ * Segment counts are as low as they go before the helmet stops reading as a dome
+ * from directly above. At 1200 instances every extra triangle here costs 1200 on
+ * the GPU, so everything that is not the helmet is a box, the head is a
+ * 6×2 sphere that barely peeks out from under the brim, and nobody will ever be
+ * able to tell.
  */
 function buildSoldierGeometry(): THREE.BufferGeometry {
   const parts: Part[] = [];
 
+  // --- legs and boots ------------------------------------------------------
   // Proportions are stubby on purpose. The reference unit is roughly as wide as
-  // it is half-tall — chunky cartoon, not a realistic figure — and that width is
-  // what lets 45 of them fill the road at shoulder-to-shoulder spacing.
-  const legGeo = (side: number): THREE.BufferGeometry => {
-    const g = new THREE.BoxGeometry(0.16, 0.4, 0.18);
-    g.translate(side * 0.115, 0.2, 0);
-    return g;
-  };
-  parts.push({ geo: legGeo(-1), color: COLOR_TROUSERS });
-  parts.push({ geo: legGeo(1), color: COLOR_TROUSERS });
+  // it is half-tall — chunky cartoon, not a realistic figure.
+  //
+  // The stride is baked, not animated: the bob already carries the run, and two
+  // boxes offset in Z read as legs from above where two boxes side by side read
+  // as one slab. side -1 swings forward, side +1 trails.
+  for (const side of [-1, 1]) {
+    const leg = new THREE.BoxGeometry(0.155, 0.44, 0.19);
+    leg.rotateX(-side * LEG_STRIDE);
+    leg.translate(side * 0.115, 0.235, side * 0.05);
+    parts.push({ geo: leg, color: COLOR_TROUSERS });
 
-  const torso = new THREE.CylinderGeometry(0.25, 0.22, 0.6, 7);
-  torso.translate(0, 0.7, 0);
+    const boot = new THREE.BoxGeometry(0.175, 0.13, 0.26);
+    boot.translate(side * 0.115, 0.07, side * 0.085);
+    parts.push({ geo: boot, color: COLOR_BOOT });
+  }
+
+  // --- torso and shoulder yoke ---------------------------------------------
+  const torso = new THREE.BoxGeometry(0.42, 0.54, 0.32);
+  torso.translate(0, 0.7, 0.02);
   parts.push({ geo: torso, color: COLOR_SHIRT });
 
-  // One bar, not two arms: at the on-screen size of a unit in a 50-strong clump
-  // the gap between two arms is sub-pixel, and this halves the triangle count.
-  const arms = new THREE.BoxGeometry(0.52, 0.11, 0.26);
-  arms.translate(0, 0.8, -0.13);
-  parts.push({ geo: arms, color: COLOR_SHIRT });
+  // The yoke is pre-rotated by +BODY_LEAN so the whole-body lean applied at the
+  // end cancels out and its top face ends up dead level. That is worth doing for
+  // two reasons at once: a level face catches the most sky and key light (the
+  // brightest cream on the unit), and it presents the most area to a camera that
+  // is looking down. It is also wider than the helmet, so it shows at the sides
+  // as well as behind.
+  const yoke = new THREE.BoxGeometry(UNIT_HALF_WIDTH * 2, 0.17, 0.44);
+  yoke.rotateX(BODY_LEAN);
+  yoke.translate(0, UNIT_SHOULDER_Y - 0.085, 0.06);
+  parts.push({ geo: yoke, color: COLOR_SHIRT });
 
-  // The rifle is not decoration — in `frame_023` the dark slivers between the
-  // helmets are what stop the crowd reading as a bag of blue marbles.
-  const rifle = new THREE.BoxGeometry(0.055, 0.06, 0.5);
-  rifle.translate(0.11, 0.77, -0.28);
-  parts.push({ geo: rifle, color: COLOR_RIFLE });
+  // --- arms ----------------------------------------------------------------
+  // Two, not one bar. They are only a few pixels each, but without them the
+  // rifle floats in front of the chest with nothing holding it, and a floating
+  // rifle reads as a bug rather than as a weapon. The left arm crosses the body
+  // to the fore-grip; the right stays out at the trigger.
+  const armL = new THREE.BoxGeometry(0.12, 0.12, 0.5);
+  armL.rotateX(-0.14);
+  armL.rotateY(-0.57);
+  armL.translate(-0.035, 0.935, -0.21);
+  parts.push({ geo: armL, color: COLOR_SHIRT });
 
-  const head = new THREE.SphereGeometry(0.175, 6, 3);
-  head.translate(0, 1.1, 0);
+  const armR = new THREE.BoxGeometry(0.12, 0.12, 0.38);
+  armR.rotateX(-0.25);
+  armR.translate(0.2, 0.925, -0.18);
+  parts.push({ geo: armR, color: COLOR_SHIRT });
+
+  // --- rifle ---------------------------------------------------------------
+  // Built along -Z, then pitched, yawed and carried into place as one piece so
+  // the two boxes cannot drift apart. Length is cartoon-long on purpose: the
+  // muzzle has to clear the helmet on screen or the diagonal never breaks the
+  // blob's outline, which is the entire point of drawing it.
+  const barrel = new THREE.BoxGeometry(0.05, 0.055, 0.72);
+  barrel.translate(0, 0, -0.06);
+  const stock = new THREE.BoxGeometry(0.062, 0.1, 0.22);
+  stock.translate(0, -0.012, 0.25);
+  for (const g of [barrel, stock]) {
+    g.rotateX(RIFLE_PITCH);
+    g.rotateY(RIFLE_YAW);
+    g.translate(RIFLE_X, RIFLE_Y, RIFLE_Z);
+  }
+  parts.push({ geo: barrel, color: COLOR_RIFLE_METAL });
+  parts.push({ geo: stock, color: COLOR_RIFLE_WOOD });
+
+  // --- head and helmet -----------------------------------------------------
+  // Head sits forward of the torso: that offset is what uncovers the shoulder
+  // yoke behind the helmet and gives the cream crescent the reference has.
+  const head = new THREE.SphereGeometry(0.165, 6, 2);
+  head.translate(0, 1.11, -0.1);
   parts.push({ geo: head, color: COLOR_SKIN });
 
-  // A flat disc widening the helmet's footprint from above, for 8 triangles.
-  // From this camera the crowd is mostly a field of blue discs, so the helmet's
-  // top-down footprint matters more than any other measurement on the unit.
-  const brim = new THREE.CircleGeometry(0.275, 8);
+  // Brim: a flat disc overhanging the dome by 0.05 all round, levelled against
+  // the body lean the same way the yoke is. Nine triangles for the single
+  // cheapest "that is a helmet, not a ball" cue available.
+  const brim = new THREE.CircleGeometry(0.285, 9);
   brim.rotateX(-Math.PI / 2);
-  brim.translate(0, 1.14, 0);
+  brim.rotateX(BODY_LEAN);
+  brim.translate(0, 1.15, -0.13);
   parts.push({ geo: brim, color: COLOR_HELMET });
 
-  const dome = new THREE.SphereGeometry(0.245, 7, 3, 0, Math.PI * 2, 0, Math.PI * 0.56);
-  dome.translate(0, 1.14, 0);
+  const dome = new THREE.SphereGeometry(0.235, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.55);
+  dome.translate(0, 1.14, -0.13);
   parts.push({ geo: dome, color: COLOR_HELMET });
 
   const merged = mergeParts(parts);

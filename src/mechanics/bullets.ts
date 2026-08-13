@@ -13,11 +13,20 @@
  * the orchestrator does not have to call anything per-frame. The rest of the
  * surface is for the other element teams:
  *
+ *   bullets.setShooters(points, n)
+ *       SQUAD TEAM, PREFERRED. Per-unit muzzle positions, reported once per
+ *       tick from `squad.sampleShooters(scratch, MAX_STREAMS)`. Stream `i`
+ *       fires from `points[i]` for as long as it keeps being reported there,
+ *       so the ORDER MUST BE STABLE across ticks — a reshuffle teleports the
+ *       streams. More than MAX_STREAMS points are subsampled with a stride.
+ *
  *   bullets.setMuzzle(x, y, z, halfWidth)
- *       SQUAD TEAM. Report the front edge of the blob once per tick and fire
- *       originates from a line across it. If nobody calls this, the muzzle is
- *       inferred from `world.squadCenter` and `world.troops`, so integration
- *       works before the squad exists.
+ *       FALLBACK, and the source of the blob's centre line either way. Report
+ *       the front edge of the blob and its half-width; streams with no reported
+ *       soldier behind them are distributed across that blob, so the firehose
+ *       is still one-stream-per-troop when the squad can only report a subset.
+ *       If nobody calls either, the blob is inferred from `world.squadCenter`
+ *       and `world.troops`, so this module is useful standing alone.
  *
  *       Composes directly with the squad module's surface:
  *           bullets.setMuzzle(squad.center.x, squad.center.y + 1,
@@ -25,8 +34,7 @@
  *
  *   bullets.fire(x, y, z, halfWidth, shots?)
  *       Manual volley, on top of automatic fire. For scripted beats. Pass
- *       halfWidth 0 to fire from one exact point, which is how you drive this
- *       off `squad.sampleShooters()` instead of off a muzzle line.
+ *       halfWidth 0 to fire from one exact point.
  *
  *   bullets.bullets  →  { count, ids, x, y, z, px, py, pz, damage }
  *       BARRELS/GATES TEAM. Live bullets as flat arrays, zero allocation.
@@ -43,14 +51,54 @@
  *   bullets.setEnabled(on)                 stop/start automatic fire
  *   bullets.tuning                         flat numbers, bind straight to lil-gui
  *
+ * ========================= ONE STREAM PER TROOP ==============================
+ *
+ * EVERY SOLDIER FIRES ITS OWN STREAM. One troop is one stream, three troops are
+ * three parallel streams you can count, twenty troops are twenty. Density comes
+ * from THE NUMBER OF SHOOTERS and from nothing else — there is deliberately no
+ * shots/second curve that ramps with troop count, because a few fast muzzles
+ * read as a few fast muzzles no matter how fast they go.
+ *
+ * Three things make that read:
+ *
+ *   POSITION.  Stream `s` starts at soldier `s`'s own muzzle, so the streams are
+ *              spread across the blob exactly as the units are. Its origin is
+ *              stable frame to frame, which is what turns a sequence of shots
+ *              into a *line* rather than a spray.
+ *   PHASE.     Each stream's fire clock is offset by frac(s · φ) of a shot
+ *              period (φ = golden ratio, so any prefix is maximally spread).
+ *              Without this every soldier fires on the same tick and the
+ *              firehose pulses in synchronised volleys instead of reading as
+ *              continuous fire.
+ *   RATE.      Roughly constant PER SOLDIER (see `tierNRatePerShooter`). Total
+ *              volume is then troops × rate, automatically.
+ *
+ * SATURATION. `BULLET_POOL` is finite and one stream per troop at 1200 troops
+ * would ask for ~13× it. Two mechanisms, in this order:
+ *
+ *   1. Streams are capped at MAX_STREAMS. Past that the extra troops raise the
+ *      rate of the existing streams instead of adding new ones — at MAX_STREAMS
+ *      the streams are ~6 cm apart across the widest legal blob, so they have
+ *      already merged into one wall and adding more is invisible anyway.
+ *   2. The TOTAL shot rate is soft-clipped to `maxLiveBullets / flightTime` by
+ *      `total = desired / (1 + (desired/max)^k)^(1/k)`. That function is
+ *      strictly increasing with an asymptote at the budget: more troops is
+ *      always more bullets, and the pool can never be overrun. With the default
+ *      knee (k = 3) the clip costs under 3% up to ~50 troops and only bites
+ *      where the screen is saturated regardless.
+ *
+ * Overflow past that is still handled — a spawn against a full pool is dropped
+ * — but the budget is set so it never happens in normal play.
+ *
  * ============================ HOW IT LOOKS ==================================
  *
  * Three tiers, from `docs/reference/part1/`:
  *
  *   TIER 0  frame_000  1-3 lonely orange needles, ~18:1 aspect, near vertical.
- *   TIER 1  frame_030  3-6 of the same, still countable, front rank only.
- *   TIER 2  frame_035  the firehose: ~130 cyan teardrop darts, blunt nose
- *                      leading, long tapered tail, reading as one stream.
+ *   TIER 1  frame_030  the same needles, one column per soldier, countable.
+ *   TIER 2  frame_035  the firehose: cyan teardrop darts, blunt nose leading,
+ *                      long tapered tail, enough columns that they read as one
+ *                      stream.
  *
  * THE CONE IS WIDE BECAUSE THE SQUAD IS WIDE, NOT BECAUSE THE SPREAD IS. This
  * is the one measurement that is easy to get wrong. Measured off frame_035 the
@@ -58,7 +106,11 @@
  * like a 25° fan on screen only because the camera views the corridor at a
  * grazing 22°, which stretches lateral motion and squashes forward motion.
  * Dial the angular spread up to match the screen and the darts spray sideways
- * out of the corridor.
+ * out of the corridor. Density is the shooter count's job, never the spread's.
+ *
+ * Most of a stream's angular error is FIXED PER STREAM (`shotJitterFraction`
+ * decides how much is re-rolled per shot). A stream that re-rolls its whole aim
+ * every shot is a cone of noise, not a line.
  *
  * ============================ HOW IT DRAWS ==================================
  *
@@ -93,17 +145,47 @@ import { CORRIDOR_HALF_WIDTH } from "./lane";
 // a spawn against a full pool is dropped rather than growing anything.
 // ---------------------------------------------------------------------------
 
-/** Logical bullets alive at once. Steady state at tier 2 is ~130; the rest is
- *  headroom for manual volleys and for anyone cranking the rate in lil-gui. */
+/** Logical bullets alive at once. `tuning.maxLiveBullets` is the rate governor's
+ *  target and sits below this; the gap is headroom for manual volleys and for
+ *  rounds still in flight across a tier change. */
 const BULLET_POOL = 768;
-/** Tier 0/1 never exceeds ~7 live, but in-flight tracers survive a mid-flight
- *  tier change, so the orange batch keeps a comfortable margin over that. */
-const TRACER_CAPACITY = 192;
+/**
+ * Both bullet batches are sized for the whole pool rather than for their tier's
+ * expected share. Tier 0/1 used to top out at a handful of live tracers; with
+ * one stream per troop it can now be hundreds, and a batch that overflows drops
+ * sprites silently while the bullets behind them keep dealing damage — an
+ * invisible-bullet bug that is very hard to see and very easy to avoid. The
+ * second buffer costs ~60 kB.
+ */
+const TRACER_CAPACITY = BULLET_POOL;
 const MUZZLE_POOL = 96;
-const IMPACT_POOL = 64;
+/** Bigger than it looks like it needs to be: at firehose density a barrel row
+ *  can eat dozens of rounds in one tick, and this ring buffer overwrites its
+ *  oldest entries rather than dropping new ones. */
+const IMPACT_POOL = 128;
+/**
+ * Concurrent streams. Past this, extra troops raise the rate of the streams
+ * that exist instead of adding more (see the saturation note at the top). 96
+ * streams across the widest legal blob (2 × RADIUS_X_MAX = 5.8 m) is one every
+ * 6 cm — well past the point where the eye can resolve them individually.
+ */
+export const MAX_STREAMS = 96;
 /** Backstop so a rate spike (or a paused tab) can never spawn an unbounded
- *  volley in a single tick. Normal tier-2 draw is ~5 shots/tick. */
-const MAX_SHOTS_PER_TICK = 24;
+ *  volley in a single tick. The governed rate draws ~16 shots/tick at the
+ *  budget, so this only ever catches pathology. */
+const MAX_SHOTS_PER_TICK = 64;
+/** Per-stream backstop for the same reason: one soldier cannot empty the pool. */
+const MAX_SHOTS_PER_STREAM_PER_TICK = 4;
+
+/** frac(s · φ) walks the unit interval without ever repeating or clustering, so
+ *  any prefix of the streams is already evenly spread in fire phase. */
+const GOLDEN_FRACTION = 0.618033988749895;
+/** Vogel spiral, for placing streams that have no reported soldier behind them.
+ *  Mirrors the squad's own layout (`entities/squad.ts`) on purpose. */
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+/** The squad's depth:width ratio, replicated so a synthesised blob has the same
+ *  silhouette as the real one. Only used for the fallback layout. */
+const BLOB_DEPTH_RATIO = 0.556;
 
 const STYLE_TRACER = 0;
 const STYLE_DART = 1;
@@ -113,17 +195,34 @@ const STYLE_DART = 1;
 // ---------------------------------------------------------------------------
 
 export interface BulletTuning {
-  /** TIER 0 — shots/sec with a single soldier, and the gain per extra troop. */
-  tier0Rate: number;
-  tier0RatePerTroop: number;
-  /** TIER 1 — shots/sec ramps from min to max over `tier1RampTroops` troops. */
-  tier1RateMin: number;
-  tier1RateMax: number;
-  tier1RampTroops: number;
-  /** TIER 2 — same ramp, an order of magnitude faster. This is the firehose. */
-  tier2RateMin: number;
-  tier2RateMax: number;
-  tier2RampTroops: number;
+  /**
+   * Shots/sec FOR ONE SOLDIER, per tier. Total volume is this times the troop
+   * count — do NOT reintroduce a troop-count ramp here, that is the bug this
+   * model exists to fix. What these actually control is the gap between rounds
+   * inside a single stream: gap = speed / rate, so tier 1 at 7/s and 44 m/s
+   * puts a needle every 6.3 m, which is what keeps a stream countable.
+   */
+  tier0RatePerShooter: number;
+  tier1RatePerShooter: number;
+  tier2RatePerShooter: number;
+
+  /**
+   * Ceiling on live bullets that the rate governor aims at, below BULLET_POOL
+   * so manual volleys and a mid-flight tier change still fit. Raising this past
+   * the pool does not overflow anything — spawns against a full pool are simply
+   * dropped — it just stops the governor being the thing that limits density.
+   */
+  maxLiveBullets: number;
+  /**
+   * Knee of the soft clip that holds the total rate under that ceiling. Higher
+   * = stays linear for longer and then corners harder; 1 is a lazy hyperbola
+   * that starts costing rate immediately. 3 keeps the loss under 3% to ~50
+   * troops while still climbing monotonically to the cap at 1200.
+   */
+  saturationKnee: number;
+  /** Concurrent streams, clamped to MAX_STREAMS. Lower it to see the streams
+   *  separate at high troop counts; it does not change total volume. */
+  maxStreams: number;
 
   /** Metres/sec. Streak length scales with this, so speed and look stay tied. */
   tracerSpeed: number;
@@ -141,19 +240,27 @@ export interface BulletTuning {
   dartLength: number;
   dartWidth: number;
 
-  /** Random half-angle in radians added to every shot. */
+  /** Random half-angle in radians on a stream's aim. */
   tier01Spread: number;
   tier2Spread: number;
-  /** Radians of outward aim at the edge of the muzzle line — the cone proper.
-   *  Kept deliberately small; see the note about the camera above. */
+  /** How much of that spread is re-rolled per shot; the rest is fixed for the
+   *  life of the stream. At 1 a stream is a cone of noise instead of a line. */
+  shotJitterFraction: number;
+  /** Radians of outward aim at the edge of the blob — the cone proper. Kept
+   *  deliberately small; see the note about the camera above. */
   tier2Diverge: number;
   /** Vertical velocity jitter, m/s. Purely so streaks do not share a plane. */
   riseJitter: number;
 
   /** Muzzle height above the road when inferred rather than reported. */
   muzzleY: number;
-  /** 1-in-N tier-2 shots gets a muzzle flame. Every shot would be a strobe. */
-  muzzleEveryNth: number;
+  /**
+   * Ceiling on muzzle flames per second, across all streams. A fixed 1-in-N
+   * stride cannot serve both one soldier (where every shot should flash) and a
+   * thousand (where it would be a strobe and would lap the flame pool every
+   * other frame), so the stride is derived from this and the live shot rate.
+   */
+  muzzleRateCap: number;
   muzzleLength: number;
   muzzleWidth: number;
   muzzleLife: number;
@@ -177,14 +284,16 @@ export interface BulletTuning {
 
 function defaultTuning(): BulletTuning {
   return {
-    tier0Rate: 3.0,
-    tier0RatePerTroop: 1.2,
-    tier1RateMin: 6,
-    tier1RateMax: 12,
-    tier1RampTroops: 45,
-    tier2RateMin: 80,
-    tier2RateMax: 280,
-    tier2RampTroops: 140,
+    // Per soldier. Chosen so one stream reads as a dotted line rather than as a
+    // solid rod: at tier 0 a soldier keeps ~2.5 needles in the air (frame_000
+    // shows 1-3), at tier 2 ~6.5 darts spaced 3.4 m apart.
+    tier0RatePerShooter: 5,
+    tier1RatePerShooter: 7,
+    tier2RatePerShooter: 10,
+
+    maxLiveBullets: 620,
+    saturationKnee: 3,
+    maxStreams: MAX_STREAMS,
 
     tracerSpeed: 44,
     dartSpeed: 34,
@@ -202,11 +311,12 @@ function defaultTuning(): BulletTuning {
 
     tier01Spread: 0.012,
     tier2Spread: 0.03,
+    shotJitterFraction: 0.25,
     tier2Diverge: 0.05,
     riseJitter: 0.5,
 
     muzzleY: 1.0,
-    muzzleEveryNth: 6,
+    muzzleRateCap: 220,
     muzzleLength: 0.62,
     muzzleWidth: 0.26,
     muzzleLife: 0.09,
@@ -252,7 +362,19 @@ export interface BulletView {
 }
 
 export interface BulletSystem extends System {
-  /** Squad system: report the front rank once per tick. */
+  /**
+   * Squad system: report per-unit muzzle positions once per tick, ideally from
+   * `squad.sampleShooters(scratch, MAX_STREAMS)`. Stream `i` fires from
+   * `points[i]`, so the ORDER MUST BE STABLE tick to tick. `count` may exceed
+   * `MAX_STREAMS` — the excess is subsampled with a stride, never truncated,
+   * so the streams still span the whole blob.
+   *
+   * The vectors are read and copied immediately; the caller keeps ownership and
+   * may reuse them. Reporting fewer than `world.troops` positions is fine: the
+   * remaining streams are laid out across the blob from `setMuzzle`.
+   */
+  setShooters(points: readonly THREE.Vector3[], count: number): void;
+  /** Squad system: front edge and half-width of the blob, once per tick. */
   setMuzzle(x: number, y: number, z: number, halfWidth: number): void;
   /** Manual volley from a muzzle line centred on (x, y, z). */
   fire(x: number, y: number, z: number, halfWidth: number, shots?: number): void;
@@ -545,7 +667,14 @@ class Bullets implements BulletSystem, BulletView {
 
   // --- firing state ---
   #enabled = true;
-  #fireAcc = 0;
+  /**
+   * Shared fire clock, in shot periods, wrapped to [0, 1). Stream `s` fires
+   * whenever `clock + phase[s]` crosses an integer, which gives every stream
+   * exactly the same rate on a permanently different phase for the cost of one
+   * scalar. Wrapping each tick keeps it exact forever — only the crossings
+   * matter, and shifting every clock by the same integer does not move them.
+   */
+  #fireClock = 0;
   #shotIndex = 0;
   #tier: WeaponTier = 0;
   #muzzleX = 0;
@@ -555,9 +684,44 @@ class Bullets implements BulletSystem, BulletView {
   #muzzleReported = false;
   #disposed = false;
 
+  // --- streams ---
+  /** Muzzle position of each live stream, rebuilt every tick. */
+  readonly #streamX = new Float32Array(MAX_STREAMS);
+  readonly #streamY = new Float32Array(MAX_STREAMS);
+  readonly #streamZ = new Float32Array(MAX_STREAMS);
+  /** Fire-clock offset, in shot periods. Constant for the life of the run. */
+  readonly #streamPhase = new Float32Array(MAX_STREAMS);
+  /** The part of a stream's aim error that does NOT change per shot, in units
+   *  of the tier's spread. This is what makes a stream a line. */
+  readonly #streamAim = new Float32Array(MAX_STREAMS);
+  /** Unit-disc slot used to place streams with no reported soldier behind them.
+   *  Vogel spiral, matching the squad's own layout. */
+  readonly #slotCos = new Float32Array(MAX_STREAMS);
+  readonly #slotSin = new Float32Array(MAX_STREAMS);
+  /** Fractional wobble on that slot's radius, so the rim is ragged. */
+  readonly #slotRadius = new Float32Array(MAX_STREAMS);
+  /** Streams filled from `setShooters` this tick; the rest are synthesised. */
+  #reportedCount = 0;
+
   constructor(scene: THREE.Scene) {
     this.#scene = scene;
     for (let i = 0; i < BULLET_POOL; i++) this.#free[i] = BULLET_POOL - 1 - i;
+
+    const rand = mulberry32(0xb0175);
+    for (let s = 0; s < MAX_STREAMS; s++) {
+      this.#streamPhase[s] = (s * GOLDEN_FRACTION) % 1;
+      this.#streamAim[s] = rand() * 2 - 1;
+      // Warped toward ±X and then jittered, exactly as `entities/squad.ts` warps
+      // and jitters its own spiral: warping alone makes the blob wide, and the
+      // jitter is what stops three streams landing in a tidy row. Only the angle
+      // is baked — the radius is applied per tick against the LIVE stream count,
+      // because a prefix of a fixed 96-slot spiral is a huddle, not a squad.
+      const spiral = s * GOLDEN_ANGLE;
+      const a = spiral - 0.35 * Math.sin(2 * spiral) + (rand() - 0.5) * 1.1;
+      this.#slotCos[s] = Math.cos(a);
+      this.#slotSin[s] = Math.sin(a);
+      this.#slotRadius[s] = (rand() - 0.5) * 0.34;
+    }
 
     this.#needleTex = needleTexture();
     this.#dartTex = dartTexture();
@@ -582,6 +746,31 @@ class Bullets implements BulletSystem, BulletView {
 
   // ------------------------------------------------------------------ public
 
+  setShooters(points: readonly THREE.Vector3[], count: number): void {
+    const n = Math.min(count, points.length);
+    if (n <= 0) {
+      this.#reportedCount = 0;
+      return;
+    }
+    // Stride rather than truncate: the first 96 of 400 reported units are the
+    // 96 the squad happened to list first, and taking them would collapse every
+    // stream onto whatever part of the blob that is.
+    const take = Math.min(n, MAX_STREAMS);
+    for (let s = 0; s < take; s++) {
+      // Spread the picks across the whole report, endpoints included.
+      const i = take > 1 ? Math.round((s * (n - 1)) / (take - 1)) : 0;
+      const p = points[i];
+      if (p === undefined) {
+        this.#reportedCount = s;
+        return;
+      }
+      this.#streamX[s] = p.x;
+      this.#streamY[s] = p.y;
+      this.#streamZ[s] = p.z;
+    }
+    this.#reportedCount = take;
+  }
+
   setMuzzle(x: number, y: number, z: number, halfWidth: number): void {
     this.#muzzleX = x;
     this.#muzzleY = y;
@@ -593,12 +782,21 @@ class Bullets implements BulletSystem, BulletView {
   fire(x: number, y: number, z: number, halfWidth: number, shots = 1): void {
     const hw = Math.min(halfWidth, CORRIDOR_HALF_WIDTH);
     const n = Math.min(shots, MAX_SHOTS_PER_TICK);
-    for (let i = 0; i < n; i++) this.#shoot(x, y, z, hw, this.#tier, 0);
+    const t = this.tuning;
+    const dart = this.#tier === 2;
+    const spread = dart ? t.tier2Spread : t.tier01Spread;
+    for (let i = 0; i < n; i++) {
+      // Triangular rather than uniform across the line: a blob is denser through
+      // the middle, and a uniform pick reads as a curtain with hard edges.
+      const u = Math.random() + Math.random() - 1;
+      const aim = u * (dart ? t.tier2Diverge : 0) + (Math.random() * 2 - 1) * spread;
+      this.#shootFrom(x + u * hw, y, z, aim, this.#tier, 0, 1);
+    }
   }
 
   setEnabled(on: boolean): void {
     this.#enabled = on;
-    if (!on) this.#fireAcc = 0;
+    if (!on) this.#fireClock = 0;
   }
 
   consume(id: number, x: number, y: number, z: number): void {
@@ -627,42 +825,128 @@ class Bullets implements BulletSystem, BulletView {
     this.#muzzles.advance(dt);
     this.#impacts.advance(dt);
 
-    if (!this.#enabled) {
-      this.#muzzleReported = false;
-      return;
-    }
-
-    // The squad's report only counts for the tick it was made in; if the squad
-    // system is not wired up yet we fall back to inferring the front rank so
-    // the module is useful on its own.
-    if (!this.#muzzleReported) this.#inferMuzzle(world);
+    // A report only counts for the tick it was made in — a stale muzzle line
+    // would drag the streams behind the blob for as long as the squad stayed
+    // quiet. Cleared here so both early-outs below still consume it.
+    const reported = this.#reportedCount;
+    const muzzleReported = this.#muzzleReported;
+    this.#reportedCount = 0;
     this.#muzzleReported = false;
 
-    const rate = shotsPerSecond(world.weaponTier, world.troops, this.tuning);
-    if (rate <= 0) return;
+    if (!this.#enabled) return;
 
-    const interval = 1 / rate;
-    this.#fireAcc += dt;
-    let guard = MAX_SHOTS_PER_TICK;
-    while (this.#fireAcc >= interval && guard > 0) {
-      this.#fireAcc -= interval;
-      guard--;
-      // `#fireAcc` is now exactly how long ago inside this tick the shot went
-      // off, so advancing the bullet by that much spreads a volley smoothly
-      // between tick boundaries. Skipping this is what makes an instanced
-      // stream look like marching rows.
-      this.#shoot(
-        this.#muzzleX,
-        this.#muzzleY,
-        this.#muzzleZ,
-        this.#muzzleHalfWidth,
-        world.weaponTier,
-        this.#fireAcc,
-      );
+    // If the squad system is not wired up yet, infer the blob so the module is
+    // useful standing alone.
+    if (!muzzleReported) this.#inferMuzzle(world);
+
+    const t = this.tuning;
+    const tier = world.weaponTier;
+    const streams = this.#layOutStreams(world.troops, reported);
+    if (streams === 0) return;
+
+    const total = totalShotsPerSecond(tier, world.troops, t);
+    if (total <= 0) return;
+
+    // Every stream fires at the same rate; the crowd's volume is the sum, which
+    // is the whole point of the model.
+    const perStream = total / streams;
+    const advance = perStream * dt;
+    if (advance <= 0) return;
+
+    // One flame per `flashStride` shots, chosen so flames/sec never exceeds the
+    // cap however many soldiers are firing. At one soldier this is 1 — every
+    // shot flashes, as it must when there is only one muzzle to look at.
+    const flashStride = Math.max(1, Math.ceil(total / Math.max(1, t.muzzleRateCap)));
+
+    const prev = this.#fireClock;
+    const next = prev + advance;
+    this.#fireClock = next - Math.floor(next);
+
+    const dart = tier === 2;
+    const spread = dart ? t.tier2Spread : t.tier01Spread;
+    const diverge = dart ? t.tier2Diverge : 0;
+    const rolled = spread * clamp01(t.shotJitterFraction);
+    const fixed = spread - rolled;
+    // Divergence is proportional to how far off-centre the soldier stands, so
+    // the cone opens with the blob and not with the troop count.
+    const invHalf = 1 / Math.max(this.#muzzleHalfWidth, 0.05);
+
+    let budget = MAX_SHOTS_PER_TICK;
+    for (let s = 0; s < streams && budget > 0; s++) {
+      const phase = this.#streamPhase[s]!;
+      const from = Math.floor(prev + phase);
+      let shots = Math.floor(next + phase) - from;
+      if (shots <= 0) continue;
+      if (shots > MAX_SHOTS_PER_STREAM_PER_TICK) shots = MAX_SHOTS_PER_STREAM_PER_TICK;
+      if (shots > budget) shots = budget;
+      budget -= shots;
+
+      const ox = this.#streamX[s]!;
+      const oy = this.#streamY[s]!;
+      const oz = this.#streamZ[s]!;
+      const off = clamp((ox - this.#muzzleX) * invHalf, -1, 1);
+      const aim = off * diverge + this.#streamAim[s]! * fixed;
+
+      for (let k = 0; k < shots; k++) {
+        // Where inside this tick the clock actually crossed. Advancing the
+        // bullet by the remainder is what spreads a volley smoothly between
+        // tick boundaries — skip it and an instanced stream marches in rows.
+        const cross = from + 1 + k;
+        const age = (1 - (cross - prev - phase) / advance) * dt;
+        this.#shotIndex++;
+        this.#shootFrom(
+          ox,
+          oy,
+          oz,
+          aim + (Math.random() * 2 - 1) * rolled,
+          tier,
+          age < 0 ? 0 : age,
+          this.#shotIndex % flashStride === 0 ? 1 : 0,
+        );
+      }
     }
-    // A backlog can only come from a rate spike or a resumed tab; catching up
-    // on it would fire a wall of bullets nobody asked for.
-    if (guard === 0) this.#fireAcc = 0;
+  }
+
+  /**
+   * Fill `#stream*` with one muzzle per troop, up to the stream cap.
+   *
+   * Reported soldier positions are used verbatim and come first. Anything the
+   * squad could not report — because its sampler is narrower than the blob, or
+   * because nobody called `setShooters` at all — is laid out across the blob
+   * from the muzzle line, so the stream COUNT is right even when the positions
+   * are only approximate. Returns how many streams are live.
+   */
+  #layOutStreams(troops: number, reported: number): number {
+    const cap = Math.min(MAX_STREAMS, Math.max(0, Math.floor(this.tuning.maxStreams)));
+    const want = Math.min(Math.max(0, Math.floor(troops)), cap);
+    if (want === 0) return 0;
+
+    const filled = Math.min(reported, want);
+    if (filled < want) {
+      // r = sqrt(s / (count-1)) is the squad's own radial law: area-uniform, and
+      // it pins slot 0 at the dead centre and the last slot on the rim. Pinning
+      // slot 0 is what makes a ONE-troop squad fire out of its own rifle rather
+      // than from somewhere off its shoulder, and taking the denominator from
+      // the live count is what makes a THREE-troop squad span the blob instead
+      // of huddling at the middle of a 96-slot spiral.
+      const halfWidth = this.#muzzleHalfWidth;
+      const halfDepth = halfWidth * BLOB_DEPTH_RATIO;
+      const edge = CORRIDOR_HALF_WIDTH - 0.1;
+      const denom = want > 1 ? want - 1 : 1;
+      for (let s = filled; s < want; s++) {
+        const base = want > 1 ? Math.sqrt(s / denom) : 0;
+        const r = Math.max(0, base + this.#slotRadius[s]! * base);
+        const x = this.#muzzleX + this.#slotCos[s]! * r * halfWidth;
+        this.#streamX[s] = x < -edge ? -edge : x > edge ? edge : x;
+        // The reported z is the FRONT edge of the blob, so the body of it lies
+        // behind: shift the unit disc into [0, 2·halfDepth] rather than
+        // straddling zero, or half the streams start in front of the squad.
+        this.#streamZ[s] = this.#muzzleZ + (this.#slotSin[s]! * r + 1) * halfDepth;
+        this.#streamY[s] = this.#muzzleY;
+      }
+    }
+
+    return want;
   }
 
   render(alpha: number, _world: WorldState): void {
@@ -792,25 +1076,30 @@ class Bullets implements BulletSystem, BulletView {
     this.#muzzleHalfWidth = halfWidth;
   }
 
-  /** One shot. `age` is how far into its flight it already is, in seconds. */
-  #shoot(
-    cx: number,
-    cy: number,
-    cz: number,
-    halfWidth: number,
+  /**
+   * One shot from one stream's muzzle. `angle` is the aim in radians (0 = up
+   * the corridor), `age` is how far into its flight the round already is, and
+   * `flash` requests a muzzle flame.
+   *
+   * Everything randomised in here is PER SHOT and deliberately small: the aim
+   * and the origin are the stream's, and a stream whose origin wandered would
+   * be a spray. Speed and vertical jitter are the exceptions — they scatter
+   * rounds ALONG a stream rather than across it, which is what stops a column
+   * of evenly-spaced sprites reading as a lattice.
+   */
+  #shootFrom(
+    sx: number,
+    sy: number,
+    sz: number,
+    angle: number,
     tier: WeaponTier,
     age: number,
+    flash: number,
   ): void {
     if (this.#freeCount === 0) return;
     const t = this.tuning;
     const dart = tier === 2;
 
-    // Triangular rather than uniform across the muzzle line: the blob is denser
-    // through the middle, and a uniform pick reads as a curtain with hard edges.
-    const u = Math.random() + Math.random() - 1;
-
-    const spread = dart ? t.tier2Spread : t.tier01Spread;
-    const angle = u * (dart ? t.tier2Diverge : 0) + (Math.random() * 2 - 1) * spread;
     const speed =
       (dart ? t.dartSpeed : t.tracerSpeed) * (1 + (Math.random() - 0.5) * t.speedJitter);
 
@@ -828,10 +1117,9 @@ class Bullets implements BulletSystem, BulletView {
     // the bullets themselves are free to drift over the kerb, which is what
     // the reference's tier-2 cone does on its right-hand edge.
     const edge = CORRIDOR_HALF_WIDTH - 0.1;
-    const ox = Math.min(Math.max(cx + u * halfWidth, -edge), edge);
-    const oy = cy + (Math.random() - 0.5) * 0.12;
-    // Ragged front edge — the reference's outermost units trail the blob.
-    const oz = cz - Math.random() * 0.25;
+    const ox = sx < -edge ? -edge : sx > edge ? edge : sx;
+    const oy = sy + (Math.random() - 0.5) * 0.12;
+    const oz = sz;
 
     const id = this.#free[--this.#freeCount]!;
     this.#slot[id] = this.#count;
@@ -857,11 +1145,9 @@ class Bullets implements BulletSystem, BulletView {
     const nominal = dart ? t.dartSpeed : t.tracerSpeed;
     this.#size[id] = (speed / nominal) * (0.88 + Math.random() * 0.24);
 
-    // Every tier-0/1 shot flashes; at 280 rounds/sec that would be a strobe, so
-    // the firehose only flashes on every Nth.
-    this.#shotIndex++;
-    const flash = !dart || this.#shotIndex % Math.max(1, t.muzzleEveryNth | 0) === 0;
-    if (flash) {
+    // The caller decides — the flash stride is derived from the live shot rate
+    // so one soldier flashes on every round and a thousand do not strobe.
+    if (flash !== 0) {
       const tint = dart ? TINT_CYAN : TINT_WARM;
       this.#muzzles.spawn(
         ox,
@@ -903,22 +1189,61 @@ class Bullets implements BulletSystem, BulletView {
   }
 }
 
-function shotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning): number {
-  if (tier === 0) {
-    return t.tier0Rate + t.tier0RatePerTroop * (Math.min(Math.max(troops, 1), 3) - 1);
-  }
-  if (tier === 1) {
-    return lerp(t.tier1RateMin, t.tier1RateMax, clamp01((troops - 3) / t.tier1RampTroops));
-  }
-  return lerp(t.tier2RateMin, t.tier2RateMax, clamp01(troops / t.tier2RampTroops));
+/**
+ * Total shots/second across the whole squad.
+ *
+ * The honest answer is `troops × rate`, one stream each. This governs that
+ * against the pool, because at 1200 troops the honest answer asks for ~13× the
+ * bullets that exist. The soft clip
+ *
+ *     total = desired / (1 + (desired/max)^k)^(1/k)
+ *
+ * is strictly increasing for all desired > 0 with an asymptote at `max` — proof
+ * is one line: d(ln total)/d(desired) = 1 / (desired · (1 + (desired/max)^k)),
+ * which is positive everywhere. So more troops is ALWAYS more bullets, and the
+ * pool can never be overrun no matter how the tiers or the troop cap move.
+ *
+ * `max` is a rate, derived from the live-bullet budget and how long a round
+ * survives: live ≈ rate × flightTime, so rate_max = budget / flightTime. Tier 2
+ * rounds are slower, live longer and therefore get a lower rate ceiling for the
+ * same on-screen population — which is correct, and is why this is computed per
+ * tier rather than hard-coded.
+ */
+function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletTuning): number {
+  const n = Math.max(0, Math.floor(troops));
+  if (n === 0) return 0;
+
+  const perShooter =
+    tier === 0 ? t.tier0RatePerShooter : tier === 1 ? t.tier1RatePerShooter : t.tier2RatePerShooter;
+  const desired = n * Math.max(0, perShooter);
+  if (desired <= 0) return 0;
+
+  const speed = tier === 2 ? t.dartSpeed : t.tracerSpeed;
+  const flightTime = t.range / Math.max(1e-3, speed);
+  const max = Math.max(1, t.maxLiveBullets) / Math.max(1e-3, flightTime);
+
+  const k = Math.max(0.5, t.saturationKnee);
+  return desired / Math.pow(1 + Math.pow(desired / max, k), 1 / k);
 }
 
-function lerp(a: number, b: number, k: number): number {
-  return a + (b - a) * k;
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Seeded PRNG, so a stream's fixed aim is the same on every run. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 // ---------------------------------------------------------------------------

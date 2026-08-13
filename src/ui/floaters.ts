@@ -18,9 +18,19 @@
  * takes the next slot in a ring and stomps the oldest floater when saturated,
  * which is cheaper and more predictable than a free list and never visible at
  * a 64-deep pool.
+ *
+ * PLACEMENT IS THE HARD PART, not the animation. A dozen numbers that overlap
+ * is one illegible number, and it costs the beat its entire meaning. Two rules
+ * do the work, and both are in `spawn`:
+ *
+ *   - the burst uses the FULL width of the blob and a little beyond it, and
+ *   - no two floaters of the same beat may land within MIN_SEP of each other
+ *     ON SCREEN — measured through the fixed camera's projection, because
+ *     world-space distance and apparent distance differ by 2.5x in depth.
  */
 
 import * as THREE from "three";
+import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import type { System, WorldState } from "../core/types";
 
 // ---------------------------------------------------------------- tunables
@@ -35,9 +45,16 @@ const CAPACITY = 64;
 const MAX_PER_BURST = 20;
 
 /**
- * World-units per quad edge. Measured, not guessed: at the corridor camera's
- * framing this puts the glyph ink at 8-10% of a 390pt screen's width, and the
- * reference's "+1" measures 8.6%.
+ * World-units per quad edge.
+ *
+ * Careful with this number: it sizes the QUAD, and the glyph's ink fills only
+ * about 57% of the quad's width (145px of ink centred in a 256px texture). At
+ * this camera the visible width at the floaters' depth is ~5.6m, so a 0.52m
+ * quad is 9.3% of screen width but the ink is only ~5.3% — against 8.6% for
+ * the reference's "+1". Matching that means either a bigger quad or a tighter
+ * texture, and both make the pile-up problem below worse, so it is a scope
+ * call rather than a bug. Left as measured; do not "correct" it to 8.6 by
+ * changing this constant alone.
  */
 const SIZE = 0.52;
 
@@ -65,17 +82,56 @@ const FADE_FROM = 0.55;
  *  visibly different ages, so they were not all born on one frame. */
 const STAGGER = 0.16;
 
+/**
+ * SCATTER — how wide the burst spreads, as a multiple of the blob's HALF-WIDTH.
+ *
+ * `spawn` is handed `squad.radiusX`, which is ~2.5m at 45 troops (a ~5m wide
+ * clump). The first pass topped out at 0.86× that, so a dozen floaters fought
+ * over a 4.2m band and stacked into an unreadable "+1+1+1" near the centre.
+ * `frame_023` uses the FULL width of the crowd and overhangs it slightly, so
+ * this goes past 1.0 on purpose.
+ */
+const SCATTER_WIDE = 1.18;
 /** The blob is wider than deep, so the scatter ellipse is too (REFERENCE). */
-const SCATTER_DEPTH = 0.6;
+const SCATTER_DEPTH = 0.55;
+/** Inner limit of the scatter ring, as a fraction of the reach. Keeps the burst
+ *  off the squad's own HP bar without hollowing the middle out. */
+const SCATTER_FLOOR = 0.22;
+/** Floor on the reach so a 3-troop squad's payout still fans out instead of
+ *  landing on one spot. */
+const MIN_REACH = 1.2;
 /** Metres above the squad centre the lowest floaters appear (helmet height). */
-const HEIGHT_BASE = 1.3;
-const HEIGHT_SPREAD = 1.1;
+const HEIGHT_BASE = 1.25;
+const HEIGHT_SPREAD = 1.5;
 /** Default scatter radius when the caller does not know the blob's size. */
 const DEFAULT_RADIUS = 1.6;
+
+/**
+ * MINIMUM SEPARATION, in metres of apparent (screen-plane) distance at the
+ * squad's depth — not world distance. Two floaters a metre apart in Z are only
+ * ~0.38m apart on screen at this camera, so a world-space separation test
+ * would happily stack them; see `screenX`/`screenY` below.
+ *
+ * The "+1" ink is about 0.30m wide and 0.24m tall on a 0.52m quad, so 0.58
+ * leaves a clear gap at the tightest legal packing.
+ */
+const MIN_SEP = 0.58;
+/** Placement attempts per floater (Mitchell best-candidate). Bounded work, no
+ *  allocation, and it degrades to "the least bad spot" rather than failing when
+ *  a 20-strong burst genuinely runs out of room. */
+const CANDIDATES = 12;
+/** Floaters younger than this still count as "this beat" for the separation
+ *  test, so two payouts a few frames apart do not land on each other. */
+const RECENT = 0.35;
 
 /** 137.5°. Consecutive floaters land far apart in bearing, which is what stops
  *  a burst from stacking into a readable-as-one column. */
 const GOLDEN_ANGLE = 2.39996323;
+
+/** Sideways metres/second of outward push, per metre of offset from the burst
+ *  centre. Small, but it makes the drift diverge instead of converge — spacing
+ *  bought at spawn then survives the whole 1s life. */
+const OUTWARD = 0.13;
 
 // Texture: square and power-of-two so mipmapping is uncontroversial on every
 // driver. The wasted vertical space costs nothing — transparent texels are
@@ -149,6 +205,31 @@ interface Floater {
 }
 
 // ---------------------------------------------------------------- internals
+
+/**
+ * SCREEN-PLANE BASIS for the fixed camera, built once at module load.
+ *
+ * The camera never rotates or pans (REFERENCE, "Camera & staging"), so the map
+ * from a world offset near the squad to an apparent on-screen offset is a
+ * constant 2x3 matrix — no camera object, no per-frame projection, and the
+ * `System` contract stays camera-free. Perspective divide is ignored: over a
+ * 6m blob at ~13m it changes the scale by a few percent, which is far below
+ * the separation this is used to enforce.
+ *
+ * For this camera it works out to roughly `sx = dx`, `sy = 0.93·dy − 0.38·dz`:
+ * height is nearly 1:1 on screen, depth is foreshortened to about 40%.
+ */
+const _viewZ = new THREE.Vector3().subVectors(CAMERA_POS, CAMERA_LOOK).normalize();
+const _viewX = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), _viewZ).normalize();
+const _viewY = new THREE.Vector3().crossVectors(_viewZ, _viewX);
+
+function screenX(dx: number, dy: number, dz: number): number {
+  return dx * _viewX.x + dy * _viewX.y + dz * _viewX.z;
+}
+
+function screenY(dx: number, dy: number, dz: number): number {
+  return dx * _viewY.x + dy * _viewY.y + dz * _viewY.z;
+}
 
 /** Deterministic so a replayed sim produces an identical burst. */
 let seed = 0x9e3779b9;
@@ -234,6 +315,10 @@ class Floaters implements FloaterSystem {
   readonly #posBuf: Float32Array;
   readonly #sizeBuf: Float32Array;
   readonly #alphaBuf: Float32Array;
+  /** Screen-plane positions of everything already placed this beat, so the
+   *  separation test never allocates. Rewritten from scratch on every `spawn`. */
+  readonly #occX = new Float32Array(CAPACITY);
+  readonly #occY = new Float32Array(CAPACITY);
   #cursor = 0;
   #live = 0;
   #scene: THREE.Scene | null;
@@ -317,28 +402,89 @@ class Floaters implements FloaterSystem {
 
   spawn(center: THREE.Vector3, count: number, radius = DEFAULT_RADIUS): void {
     const n = Math.min(Math.max(count | 0, 0), MAX_PER_BURST);
+    if (n === 0) return;
+    const reach = Math.max(radius, MIN_REACH) * SCATTER_WIDE;
+    const sep2 = MIN_SEP * MIN_SEP;
+
+    // Seed the occupancy list with floaters from the last fraction of a second.
+    // A gate and a barrel can pay out three frames apart; to the eye that is one
+    // beat, and a burst that ignores the previous one lands right on top of it.
+    let placed = 0;
+    for (const o of this.#pool) {
+      if (!o.live || o.age > RECENT || placed >= CAPACITY) continue;
+      const dx = o.x - center.x;
+      const dy = o.y - center.y;
+      const dz = o.z - center.z;
+      this.#occX[placed] = screenX(dx, dy, dz);
+      this.#occY[placed] = screenY(dx, dy, dz);
+      placed++;
+    }
+
     for (let i = 0; i < n; i++) {
       const f = this.#pool[this.#cursor];
       this.#cursor = (this.#cursor + 1) % CAPACITY;
       if (!f) continue;
 
-      // Golden-angle spiral, jittered: an even fill of the ellipse in which no
-      // two consecutive floaters share a bearing.
-      const bearing = i * GOLDEN_ANGLE + rand() * 0.9;
-      // Tops out inside the blob's own footprint: in `frame_023` the spray of
-      // numbers is slightly narrower than the mass it is paying out for, which
-      // is what keeps it reading as "these units" rather than "this area".
-      const r = radius * (0.18 + 0.68 * Math.sqrt((i + rand()) / n));
-      f.x = center.x + Math.cos(bearing) * r;
-      f.z = center.z + Math.sin(bearing) * r * SCATTER_DEPTH;
-      f.y = center.y + HEIGHT_BASE + rand() * HEIGHT_SPREAD;
+      // BEST-CANDIDATE PLACEMENT. Draw up to CANDIDATES offsets, keep the one
+      // furthest (in screen-plane distance) from everything already placed, and
+      // stop early the moment one clears MIN_SEP. A golden-angle spiral alone —
+      // what this used to be — spaces floaters in BEARING but says nothing
+      // about how close two of them end up once the radii differ, which is how
+      // eight of them ended up in one legible-as-one clump.
+      let bx = 0;
+      let by = 0;
+      let bz = 0;
+      let bsx = 0;
+      let bsy = 0;
+      let best = -1;
+      for (let c = 0; c < CANDIDATES; c++) {
+        const bearing = i * GOLDEN_ANGLE + c * 0.61 + rand() * 1.3;
+        // Area-uniform radius off a floor, so the ring fills evenly rather than
+        // crowding the middle the way a linear radius would.
+        const rr = SCATTER_FLOOR + (1 - SCATTER_FLOOR) * Math.sqrt((i + rand()) / n);
+        const ox = Math.cos(bearing) * rr * reach;
+        const oz = Math.sin(bearing) * rr * reach * SCATTER_DEPTH;
+        const oy = HEIGHT_BASE + rand() * HEIGHT_SPREAD;
+        const sx = screenX(ox, oy, oz);
+        const sy = screenY(ox, oy, oz);
+
+        let nearest = Infinity;
+        for (let k = 0; k < placed; k++) {
+          const ddx = sx - this.#occX[k]!;
+          const ddy = sy - this.#occY[k]!;
+          const d2 = ddx * ddx + ddy * ddy;
+          if (d2 < nearest) nearest = d2;
+        }
+        if (nearest > best) {
+          best = nearest;
+          bx = ox;
+          by = oy;
+          bz = oz;
+          bsx = sx;
+          bsy = sy;
+        }
+        if (best >= sep2) break;
+      }
+
+      if (placed < CAPACITY) {
+        this.#occX[placed] = bsx;
+        this.#occY[placed] = bsy;
+        placed++;
+      }
+
+      f.x = center.x + bx;
+      f.y = center.y + by;
+      f.z = center.z + bz;
       f.px = f.x;
       f.py = f.y;
       f.pz = f.z;
 
-      f.vx = rand2() * DRIFT;
+      // Drift is biased outward from the burst centre. Purely random drift can
+      // walk two well-separated floaters into each other over a one-second
+      // life, which would undo the placement work above halfway through.
+      f.vx = bx * OUTWARD + rand2() * DRIFT * 0.5;
       f.vy = RISE * (1 + rand2() * RISE_JITTER);
-      f.vz = rand2() * DRIFT * SCATTER_DEPTH;
+      f.vz = bz * OUTWARD + rand2() * DRIFT * SCATTER_DEPTH * 0.5;
 
       f.life = LIFETIME * (1 + rand2() * LIFETIME_JITTER);
       f.delay = (i / n) * STAGGER * rand();
