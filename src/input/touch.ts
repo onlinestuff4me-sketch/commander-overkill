@@ -16,8 +16,20 @@ import { bus } from "../core/events";
 
 const TAP_MS = 250;
 const TAP_SLOP = 12;
-/** Screen widths of drag needed to cross the corridor once. Tuned on a phone, not a desktop. */
-const DRAG_SENSITIVITY = 1.6;
+/**
+ * Screen widths of drag needed to cross the corridor once.
+ *
+ * 1.6 was far too slow: crossing the road took more than a full swipe of the
+ * screen, so dodging a red segment meant re-gripping mid-gesture and the whole
+ * game felt like wading. At 0.7 a comfortable thumb arc — roughly a third of
+ * the screen — covers the corridor, which is the range a one-handed grip
+ * actually has.
+ *
+ * This is the OUTER half of steering feel. The inner half is how fast the
+ * crowd converges on this target, which lives in the squad's spring constants;
+ * loosening one without the other just moves where the lag comes from.
+ */
+const DRAG_SENSITIVITY = 0.7;
 
 export class TouchDriver {
   /** Current steering target, normalised to [-1, 1]. Read by the sim each tick. */
