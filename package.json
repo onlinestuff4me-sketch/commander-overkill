@@ -1,0 +1,26 @@
+{
+  "name": "commander-overkill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portrait mobile line-runner. Steer a swarm through multiplier gates. The Commander takes it extremely seriously.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "0.185.4",
+    "lil-gui": "0.21.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

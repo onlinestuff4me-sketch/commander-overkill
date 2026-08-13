@@ -1,0 +1,64 @@
+/**
+ * RENDERER BOOTSTRAP — canvas, camera, lights, and the resize policy.
+ *
+ * THE DPR CAP IS THE WHOLE PERFORMANCE STORY ON PHONES. A modern handset
+ * reports devicePixelRatio 3, which is 9× the pixels of DPR 1 for a display
+ * you hold at arm's length. Capping at 2 is invisible to the eye and buys back
+ * roughly half the fill rate — the single cheapest 60fps decision available.
+ */
+
+import * as THREE from "three";
+
+/** Portrait framing: the corridor runs away from the player down -Z. */
+export const CAMERA_POS = new THREE.Vector3(0, 7.5, 9.5);
+export const CAMERA_LOOK = new THREE.Vector3(0, 0, -9);
+
+const MAX_DPR = 2;
+
+export interface Stage {
+  renderer: THREE.WebGLRenderer;
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  resize: () => void;
+}
+
+export function createStage(canvas: HTMLCanvasElement): Stage {
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: "high-performance",
+  });
+  renderer.setClearColor(0x7cc4e8);
+
+  const scene = new THREE.Scene();
+  // Fog hides the corridor's far end so we never have to draw geometry that is
+  // about to be culled anyway, and it reads as bright haze rather than a void.
+  scene.fog = new THREE.Fog(0x7cc4e8, 34, 62);
+
+  const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 100);
+  camera.position.copy(CAMERA_POS);
+  camera.lookAt(CAMERA_LOOK);
+
+  // Two lights, no shadow maps. Shadows are the second thing that kills a
+  // mobile frame budget; the cartoon look does not need them.
+  const key = new THREE.DirectionalLight(0xffffff, 2.1);
+  key.position.set(4, 10, 6);
+  scene.add(key);
+  scene.add(new THREE.HemisphereLight(0xcfefff, 0x4a7a3a, 1.5));
+
+  const resize = (): void => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_DPR));
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  };
+  resize();
+  window.addEventListener("resize", resize);
+  // iOS fires resize before the URL bar finishes collapsing; orientation needs
+  // a second pass or the canvas is short by the bar's height for one frame.
+  window.addEventListener("orientationchange", () => setTimeout(resize, 100));
+
+  return { renderer, scene, camera, resize };
+}

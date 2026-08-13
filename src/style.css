@@ -1,0 +1,53 @@
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #7cc4e8;
+  /* Kill every browser gesture that competes with a thumb dragging the commander. */
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+#stage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+#ui {
+  position: fixed;
+  inset: 0;
+  /* The UI layer never eats touches; individual controls opt back in. */
+  pointer-events: none;
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+}
+
+.perf {
+  position: absolute;
+  top: calc(var(--safe-top) + 8px);
+  left: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #9dff9d;
+  font: 600 11px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre;
+}
