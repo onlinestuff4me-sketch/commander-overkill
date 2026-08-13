@@ -270,122 +270,92 @@ const COLOR_RIFLE_WOOD = 0x7a4f2c;
 const BODY_LEAN = 0.12;
 
 // ---------------------------------------------------------------------------
-// CONTAINMENT — derived, not tuned
+// CONTAINMENT — what the crowd is allowed to overflow
 //
-// "No unit stands on the grass" is three separate margins, and the first cut
-// only had a fraction of the first one:
+// This used to enforce "no unit stands on the grass", derived from three
+// margins: the blob's own reach, the unit's body width, and the perspective
+// error that puts a standing soldier's shoulders further from the centreline
+// than his boots. It was correct, and it produced a crowd that could not grow
+// and could not steer — at 50 troops the centre had ±0.50 m of a 6.8 m road.
 //
-//   1. the blob's own reach — the ellipse PLUS the radial jitter, edge jitter,
-//      jostle and spring slack that sit on top of it,
-//   2. the unit's own body — a soldier clamped by his navel still puts a
-//      shoulder over the kerb,
-//   3. perspective — a soldier is 1.2 m tall and the camera is only 34° above
-//      him, so his shoulders project further from the road's centreline than his
-//      boots do. Feet inside the kerb is not the same as body inside the kerb,
-//      and it is worse the nearer the camera he stands.
+// `reference-media/reference-clip-1a.mov` settles it: that crowd is as wide as
+// its carriageway, is frequently cut off by the edge of the SCREEN, and steers
+// by moving its centre to the very edge of the road with half the army hanging
+// over the shoulder. Overflow is the design, not a defect to be clamped out.
 //
-// Everything below falls out of those three; nothing here is eyeballed.
+// What survives is a backstop (`UNIT_OVERHANG_LIMIT`) that stops a spring from
+// throwing a unit clear of the world during a hard steer.
 // ---------------------------------------------------------------------------
 
 /** Raw-geometry half-width of the widest part of a unit, and how high that
  *  widest part sits. Both are the shoulder yoke's top corners, and the geometry
  *  below is built FROM these rather than measured against them, so the two
- *  cannot drift apart. The height is what drives margin 3.
+ *  cannot drift apart.
  *
  *  0.29 puts a soldier at 0.609 m across once UNIT_SCALE is applied, which is
  *  the 0.58–0.60 m `REFERENCE.md` measures and the number its "~11 fit abreast
- *  on a 6.8 m road" cap is built on. The first pass at this geometry drifted to
- *  0.672 m while fitting a rifle and arms on, and 12% of extra width costs 23%
- *  of the packing capacity — enough on its own to turn a legible crowd into a
- *  slab. The rifle is deliberately NOT in this number; see the note on it below. */
+ *  on a 6.8 m road" figure is built on. The first pass at this geometry drifted
+ *  to 0.672 m while fitting a rifle and arms on, and 12% of extra width costs
+ *  23% of the packing capacity — enough on its own to turn a legible crowd into
+ *  a slab. The rifle is deliberately NOT in this number: angled out for
+ *  legibility its muzzle reaches 0.49 m from a soldier's centre, 1.7x his own
+ *  half-width, and it is a weapon overhanging a crowd rather than part of the
+ *  body being packed. */
 const UNIT_HALF_WIDTH = 0.29;
 const UNIT_SHOULDER_Y = 1.07;
 
-/** Mirrors the kerb `lane.ts` builds — a 0.35-thick, 0.4-tall box straddling
- *  ±CORRIDOR_HALF_WIDTH. Its inner face is the line a body may not cross. These
- *  two numbers are the only thing this module duplicates from that file; if the
- *  kerb changes shape, they change with it. */
-const KERB_INSET = 0.2;
-const KERB_TOP_Y = 0.4;
-
 /**
- * Depth of a world point along the camera's forward axis. The camera never
- * moves, so this is a fixed function of (y, z) and runs once at module load.
- */
-function cameraDepth(y: number, z: number): number {
-  const dx = CAMERA_LOOK.x - CAMERA_POS.x;
-  const dy = CAMERA_LOOK.y - CAMERA_POS.y;
-  const dz = CAMERA_LOOK.z - CAMERA_POS.z;
-  const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  return (dy / len) * (y - CAMERA_POS.y) + (dz / len) * (z - CAMERA_POS.z);
-}
-
-/**
- * Hard limit on a unit's centre X. A point's horizontal screen position is
- * x / depth, so the kerb's inner face defines a SLOPE, and anything standing
- * higher than the kerb has to come further in to stay behind that slope.
- * Evaluated at the nearest z the blob can reach, because near the camera the
- * depth is smallest and the outward drift is therefore largest. Works out to
- * ~2.77 — a good 0.4 tighter than the naive `CORRIDOR_HALF_WIDTH - 0.25`.
- */
-const UNIT_X_LIMIT = (() => {
-  const zNear =
-    SQUAD_Z + RADIUS_Z_MAX * (1 + RADIAL_JITTER / 2) + EDGE_JITTER + STRAGGLER_TRAIL;
-  const kerbSlope = (CORRIDOR_HALF_WIDTH - KERB_INSET) / cameraDepth(KERB_TOP_Y, zNear);
-  return (
-    kerbSlope * cameraDepth(UNIT_SHOULDER_Y * UNIT_SCALE, zNear) - UNIT_HALF_WIDTH * UNIT_SCALE
-  );
-})();
-
-/**
- * Steering swing we refuse to trade away no matter how big the squad gets. A
- * clump as wide as the road cannot steer, which is honest physics and is what
- * makes big squads feel unwieldy — but zero is not a difficulty curve, it is a
- * broken control, so the clump stops widening before it eats the last of it.
- */
-const MIN_STEER_RANGE = 0.5;
-
-/**
- * THE RIFLE IS NOT IN UNIT_HALF_WIDTH, DELIBERATELY. Angled out for legibility,
- * the muzzle reaches 0.49 m from a soldier's centre — 1.7x his own half-width —
- * so folding it into the clamp would cost 0.2 m of usable road on each side and
- * shrink the steering range that is already the tightest thing here. It sits at
- * y ≈ 1.2, three times the kerb's height, so at full lock a barrel passes OVER
- * the kerb rather than a man standing on it. "No unit's body crosses the kerb"
- * is the invariant; a weapon overhanging it is what the reference does too.
- */
-
-/**
- * Hard cap on half-width — the largest ellipse whose rim units still fit inside
- * UNIT_X_LIMIT with MIN_STEER_RANGE left over. ~1.63, i.e. ~8.5 soldiers
- * abreast, reached at ~30 units.
+ * Hard cap on half-width: the crowd may grow until it spans the whole road.
  *
- * WHERE OUR CURVE LEAVES THE REFERENCE'S, AND WHY. The reference does not
- * deepen past its width cap — at ~60 units it SPLITS INTO TWO GROUPS, which is
- * what the second HP bar in `frame_035` is, and each group then keeps its own
- * width budget and its own legibility. We cannot express that: `core/types.ts`
- * carries one `squadLane` and one `health`. So past the cap this does the only
- * thing a single blob can and grows backwards, and the read degrades on a
- * measurable schedule:
+ * ~2.5, i.e. ~8 abreast in the ellipse's core and past 13 across the widest
+ * rank once jitter is counted — reached at ~120 units instead of ~30. It was
+ * ~1.63, because it used to be "whatever is left of the road after reserving
+ * steering room and keeping every body inside the kerb". Both of those
+ * reservations are gone (see the CONTAINMENT note above), so this is now set by
+ * the road itself, minus only the jitter that sits on top of the ellipse.
  *
- *   ~30 units  both caps still slack; ~76% of each helmet visible, on-screen
- *              silhouette 1.4:1 wider than deep. Matches the reference.
- *   ~43 units  RADIUS_Z_MAX binds. The blob stops growing entirely, the rear
- *              rank reaches the bottom of the frame, and the silhouette falls to
- *              ~1.0:1 — it stops being wider than deep. THIS IS THE BOUNDARY.
- *   ~60 units  where the reference splits. We are at ~55% helmet visibility and
- *              1 unit in 5 is effectively buried.
- *   100+       ~38% visibility. A column, not a crowd. Known, not an oversight.
+ * WIDTH IS NOW A WEAPON, not just a silhouette. Fire travels as a parallel
+ * curtain (`convergeDistance` is 0 in mechanics/bullets.ts), so a crowd this
+ * wide covers several barrel lanes at once while a small one drills a single
+ * hole. Growing the army visibly widens what it can shoot, which is the
+ * mechanic `reference-clip-1a.mov` is built on.
  *
- * The contract change needed is an array of groups rather than a scalar:
- * `squadLane`/`health` become per-group, plus a product call on whether the
- * player steers both groups with one input or picks between them. That also
- * fixes the steering-range squeeze below, since two narrow blobs have room to
- * move where one wide one does not.
+ * DEPTH IS THE ONE THAT IS STILL PINNED. `RADIUS_Z_MAX` is a framing budget,
+ * not a road budget: the camera's bottom edge lands at z ≈ +2.8 and the rear
+ * rank walks off the screen past that. So the crowd grows both ways until ~120
+ * units and then can only grow backwards into a wall it has already reached.
+ * That is precisely why the camera has to step back — see `core/zoom.ts`.
  */
 const RADIUS_X_MAX =
-  (UNIT_X_LIMIT - MIN_STEER_RANGE - EDGE_JITTER - JOSTLE_AMPLITUDE - SPRING_SLACK) /
+  (CORRIDOR_HALF_WIDTH - EDGE_JITTER - JOSTLE_AMPLITUDE - SPRING_SLACK) /
   (1 + RADIAL_JITTER / 2);
+
+/**
+ * How far the crowd's CENTRE may travel from the centreline.
+ *
+ * The full road half-width, so the player can put the middle of the army on the
+ * kerb and let half of it hang over the shoulder — which is exactly what the
+ * reference clip does, repeatedly and on purpose, and what "move the group all
+ * the way to the edge" means. The previous rule (`UNIT_X_LIMIT` minus the
+ * crowd's own half-extent) meant a big crowd could barely move at all: at 50
+ * troops the centre had ±0.50 m of a 6.8 m road, which reads as a broken
+ * control rather than as a heavy army.
+ *
+ * The overhang is bounded by the crowd's own width rather than by a clamp, so
+ * "how much army is off the road" stays a consequence of how big it is.
+ */
+const CENTER_X_LIMIT = CORRIDOR_HALF_WIDTH;
+
+/**
+ * How far a single unit may end up from the centreline — the centre at full
+ * lock, plus the crowd's own reach on top. Bodies past the kerb are now
+ * expected rather than prevented (`UNIT_X_LIMIT` is what "inside the kerb"
+ * would have meant, and is kept for the shadow and containment maths), so this
+ * is only a backstop against a spring flinging a unit off the world during a
+ * hard steer.
+ */
+const UNIT_OVERHANG_LIMIT =
+  CENTER_X_LIMIT + RADIUS_X_MAX * (1 + RADIAL_JITTER / 2) + EDGE_JITTER + JOSTLE_AMPLITUDE;
 
 /** Vogel/sunflower spiral. Consecutive slots land ~137.5° apart, so any prefix
  *  of the slot order is already spatially spread — which is what makes
@@ -454,6 +424,7 @@ class Squad implements SquadSystem {
   #radiusX = 0;
   #radiusZ = 0;
   #shapedFor = -1;
+  #shapedAtZoom = 1;
 
   // --- centre steering ---
   #centerX = 0;
@@ -652,18 +623,13 @@ class Squad implements SquadSystem {
   update(dt: number, world: WorldState): void {
     this.#time += dt;
     this.setCount(world.troops);
-    this.#reshape();
+    this.#reshape(world.zoom);
 
-    // Big clumps cannot use the full lane range without standing on the grass.
-    // Shrinking the range with the blob is the honest consequence of being
-    // wide, and it is what makes the reference's big squads feel unwieldy.
-    //
-    // This is the FIRST of two containment gates and the one that does the real
-    // work: keep the centre far enough in that no target is ever placed outside
-    // the road, and the per-unit clamp below stays a safety net instead of
-    // becoming a wall the rim units pile up against.
-    const limit = Math.max(0, UNIT_X_LIMIT - this.#halfExtent());
-    const targetX = clamp(laneToX(world.squadLane), -limit, limit);
+    // The centre travels the whole road at every size. A crowd wider than the
+    // road overhangs it, which is what the reference does and what keeps a big
+    // army steerable — see CENTER_X_LIMIT. The per-unit clamp below is now the
+    // only containment, and it deliberately permits the overhang.
+    const targetX = clamp(laneToX(world.squadLane), -CENTER_X_LIMIT, CENTER_X_LIMIT);
 
     this.#prevCenterX = this.#centerX;
     this.#centerX += (targetX - this.#centerX) * Math.min(1, CENTER_FOLLOW * dt);
@@ -704,13 +670,14 @@ class Squad implements SquadSystem {
         // Pop in slightly outside the rim, then let the spring pull it in. The
         // growth team's +1 floater fires over the top of this.
         this.#live[i] = 1;
-        // Clamped like any other position: the 1.18 overshoot is the one place
-        // a unit is deliberately placed OUTSIDE the blob's own reach, so it is
-        // also the one place that would put a body on the kerb for free.
+        // Clamped like any other position, against the same overhang backstop —
+        // the 1.18 overshoot is the one place a unit is deliberately placed
+        // OUTSIDE the blob's own reach, so it is the one place that could throw
+        // a body clear of the crowd entirely.
         this.#posX[i] = clamp(
           this.#centerX + (tx - this.#centerX) * 1.18,
-          -UNIT_X_LIMIT,
-          UNIT_X_LIMIT,
+          -UNIT_OVERHANG_LIMIT,
+          UNIT_OVERHANG_LIMIT,
         );
         this.#posZ[i] = SQUAD_Z + (tz - SQUAD_Z) * 1.18;
         this.#prevX[i] = this.#posX[i]!;
@@ -730,17 +697,19 @@ class Squad implements SquadSystem {
       this.#velZ[i] = vz;
       this.#posZ[i] = this.#posZ[i]! + vz * dt;
 
-      // Second containment gate. The centre limit above means this almost never
-      // fires; it exists for the frames where it can — a hard steer where the
-      // spring is still carrying units outward after the centre has already
-      // stopped. Kill the outward velocity too, or a unit parks on the limit
-      // with stored momentum and snaps when it is finally released.
+      // The only containment gate left, and it now sits at the OVERHANG limit
+      // rather than at the kerb: a crowd steered hard to one side is supposed to
+      // hang over the shoulder, and clamping every rim unit to the kerb turned
+      // that into a visible wall the whole flank piled up against. What this
+      // still prevents is a unit being flung to the horizon by a hard steer
+      // while its spring is mid-flight. Kill the outward velocity too, or a unit
+      // parks on the limit with stored momentum and snaps when released.
       const nx = this.#posX[i]! + vx * dt;
-      if (nx > UNIT_X_LIMIT) {
-        this.#posX[i] = UNIT_X_LIMIT;
+      if (nx > UNIT_OVERHANG_LIMIT) {
+        this.#posX[i] = UNIT_OVERHANG_LIMIT;
         this.#velX[i] = vx < 0 ? vx : 0;
-      } else if (nx < -UNIT_X_LIMIT) {
-        this.#posX[i] = -UNIT_X_LIMIT;
+      } else if (nx < -UNIT_OVERHANG_LIMIT) {
+        this.#posX[i] = -UNIT_OVERHANG_LIMIT;
         this.#velX[i] = vx > 0 ? vx : 0;
       } else {
         this.#posX[i] = nx;
@@ -837,30 +806,12 @@ class Squad implements SquadSystem {
 
   // -------------------------------------------------------------------------
 
-  /**
-   * Furthest from the blob centre that a unit's TARGET can be placed. Every term
-   * the layout adds on top of the ellipse belongs in this sum — if one goes
-   * missing, the steering limit built on it is a lie and the rim walks onto the
-   * grass. Mirrors the `tx` expression in update() exactly, at its worst case.
-   *
-   * A lone soldier is not on the rim (rNorm is 0 at count ≤ 1), so he gets the
-   * core's tightened jitter and keeps nearly the whole road to steer with.
-   */
-  #halfExtent(): number {
-    const rim = this.#count > 1 ? 1 : 0;
-    const loose = CORE_TIGHTNESS + (1 - CORE_TIGHTNESS) * rim;
-    return (
-      this.#radiusX * rim * (1 + RADIAL_JITTER / 2) +
-      EDGE_JITTER * loose +
-      JOSTLE_AMPLITUDE +
-      SPRING_SLACK
-    );
-  }
 
   /** Clump ellipse from troop count. Only runs when the count actually moves. */
-  #reshape(): void {
-    if (this.#shapedFor === this.#count) return;
+  #reshape(zoom: number): void {
+    if (this.#shapedFor === this.#count && this.#shapedAtZoom === zoom) return;
     this.#shapedFor = this.#count;
+    this.#shapedAtZoom = zoom;
 
     const root = Math.sqrt(this.#count);
     const idealX = SPREAD * root * (1 + SMALL_SQUAD_FLARE / Math.max(1, this.#count));
@@ -870,7 +821,13 @@ class Squad implements SquadSystem {
     // somewhere — so it goes backwards, and density only starts climbing after
     // the depth cap too. This is the reference's behaviour past ~50 units.
     const squeeze = idealX > 0 ? idealX / Math.max(this.#radiusX, 1e-4) : 1;
-    this.#radiusZ = Math.min(RADIUS_Z_MAX, SPREAD * DEPTH_RATIO * root * squeeze);
+    // The depth cap is a FRAMING budget, not a road one — it is where the rear
+    // rank reaches the bottom of the screen. Pulling the camera back is exactly
+    // the thing that buys more of it, so it scales with the zoom. Width does
+    // not: the road does not get wider just because you are looking from
+    // further away, and letting the crowd widen with the zoom would walk it out
+    // over the water.
+    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
   }
 }
 

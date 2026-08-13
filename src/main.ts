@@ -15,6 +15,7 @@ import * as THREE from "three";
 import { GameLoop } from "./core/loop";
 import { StateMachine } from "./core/state";
 import { createStage } from "./core/renderer";
+import { createZoom } from "./core/zoom";
 import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
 import type { System, WeaponTier } from "./core/types";
@@ -22,6 +23,7 @@ import { TouchDriver, clamp } from "./input/touch";
 import { createCorridor } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
+import { barrelHp, barrelPayout } from "./mechanics/pacing";
 import { createGates } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
@@ -38,6 +40,7 @@ const stage = createStage(canvas);
 const state = new StateMachine();
 const touch = new TouchDriver(canvas);
 const world = createWorld(new THREE.Vector3());
+const zoom = createZoom(stage.camera, stage.scene);
 
 const corridor = createCorridor();
 stage.scene.add(corridor);
@@ -76,19 +79,24 @@ const renderables: System[] = [
 function payTroops(amount: number): void {
   const before = world.troops;
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
-  const gained = world.troops - before;
-  if (gained <= 0) return;
-  floaters.spawn(squad.center, gained, squad.radiusX);
-  growthFx.play(squad.center, squad.radius);
+  const delta = world.troops - before;
+  if (delta === 0) return;
+  if (delta > 0) {
+    floaters.spawn(squad.center, delta, squad.radiusX);
+    growthFx.play(squad.center, squad.radius);
+    return;
+  }
+  // A red gate is the same beat run backwards, and it has to be as legible as
+  // the payout — the player needs to see the size of what it cost, not just
+  // watch a bar shrink. Counted off ACTUAL losses, so a -20 taken at 8 troops
+  // rains eight, not twenty.
+  floaters.drop(squad.center, -delta, squad.radiusX);
 }
 
 gates.onResolve((hit) => payTroops(hit.value));
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
-  // A barrel's numeral is its hit points, not its payout — paying it back 1:1
-  // would make a 100-barrel worth more than every gate in the run combined.
-  // A tenth keeps shooting cover worthwhile without making gates pointless.
-  payTroops(Math.max(1, Math.round(maxHp * 0.1)));
+  payTroops(barrelPayout(maxHp));
   if (tag >= 0) enemies.unpin(tag);
 });
 
@@ -111,10 +119,19 @@ const SPAWN_EVERY = 4.2;
 const SPAWN_Z = -58;
 let spawnTimer = SPAWN_EVERY;
 let rowIndex = 0;
+/** Suspends barrel/enemy pacing. Only the dev calibration harness touches this —
+ *  a probe needs an empty corridor or the traffic eats the rounds it is counting. */
+let contentSpawning = true;
 
 function spawnRow(): void {
   rowIndex++;
-  const hp = 10 + rowIndex * 8;
+  const hp = barrelHp(
+    rowIndex,
+    world.troops,
+    tierFor(world.troops),
+    bullets.tuning,
+    squad.radiusX,
+  );
   for (const lane of ROW_LANES) {
     // Every third row rides a motorcycle elite, so the variant actually shows up.
     const mounted = rowIndex % 3 === 0 && lane === 0;
@@ -127,13 +144,14 @@ function spawnRow(): void {
 }
 
 /**
- * Placeholder starting strength. The reference starts you at ONE soldier, and
- * we should too — but that only works when the first gate row is guaranteed to
- * offer a survivable segment, and our pacing is still random. At one troop a
- * single red segment ends the run in three seconds, which makes the prototype
- * impossible to look at. Revisit when gate pacing is authored rather than rolled.
+ * ONE SOLDIER, as the reference opens. This was 8 only because gate rows were
+ * rolled independently and roughly one in four came up all-red — an unavoidable
+ * death at low strength. `MERCY_TROOPS` in mechanics/gates.ts now guarantees a
+ * blue segment and mild penalties until the squad can absorb a bad row, so the
+ * opening beat the reference actually has is available again: one man on an
+ * empty road, and the first gate is the whole game in miniature.
  */
-const START_TROOPS = 8;
+const START_TROOPS = 1;
 
 /**
  * Zero troops is a loss. Restarting immediately (rather than freezing on an
@@ -149,6 +167,8 @@ function resetRun(): void {
   bossBar.reset(80);
   spawnTimer = SPAWN_EVERY;
   rowIndex = 0;
+  zoom.reset(world.troops);
+  world.zoom = zoom.distance;
 }
 
 /**
@@ -220,10 +240,12 @@ function tick(dt: number): void {
     world.squadLane = touch.lane;
     world.weaponTier = tierFor(world.troops);
 
-    spawnTimer += dt;
-    if (spawnTimer >= SPAWN_EVERY) {
-      spawnTimer -= SPAWN_EVERY;
-      spawnRow();
+    if (contentSpawning) {
+      spawnTimer += dt;
+      if (spawnTimer >= SPAWN_EVERY) {
+        spawnTimer -= SPAWN_EVERY;
+        spawnRow();
+      }
     }
 
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
@@ -259,6 +281,12 @@ function tick(dt: number): void {
 
     scrolled += world.scrollSpeed * dt;
 
+    // Last, so it steps on the count this tick actually ended with — a gate
+    // that pays 200 troops should move the camera on the same beat the +1s
+    // bloom, not one tick later.
+    zoom.update(dt, world.troops);
+    world.zoom = zoom.distance;
+
     if (world.troops <= 0) resetRun();
 }
 
@@ -291,6 +319,101 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /**
+ * Damage a single barrel actually takes on one full approach, at a given troop
+ * count. Dev-only — the `import.meta.env.DEV` block below is its only caller,
+ * so production strips it along with the harness.
+ *
+ * Barrel HP is the one number in the game that cannot be reasoned about from
+ * the fire rate alone: a barrel is only in range for the last third of its
+ * journey, the squad's muzzles move forward as the blob deepens, and the
+ * convergence cone means an off-lane barrel catches a fraction of the stream.
+ * Three shipped calibration bugs came from doing this arithmetic on paper, so
+ * this measures it instead — spawn one barrel with more HP than any weapon can
+ * chew through, run the real update order, and count what it lost.
+ *
+ * Destructive: it clears the corridor and leaves the run reset behind it.
+ */
+function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
+  troops: number;
+  tier: WeaponTier;
+  /** Total damage the barrel absorbed between spawn and passing the squad. */
+  damage: number;
+  /** Seconds it spent actually taking fire — the real kill window. */
+  window: number;
+  /** Muzzle DPS the squad was producing, for comparison against on-target. */
+  onTargetDps: number;
+} {
+  const PROBE_HP = 1e9;
+  const dt = 1 / 60;
+
+  contentSpawning = false;
+  gates.setAutoSpawn(false);
+  // Rows already in the corridor MUST go too, not just future ones. A live gate
+  // resolving mid-probe pays or charges troops, which silently re-tiers the
+  // weapon; at one troop a red segment zeroes the count, trips resetRun(), and
+  // clears the probe barrel before it ever reaches the kill zone — which reads
+  // as "one soldier deals no damage" rather than as a broken measurement.
+  gates.reset();
+  barrels.clear();
+  enemies.clear();
+  world.troops = clamp(Math.round(troops), 1, MAX_TROOPS);
+  touch.lane = clamp(lane, -1, 1);
+
+  // Settle first. The blob's width and depth grow with the count and the muzzle
+  // line rides its front edge, so probing before the springs converge measures
+  // the wrong geometry.
+  for (let i = 0; i < 90; i++) tick(dt);
+
+  // `barrelLane` defaults to the squad's own lane — the head-on case. Passing a
+  // different one measures COVERAGE: with fire travelling as a parallel curtain,
+  // a barrel off to one side takes only the share of the stream that overlaps
+  // it, which is the mechanic the whole width of the crowd now buys.
+  const id = barrels.spawn(barrelLane, SPAWN_Z, PROBE_HP);
+  let ticks = 0;
+  let last = PROBE_HP;
+  // First and last tick on which a round actually landed. The window is the
+  // span BETWEEN them, not the count of ticks that scored — at one troop most
+  // ticks are empty, and counting only the scoring ones reports a kill window
+  // twelve times shorter than the barrel really spent under fire.
+  let firstHit = -1;
+  let lastHit = -1;
+
+  // 58 m at 6 m/s is ~10 s; the cap is a runaway guard, not the exit condition.
+  while (ticks < 60 * 20) {
+    tick(dt);
+    ticks++;
+    const hp = barrels.hpOf(id);
+    if (hp < 0) break; // destroyed or recycled past the camera
+    if (hp < last) {
+      if (firstHit < 0) firstHit = ticks;
+      lastHit = ticks;
+    }
+    last = hp;
+    let z = -Infinity;
+    barrels.forEachLive((bid, _tag, _x, _topY, bz) => {
+      if (bid === id) z = bz;
+    });
+    if (z >= squad.center.z) break;
+  }
+
+  const damage = PROBE_HP - last;
+  const window = firstHit < 0 ? 0 : (lastHit - firstHit + 1) * dt;
+  const tier = world.weaponTier;
+
+  contentSpawning = true;
+  gates.setAutoSpawn(true);
+  resetRun();
+
+  return {
+    troops: Math.round(troops),
+    tier,
+    damage: Math.round(damage),
+    window: Number(window.toFixed(2)),
+    onTargetDps: window > 0 ? Math.round(damage / window) : 0,
+  };
+}
+
+/**
  * HEADLESS DRIVE — dev builds only, stripped from production.
  *
  * An offscreen browser pane reports `document.hidden` and throttles
@@ -304,6 +427,38 @@ if (import.meta.env.DEV) {
   Object.assign(window, {
     __overkill: {
       world,
+      probeDamagePerPass,
+      /** Sweep the probe across troop counts. This is the barrel HP curve. */
+      damageCurve(counts: readonly number[] = [1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120]) {
+        return counts.map((n) => probeDamagePerPass(n));
+      },
+      setSpawning(on: boolean): void {
+        contentSpawning = on;
+      },
+      /** Live round population and its extent — the number to hold against a
+       *  reference frame when asking whether our fire is too dense. */
+      bulletStats() {
+        const v = bullets.bullets;
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minZ = Infinity;
+        let maxZ = -Infinity;
+        for (let i = 0; i < v.count; i++) {
+          const id = v.ids[i]!;
+          minX = Math.min(minX, v.x[id]!);
+          maxX = Math.max(maxX, v.x[id]!);
+          minZ = Math.min(minZ, v.z[id]!);
+          maxZ = Math.max(maxZ, v.z[id]!);
+        }
+        return {
+          count: v.count,
+          minX,
+          maxX,
+          minZ,
+          maxZ,
+          muzzleZ: squad.center.z - squad.radiusZ,
+        };
+      },
       /** Advance `ticks` fixed steps, then draw once. */
       step(ticks = 60): void {
         for (let i = 0; i < ticks; i++) tick(1 / 60);
@@ -323,6 +478,8 @@ if (import.meta.env.DEV) {
         squadX: Number(squad.center.x.toFixed(2)),
         radiusX: Number(squad.radiusX.toFixed(2)),
         calls: stage.renderer.info.render.calls,
+        zoom: Number(world.zoom.toFixed(3)),
+        radiusZ: Number(squad.radiusZ.toFixed(2)),
         tris: stage.renderer.info.render.triangles,
       }),
     },

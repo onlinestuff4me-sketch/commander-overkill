@@ -4,9 +4,24 @@ Source: 14.21 s portrait screen capture, 1206×2622, of *Last War: Survival*'s
 bridge stage. 36 frames extracted to `docs/reference/part1/` via
 `tools/extract-frames.swift`.
 
-**This file is the shared source of truth.** Every element team works against it
-and against the named frames. If an observation here contradicts a frame, the
-frame wins — say so and correct this file.
+**This file is the shared source of truth for the OPENING.** Every element team
+works against it and against the named frames. If an observation here
+contradicts a frame, the frame wins — say so and correct this file.
+
+> **A second, later clip exists and outranks this one on three things.**
+> `reference-media/reference-clip-1a.mov` shows the same game at hundreds of
+> troops, and its teardown is `reference-media/README.md`. Where they disagree,
+> it is newer evidence:
+>
+> - **the bullet stream is ~15 parallel columns and all of them register hits**,
+>   which is why the convergence derived from `frame_030` below is now off,
+> - **the crowd fills the road and hangs off the screen edge**, so the
+>   containment rules below no longer apply to width or steering, and
+> - **the crowd keeps growing past what the frame holds**, which is what the
+>   stepped camera zoom in `core/zoom.ts` exists for.
+>
+> Everything else here — unit scale, gate anatomy, the climbing reward, the
+> opening beat — is still the authority.
 
 ---
 

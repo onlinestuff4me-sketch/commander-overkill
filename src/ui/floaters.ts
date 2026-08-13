@@ -133,12 +133,59 @@ const GOLDEN_ANGLE = 2.39996323;
  *  bought at spawn then survives the whole 1s life. */
 const OUTWARD = 0.13;
 
-// Texture: square and power-of-two so mipmapping is uncontroversial on every
-// driver. The wasted vertical space costs nothing — transparent texels are
-// discarded before blending.
+// Texture: square tiles, power-of-two, so mipmapping is uncontroversial on
+// every driver. The wasted vertical space costs nothing — transparent texels
+// are discarded before blending.
 const TEX_SIZE = 256;
 const GLYPH_PX = 116;
-const LABEL = "+1";
+
+/**
+ * Two glyphs in ONE texture, side by side, selected per instance.
+ *
+ * The alternative — a second mesh with a second material — would double the
+ * draw calls for what is literally a different two characters, and a gate that
+ * charges you always fires in the same frame as one that pays, so both kinds
+ * are on screen together constantly.
+ */
+const KIND_GAIN = 0;
+const KIND_LOSS = 1;
+const LABELS = ["+1", "-1"] as const;
+const TILES = LABELS.length;
+
+/** Gain is the reward yellow. Loss is a hot red that still reads over the blue
+ *  helmets it falls through — dark enough to hold the white-hot core away from
+ *  the road's pale grey, which a pure red loses against. */
+const GAIN_GRADIENT = ["#fff581", "#ffe11f", "#ffb400"] as const;
+const LOSS_GRADIENT = ["#ffb3ae", "#ff3b30", "#c1121f"] as const;
+
+// --- loss motion -----------------------------------------------------------
+//
+// A loss does not rise and fade where it was born; it FALLS OFF THE BOTTOM OF
+// THE SCREEN. That direction is the whole read: up-and-fade means "you gained
+// something", and using it for a penalty is the single easiest way to make a
+// punishment feel like a reward.
+//
+// "Down the screen" is not "down in Y" at this camera. The camera looks along
+// -Z from above, so the bottom edge of the frame is TOWARD the camera in +Z.
+// Falling in Y alone just sinks a glyph into the road; travelling in +Z is what
+// carries it out of frame. Losses do both — the Y drop reads as weight, the Z
+// travel is what actually removes it.
+
+/** Initial downward metres/second, before gravity takes over. */
+const FALL_START = 0.9;
+/** Metres/second² pulling a loss down. Lower than real gravity: at 9.8 the
+ *  glyph is off frame before the eye has resolved what it said. */
+const FALL_GRAVITY = 4.0;
+/** Metres/second toward the camera. This is the one doing the real work — see
+ *  the note above. Tuned so a loss clears the bottom edge inside its life. */
+const FALL_TOWARD = 2.2;
+/** Losses live longer than gains: they have further to travel, and a penalty
+ *  that vanishes instantly is a penalty the player never reads. */
+const LOSS_LIFETIME = 1.25;
+/** Losses hold full opacity far longer than gains — they should leave by
+ *  EXITING, not by dissolving in mid-air. This is the backstop for any that are
+ *  still on screen at the end of their life. */
+const LOSS_FADE_FROM = 0.82;
 
 // ------------------------------------------------------------------ shaders
 
@@ -146,10 +193,14 @@ const VERT = `
 attribute vec3 iPos;
 attribute float iSize;
 attribute float iAlpha;
+attribute float iTile;
+uniform float uTiles;
 varying vec2 vUv;
 varying float vAlpha;
 void main() {
-  vUv = uv;
+  // Pick this instance's glyph out of the horizontal strip. One texture, one
+  // material, one draw call, whatever mix of gains and losses is on screen.
+  vUv = vec2((uv.x + iTile) / uTiles, uv.y);
   vAlpha = iAlpha;
   // Billboard in VIEW space: the quad is built around the instance origin
   // after the view transform, so it always faces the camera and the CPU never
@@ -181,6 +232,16 @@ export interface FloaterSystem extends System {
    * @param radius half-width of the squad blob in world units.
    */
   spawn(center: THREE.Vector3, count: number, radius?: number): void;
+  /**
+   * Rain `count` red "-1"s over the blob at `center` — one per unit KILLED —
+   * which fall away and leave down the bottom of the screen.
+   *
+   * Deliberately a separate call rather than `spawn` with a negative count: the
+   * two read in opposite directions on purpose, and a caller that forgets the
+   * sign should get a compile error's worth of friction rather than silently
+   * congratulating the player for losing half their army.
+   */
+  drop(center: THREE.Vector3, count: number, radius?: number): void;
   /** Floaters currently alive, counting ones still inside their spawn stagger. */
   readonly active: number;
   dispose(): void;
@@ -202,6 +263,8 @@ interface Floater {
   vx: number;
   vy: number;
   vz: number;
+  /** KIND_GAIN or KIND_LOSS. Selects the glyph, the motion and the fade. */
+  kind: number;
 }
 
 // ---------------------------------------------------------------- internals
@@ -258,40 +321,54 @@ function fadeCurve(k: number): number {
   return u <= 0 ? 0 : u * u * (3 - 2 * u);
 }
 
+/** Same shape, held opaque much longer. A loss should leave the frame by
+ *  falling out of it, not by evaporating where the player is still looking. */
+function lossFade(k: number): number {
+  if (k <= LOSS_FADE_FROM) return 1;
+  const u = 1 - (k - LOSS_FADE_FROM) / (1 - LOSS_FADE_FROM);
+  return u <= 0 ? 0 : u * u * (3 - 2 * u);
+}
+
 /**
- * The "+1" sticker, baked once. Yellow fill, heavy dark outline — the outline
- * is not decoration, it is what keeps the text legible over both the pale road
- * and the blue helmets it will inevitably overlap.
+ * The "+1" and "-1" stickers, baked once into one strip. Heavy dark outline on
+ * both — the outline is not decoration, it is what keeps the text legible over
+ * the pale road, the blue helmets and the orange muzzle flare it will
+ * inevitably overlap.
  */
-function plusOneTexture(): THREE.CanvasTexture {
+function glyphStripTexture(): THREE.CanvasTexture {
   const c = document.createElement("canvas");
-  c.width = TEX_SIZE;
+  c.width = TEX_SIZE * TILES;
   c.height = TEX_SIZE;
   const ctx = c.getContext("2d")!;
 
-  const cx = TEX_SIZE / 2;
-  const cy = TEX_SIZE / 2;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.font = `900 ${GLYPH_PX}px "Arial Black", "Helvetica Neue", Impact, system-ui, sans-serif`;
   ctx.lineJoin = "round";
   ctx.miterLimit = 2;
 
-  // Two stroke passes: one pass at this width leaves thin spots where the
-  // glyphs neck down, and a broken outline is what makes cheap floaters look
-  // cheap.
-  ctx.strokeStyle = "#150f04";
-  ctx.lineWidth = GLYPH_PX * 0.3;
-  ctx.strokeText(LABEL, cx, cy);
-  ctx.lineWidth = GLYPH_PX * 0.19;
-  ctx.strokeText(LABEL, cx, cy);
+  for (let tile = 0; tile < TILES; tile++) {
+    const cx = tile * TEX_SIZE + TEX_SIZE / 2;
+    const cy = TEX_SIZE / 2;
+    const label = LABELS[tile]!;
 
-  const grad = ctx.createLinearGradient(0, cy - GLYPH_PX * 0.5, 0, cy + GLYPH_PX * 0.5);
-  grad.addColorStop(0, "#fff581");
-  grad.addColorStop(0.45, "#ffe11f");
-  grad.addColorStop(1, "#ffb400");
-  ctx.fillStyle = grad;
-  ctx.fillText(LABEL, cx, cy);
+    // Two stroke passes: one pass at this width leaves thin spots where the
+    // glyphs neck down, and a broken outline is what makes cheap floaters look
+    // cheap.
+    ctx.strokeStyle = "#150f04";
+    ctx.lineWidth = GLYPH_PX * 0.3;
+    ctx.strokeText(label, cx, cy);
+    ctx.lineWidth = GLYPH_PX * 0.19;
+    ctx.strokeText(label, cx, cy);
+
+    const stops = tile === KIND_LOSS ? LOSS_GRADIENT : GAIN_GRADIENT;
+    const grad = ctx.createLinearGradient(0, cy - GLYPH_PX * 0.5, 0, cy + GLYPH_PX * 0.5);
+    grad.addColorStop(0, stops[0]);
+    grad.addColorStop(0.45, stops[1]);
+    grad.addColorStop(1, stops[2]);
+    ctx.fillStyle = grad;
+    ctx.fillText(label, cx, cy);
+  }
 
   const tex = new THREE.CanvasTexture(c);
   // Left in the default (no) colour space on purpose: this material is a hand
@@ -312,9 +389,11 @@ class Floaters implements FloaterSystem {
   readonly #aPos: THREE.InstancedBufferAttribute;
   readonly #aSize: THREE.InstancedBufferAttribute;
   readonly #aAlpha: THREE.InstancedBufferAttribute;
+  readonly #aTile: THREE.InstancedBufferAttribute;
   readonly #posBuf: Float32Array;
   readonly #sizeBuf: Float32Array;
   readonly #alphaBuf: Float32Array;
+  readonly #tileBuf: Float32Array;
   /** Screen-plane positions of everything already placed this beat, so the
    *  separation test never allocates. Rewritten from scratch on every `spawn`. */
   readonly #occX = new Float32Array(CAPACITY);
@@ -342,6 +421,7 @@ class Floaters implements FloaterSystem {
         vx: 0,
         vy: 0,
         vz: 0,
+        kind: KIND_GAIN,
       });
     }
 
@@ -364,20 +444,24 @@ class Floaters implements FloaterSystem {
     this.#posBuf = new Float32Array(CAPACITY * 3);
     this.#sizeBuf = new Float32Array(CAPACITY);
     this.#alphaBuf = new Float32Array(CAPACITY);
+    this.#tileBuf = new Float32Array(CAPACITY);
     this.#aPos = new THREE.InstancedBufferAttribute(this.#posBuf, 3);
     this.#aSize = new THREE.InstancedBufferAttribute(this.#sizeBuf, 1);
     this.#aAlpha = new THREE.InstancedBufferAttribute(this.#alphaBuf, 1);
+    this.#aTile = new THREE.InstancedBufferAttribute(this.#tileBuf, 1);
     this.#aPos.setUsage(THREE.DynamicDrawUsage);
     this.#aSize.setUsage(THREE.DynamicDrawUsage);
     this.#aAlpha.setUsage(THREE.DynamicDrawUsage);
+    this.#aTile.setUsage(THREE.DynamicDrawUsage);
     this.#geo.setAttribute("iPos", this.#aPos);
     this.#geo.setAttribute("iSize", this.#aSize);
     this.#geo.setAttribute("iAlpha", this.#aAlpha);
+    this.#geo.setAttribute("iTile", this.#aTile);
     this.#geo.instanceCount = 0;
 
-    this.#tex = plusOneTexture();
+    this.#tex = glyphStripTexture();
     this.#mat = new THREE.ShaderMaterial({
-      uniforms: { uMap: { value: this.#tex } },
+      uniforms: { uMap: { value: this.#tex }, uTiles: { value: TILES } },
       vertexShader: VERT,
       fragmentShader: FRAG,
       transparent: true,
@@ -401,6 +485,17 @@ class Floaters implements FloaterSystem {
   }
 
   spawn(center: THREE.Vector3, count: number, radius = DEFAULT_RADIUS): void {
+    this.#burst(center, count, radius, KIND_GAIN);
+  }
+
+  drop(center: THREE.Vector3, count: number, radius = DEFAULT_RADIUS): void {
+    this.#burst(center, count, radius, KIND_LOSS);
+  }
+
+  /** Placement is identical for both kinds — only the launch velocity, the
+   *  lifetime and the glyph differ. Sharing it is what keeps a mixed beat (a
+   *  gate that charges while a barrel pays) from stacking one on the other. */
+  #burst(center: THREE.Vector3, count: number, radius: number, kind: number): void {
     const n = Math.min(Math.max(count | 0, 0), MAX_PER_BURST);
     if (n === 0) return;
     const reach = Math.max(radius, MIN_REACH) * SCATTER_WIDE;
@@ -482,11 +577,19 @@ class Floaters implements FloaterSystem {
       // Drift is biased outward from the burst centre. Purely random drift can
       // walk two well-separated floaters into each other over a one-second
       // life, which would undo the placement work above halfway through.
+      f.kind = kind;
       f.vx = bx * OUTWARD + rand2() * DRIFT * 0.5;
-      f.vy = RISE * (1 + rand2() * RISE_JITTER);
-      f.vz = bz * OUTWARD + rand2() * DRIFT * SCATTER_DEPTH * 0.5;
+      if (kind === KIND_LOSS) {
+        // Down and toward the camera. See the note on FALL_TOWARD: the +Z is
+        // what actually carries it off the bottom of the frame.
+        f.vy = -FALL_START * (1 + rand2() * RISE_JITTER);
+        f.vz = FALL_TOWARD * (1 + rand2() * 0.25);
+      } else {
+        f.vy = RISE * (1 + rand2() * RISE_JITTER);
+        f.vz = bz * OUTWARD + rand2() * DRIFT * SCATTER_DEPTH * 0.5;
+      }
 
-      f.life = LIFETIME * (1 + rand2() * LIFETIME_JITTER);
+      f.life = (kind === KIND_LOSS ? LOSS_LIFETIME : LIFETIME) * (1 + rand2() * LIFETIME_JITTER);
       f.delay = (i / n) * STAGGER * rand();
       f.age = 0;
       f.prevAge = 0;
@@ -518,8 +621,15 @@ class Floaters implements FloaterSystem {
       // against the closed form is far below one pixel of travel.
       const damp = 1 - DRAG * dt;
       f.vx *= damp;
-      f.vy *= damp;
-      f.vz *= damp;
+      if (f.kind === KIND_LOSS) {
+        // A loss accelerates instead of settling: damping the fall would leave
+        // it hanging in the middle of the frame, which is the one thing it must
+        // not do. Only the sideways scatter is damped.
+        f.vy -= FALL_GRAVITY * dt;
+      } else {
+        f.vy *= damp;
+        f.vz *= damp;
+      }
       f.x += f.vx * dt;
       f.y += f.vy * dt;
       f.z += f.vz * dt;
@@ -542,7 +652,9 @@ class Floaters implements FloaterSystem {
       this.#posBuf[i3 + 1] = f.py + (f.y - f.py) * alpha;
       this.#posBuf[i3 + 2] = f.pz + (f.z - f.pz) * alpha;
       this.#sizeBuf[n] = SIZE * (t < POP_TIME ? popScale(t / POP_TIME) : 1);
-      this.#alphaBuf[n] = k >= 1 ? 0 : fadeCurve(k);
+      this.#alphaBuf[n] =
+        k >= 1 ? 0 : f.kind === KIND_LOSS ? lossFade(k) : fadeCurve(k);
+      this.#tileBuf[n] = f.kind;
       n++;
     }
 
@@ -552,6 +664,7 @@ class Floaters implements FloaterSystem {
     this.#aPos.needsUpdate = true;
     this.#aSize.needsUpdate = true;
     this.#aAlpha.needsUpdate = true;
+    this.#aTile.needsUpdate = true;
   }
 
   dispose(): void {
