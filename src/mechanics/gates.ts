@@ -1,0 +1,1020 @@
+/**
+ * GATES — the segmented barrier rows, and the whole upgrade presentation.
+ *
+ * This is the screen's most important read. Per the reference teardown, a
+ * player must name the good segment from COLOUR alone before they can read the
+ * number, and read the number itself at arm's length on a phone. Everything
+ * below is subordinate to that: the red/blue split carries the decision, the
+ * white-on-thick-black numeral carries the amount, and the posts carry the
+ * "this is a physical barrier you are about to smash" read.
+ *
+ * ---------------------------------------------------------------------------
+ * API
+ * ---------------------------------------------------------------------------
+ *
+ *   const gates = createGates(scene);            // auto-spawns rows by default
+ *   gates.onResolve((hit) => { world.troops += hit.value; });
+ *   loop: gates.update(dt, world); gates.render(alpha, world);
+ *
+ * `GateSystem` is a `System` (src/core/types.ts) plus:
+ *
+ *   setAutoSpawn(on)            Turn the built-in pacing off when the
+ *                               orchestrator wants to drive spawns itself.
+ *                               Do not mix the two. Switching it back ON
+ *                               mid-run resumes pacing but does NOT re-prime
+ *                               the corridor — no wall of rows appears at once.
+ *   spawnRow(segments, z?)      Place a row. `segments` is 1–4 entries, each a
+ *                               plain number (negative = red penalty, positive
+ *                               = blue reward) or a GateSegmentSpec for custom
+ *                               width / climb. Returns false if the pool is
+ *                               full — back off and retry next tick.
+ *   onResolve(cb)               Fires once per row, the tick the squad centre
+ *                               crosses it, with the segment it was inside.
+ *                               Returns an unsubscribe closure.
+ *                               THIS MODULE NEVER TOUCHES world.troops — the
+ *                               orchestrator owns the count.
+ *                               The GateHit payload is a REUSED object (the no-
+ *                               allocation-in-update rule). Read it or copy it
+ *                               inside the handler; never stash the reference.
+ *   activeRows                  Rows currently in the corridor.
+ *   nextGateZ()                 World Z of the nearest unresolved row (largest
+ *                               z, since rows travel toward the camera), or
+ *                               -Infinity when none is pending.
+ *   reset()                     Recycle everything. Listeners survive.
+ *
+ * Frames of record: docs/reference/part1/frame_009 (-1 / -4 / +2),
+ * frame_013 (same gate, now +9), frame_018 (all-red -20 / -5 / -10).
+ */
+
+import * as THREE from "three";
+import type { System } from "../core/types";
+import { CORRIDOR_HALF_WIDTH } from "./lane";
+
+// ---------------------------------------------------------------------------
+// Tunables
+// ---------------------------------------------------------------------------
+
+/** Barrier height in metres. Roughly chest-high on a unit, as in the reference. */
+const GATE_HEIGHT = 1.15;
+/** Panel floats a hair above the road so the bottom rail's glow spills onto it. */
+const GATE_BASE_Y = 0.1;
+/** Posts stand slightly proud of the panel — that overhang is what reads as structure. */
+const POST_OVERSHOOT = 0.16;
+
+/**
+ * Widest a numeral may be, as a fraction of its segment. 0.82 leaves 0.2m of
+ * clearance each side on a three-segment row, which clears the divider posts'
+ * 0.15m half-width — a numeral touching a post is the first thing that makes
+ * the row look like mush at distance.
+ */
+const NUMERAL_WIDTH_FRAC = 0.82;
+/** Numeral quad height as a fraction of gate height. The glyph fills ~60% of that. */
+const NUMERAL_FILL = 0.92;
+/** How hard the numeral pops when a climbing value ticks over. */
+const TICK_POP = 0.22;
+/** Seconds the tick pop takes to settle. */
+const TICK_POP_DECAY = 7;
+
+/**
+ * Rows are pooled; this is the ceiling on rows alive at once. The corridor
+ * holds SPAWN_Z..RECYCLE_Z / ROW_GAP ≈ 4.5 rows, so 6 leaves headroom for a
+ * still-bursting row to finish without starving the next spawn.
+ */
+const MAX_ROWS = 6;
+/** Reference rows run 2–4 segments. Four is the hard structural limit. */
+const MAX_SEGMENTS = 4;
+const MAX_POSTS = MAX_SEGMENTS + 1;
+
+/** Where rows appear. Just inside the fog's far edge so they haze in. */
+const SPAWN_Z = -58;
+/** Metres between rows. At 9 m/s that stacks 3–4 decisions up the corridor. */
+const ROW_GAP = 16;
+/** Rows placed up-front so the run never opens on an empty road. */
+const PRIME_ROWS = 3;
+/** Recycled once safely behind the camera (which sits at z = 9.5). */
+const RECYCLE_Z = 15;
+
+/**
+ * THE CLIMB. Reference: the same gate reads +2 at 3.75s and +9 at 5.33s — seven
+ * troops over 1.58 seconds. Rate is expressed per-second (not per-metre) so it
+ * matches that footage directly, and the window is bounded by Z so a row three
+ * decisions back is not already sitting at its ceiling when it comes into view.
+ * At the default 9 m/s, -15 gives exactly the reference's 1.6s of climb.
+ */
+const CLIMB_START_Z = -15;
+const REWARD_CLIMB_RATE = 4.4;
+/** Ceiling, as headroom above the start value. +2 tops out at +9, as observed. */
+const REWARD_CLIMB_SPAN = 7;
+
+/** Burst velocities, metres/sec. The barrier must visibly come apart, not vanish. */
+const BURST_OUT = 2.2;
+const BURST_UP = 2.9;
+const BURST_TOWARD = 1.5;
+const BURST_SPIN = 5.5;
+const BURST_GRAVITY = 13;
+/**
+ * Seconds a broken row survives. At the default scroll speed the Z recycle
+ * would fire first anyway; this is the backstop for a slowed or stopped world,
+ * where debris would otherwise hang in frame forever.
+ */
+const BURST_LIFE = 1.6;
+
+/** Auto-spawn: chance a row contains a blue segment at all (frame_018 has none). */
+const REWARD_ROW_CHANCE = 0.72;
+/** Penalties escalate every 25s of run time. Index = difficulty tier. */
+const PENALTY_POOLS: readonly (readonly number[])[] = [
+  [-1, -1, -2, -3, -4, -5],
+  [-2, -4, -5, -5, -10, -10],
+  [-5, -10, -10, -15, -20, -20],
+];
+const REWARD_STARTS: readonly number[] = [1, 2, 2, 3, 3, 4];
+/** Numerals pre-baked at init so a spawn never stalls on a canvas draw. */
+const PREWARM: readonly number[] = [
+  -1, -2, -3, -4, -5, -10, -15, -20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+];
+
+// ---------------------------------------------------------------------------
+// Public shapes
+// ---------------------------------------------------------------------------
+
+export interface GateSegmentSpec {
+  /** Negative = red penalty, positive = blue reward. Zero is treated as a penalty. */
+  value: number;
+  /** Share of the road width. Defaults to an even split across the row. */
+  weight?: number;
+  /** Troops per second this reward grows by while approaching. Penalties ignore it. */
+  climbRate?: number;
+  /** Absolute ceiling for the climb. Defaults to `value + REWARD_CLIMB_SPAN`. */
+  climbMax?: number;
+}
+
+export interface GateHit {
+  /** The integer that was ON SCREEN when the squad crossed. Never the raw float. */
+  value: number;
+  /** True for a blue segment. Equivalent to `value > 0`, kept explicit for clarity. */
+  reward: boolean;
+  /** Index within the row, left to right. */
+  segmentIndex: number;
+  /** World X of the segment's centre — the anchor for the growth VFX burst. */
+  x: number;
+  /** World Z the row was at when it resolved. */
+  z: number;
+}
+
+export interface GateSystem extends System {
+  setAutoSpawn(enabled: boolean): void;
+  spawnRow(segments: readonly (number | GateSegmentSpec)[], z?: number): boolean;
+  onResolve(handler: (hit: GateHit) => void): () => void;
+  readonly activeRows: number;
+  nextGateZ(): number;
+  reset(): void;
+}
+
+export interface GateOptions {
+  /** Default true: the module paces its own rows so it is useful standalone. */
+  autoSpawn?: boolean;
+  /** Seed for spawn variety and burst jitter. Fixed by default — runs must repeat. */
+  seed?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+interface Segment {
+  group: THREE.Group;
+  panel: THREE.Mesh;
+  numeral: THREE.Mesh;
+  sparkle: THREE.Mesh;
+  numeralMat: THREE.MeshBasicMaterial;
+  reward: boolean;
+  /** Float. Rewards climb; the displayed value is `Math.floor` of this. */
+  value: number;
+  /** Integer currently baked into the numeral texture. -Infinity = none yet. */
+  shown: number;
+  climbRate: number;
+  climbMax: number;
+  centerX: number;
+  halfWidth: number;
+  numeralW: number;
+  numeralH: number;
+  pop: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  wx: number;
+  wy: number;
+  wz: number;
+}
+
+interface Post {
+  x: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  wx: number;
+  wz: number;
+  px: number;
+  py: number;
+  pz: number;
+  rx: number;
+  rz: number;
+}
+
+interface Row {
+  group: THREE.Group;
+  segments: Segment[];
+  posts: THREE.InstancedMesh;
+  postState: Post[];
+  count: number;
+  postCount: number;
+  z: number;
+  prevZ: number;
+  active: boolean;
+  resolved: boolean;
+  /** Seconds since the barrier broke; negative while intact. */
+  burst: number;
+}
+
+const WHITE = new THREE.Color(0xffffff);
+
+export function createGates(scene: THREE.Scene, options?: GateOptions): GateSystem {
+  const rng = mulberry32(options?.seed ?? 0x0c0ffee);
+  let autoSpawn = options?.autoSpawn ?? true;
+
+  const root = new THREE.Group();
+  scene.add(root);
+
+  // ---- shared GPU resources -------------------------------------------------
+  // One unit quad backs every panel, numeral and sparkle in the game; the mesh
+  // scale carries the size. Same for the post geometry across every row.
+  const quad = new THREE.PlaneGeometry(1, 1);
+  const postGeom = buildPostGeometry();
+
+  const penaltyTex = panelTexture(false);
+  const rewardTex = panelTexture(true);
+  const sparkleTex = sparkleTexture();
+
+  const panelMats: Record<"penalty" | "reward", THREE.MeshBasicMaterial> = {
+    // depthWrite off because these are translucent slabs that must not occlude
+    // each other; three's back-to-front sort of transparent objects then puts
+    // the numeral (parked 3cm nearer camera) on top of its own panel for free.
+    penalty: new THREE.MeshBasicMaterial({
+      map: penaltyTex,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+    reward: new THREE.MeshBasicMaterial({
+      map: rewardTex,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  };
+
+  // Lambert, not Basic: the posts are the only part of the gate that takes the
+  // scene lighting, and that shading is what stops the barrier reading as a
+  // flat decal pasted on the road.
+  const postMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const sparkleMat = new THREE.MeshBasicMaterial({
+    map: sparkleTex,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+    fog: false,
+  });
+
+  const numeralCache = new Map<string, THREE.CanvasTexture>();
+  for (const v of PREWARM) numeralTexture(numeralCache, v);
+
+  // ---- pool -----------------------------------------------------------------
+  const rows: Row[] = [];
+  for (let i = 0; i < MAX_ROWS; i++) rows.push(buildRow());
+
+  const handlers = new Set<(hit: GateHit) => void>();
+  const hit: GateHit = { value: 0, reward: false, segmentIndex: 0, x: 0, z: 0 };
+  const dummy = new THREE.Object3D();
+  const tint = new THREE.Color();
+
+  let spawnCarry = 0;
+  let primed = false;
+  let liveRows = 0;
+
+  function buildRow(): Row {
+    const group = new THREE.Group();
+    group.visible = false;
+    root.add(group);
+
+    const segments: Segment[] = [];
+    for (let i = 0; i < MAX_SEGMENTS; i++) {
+      const segGroup = new THREE.Group();
+      segGroup.visible = false;
+      group.add(segGroup);
+
+      const panel = new THREE.Mesh(quad, panelMats.penalty);
+      segGroup.add(panel);
+
+      const numeralMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        // Fog deliberately OFF. Fog is doing real work on the panels — it hazes
+        // distant rows the way the reference does — but hazing the numeral is
+        // exactly the readability failure we cannot ship. Numbers stay white.
+        fog: false,
+      });
+      const numeral = new THREE.Mesh(quad, numeralMat);
+      numeral.position.z = 0.03;
+      segGroup.add(numeral);
+
+      const sparkle = new THREE.Mesh(quad, sparkleMat);
+      sparkle.position.z = 0.06;
+      sparkle.visible = false;
+      segGroup.add(sparkle);
+
+      segments.push({
+        group: segGroup,
+        panel,
+        numeral,
+        sparkle,
+        numeralMat,
+        reward: false,
+        value: 0,
+        shown: Number.NEGATIVE_INFINITY,
+        climbRate: 0,
+        climbMax: 0,
+        centerX: 0,
+        halfWidth: 0,
+        numeralW: 1,
+        numeralH: 0.5,
+        pop: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        wx: 0,
+        wy: 0,
+        wz: 0,
+      });
+    }
+
+    const posts = new THREE.InstancedMesh(postGeom, postMat, MAX_POSTS);
+    // Instance transforms are not in the bounding sphere, so three would cull
+    // this against a sphere sized for a single post. Cheaper to skip the test.
+    posts.frustumCulled = false;
+    posts.count = 0;
+    group.add(posts);
+    // Touch every instance colour once so `instanceColor` exists before spawn.
+    for (let i = 0; i < MAX_POSTS; i++) posts.setColorAt(i, WHITE);
+
+    const postState: Post[] = [];
+    for (let i = 0; i < MAX_POSTS; i++) {
+      postState.push({ x: 0, vx: 0, vy: 0, vz: 0, wx: 0, wz: 0, px: 0, py: 0, pz: 0, rx: 0, rz: 0 });
+    }
+
+    return {
+      group,
+      segments,
+      posts,
+      postState,
+      count: 0,
+      postCount: 0,
+      z: SPAWN_Z,
+      prevZ: SPAWN_Z,
+      active: false,
+      resolved: false,
+      burst: -1,
+    };
+  }
+
+  function spawnRow(specs: readonly (number | GateSegmentSpec)[], z: number = SPAWN_Z): boolean {
+    let row: Row | undefined;
+    for (const r of rows) {
+      if (!r.active) {
+        row = r;
+        break;
+      }
+    }
+    if (!row) return false;
+
+    const count = Math.max(1, Math.min(MAX_SEGMENTS, specs.length));
+
+    // Normalise weights into world widths across the full road.
+    let weightSum = 0;
+    for (let i = 0; i < count; i++) weightSum += weightOf(specs[i]);
+    const span = CORRIDOR_HALF_WIDTH * 2;
+    let cursor = -CORRIDOR_HALF_WIDTH;
+
+    for (let i = 0; i < count; i++) {
+      const spec = specs[i];
+      const seg = row.segments[i];
+      if (!seg || spec === undefined) continue;
+
+      const width = (span * weightOf(spec)) / weightSum;
+      const value = typeof spec === "number" ? spec : spec.value;
+      const reward = value > 0;
+
+      seg.reward = reward;
+      seg.value = value;
+      seg.shown = Number.NEGATIVE_INFINITY;
+      seg.pop = 0;
+      seg.centerX = cursor + width / 2;
+      seg.halfWidth = width / 2;
+      seg.climbRate = typeof spec === "number" ? REWARD_CLIMB_RATE : (spec.climbRate ?? REWARD_CLIMB_RATE);
+      seg.climbMax =
+        typeof spec === "number" ? value + REWARD_CLIMB_SPAN : (spec.climbMax ?? value + REWARD_CLIMB_SPAN);
+      cursor += width;
+
+      seg.group.visible = true;
+      seg.group.position.set(seg.centerX, 0, 0);
+      seg.group.rotation.set(0, 0, 0);
+
+      seg.panel.material = reward ? panelMats.reward : panelMats.penalty;
+      seg.panel.position.set(0, GATE_BASE_Y + GATE_HEIGHT / 2, 0);
+      seg.panel.scale.set(width, GATE_HEIGHT, 1);
+
+      // Cap the numeral against the segment AND against the gate height, so a
+      // narrow segment shrinks its number rather than letting it bleed past a post.
+      const nw = Math.min(width * NUMERAL_WIDTH_FRAC, GATE_HEIGHT * NUMERAL_FILL * 2);
+      seg.numeralW = nw;
+      seg.numeralH = nw / 2;
+      seg.numeral.position.set(0, GATE_BASE_Y + GATE_HEIGHT / 2, 0.03);
+      seg.numeral.scale.set(nw, nw / 2, 1);
+
+      // Sparkle rides the reward segment's outer-bottom corner, as in frame_013.
+      seg.sparkle.visible = reward;
+      const outer = seg.centerX >= 0 ? 1 : -1;
+      seg.sparkle.position.set(outer * width * 0.4, GATE_BASE_Y + 0.16, 0.06);
+
+      applyValue(seg, true);
+    }
+
+    for (let i = count; i < MAX_SEGMENTS; i++) {
+      const seg = row.segments[i];
+      if (seg) seg.group.visible = false;
+    }
+
+    // Posts: one per boundary including both ends. Colour follows the segment on
+    // the post's LEFT (the leftmost takes the segment on its right) — that is the
+    // pattern in frame_009, where only the far-right cap turns blue for the +2.
+    row.postCount = count + 1;
+    let edge = -CORRIDOR_HALF_WIDTH;
+    for (let i = 0; i < row.postCount; i++) {
+      const post = row.postState[i];
+      if (!post) continue;
+      post.x = edge;
+      resetPost(post);
+
+      const source = row.segments[i === 0 ? 0 : i - 1];
+      tint.setHex(source && source.reward ? 0x63c8ff : 0xff5350);
+      row.posts.setColorAt(i, tint);
+
+      const seg = row.segments[i];
+      if (seg && i < count) edge = seg.centerX + seg.halfWidth;
+    }
+    row.posts.count = row.postCount;
+    if (row.posts.instanceColor) row.posts.instanceColor.needsUpdate = true;
+    writePosts(row);
+
+    row.count = count;
+    row.z = z;
+    row.prevZ = z;
+    row.active = true;
+    row.resolved = false;
+    row.burst = -1;
+    row.group.visible = true;
+    row.group.position.set(0, 0, z);
+    liveRows++;
+    return true;
+  }
+
+  /** Re-bake the numeral only when the integer on screen actually changes. */
+  function applyValue(seg: Segment, force: boolean): void {
+    const shown = Math.floor(seg.value);
+    if (!force && shown === seg.shown) return;
+    if (!force) seg.pop = 1;
+    seg.shown = shown;
+    seg.numeralMat.map = numeralTexture(numeralCache, shown);
+    seg.numeralMat.needsUpdate = true;
+  }
+
+  function resetPost(post: Post): void {
+    post.px = post.x;
+    post.py = 0;
+    // Nudged toward camera so the post's front face wins the depth test against
+    // the panel plane it straddles, instead of z-fighting with it.
+    post.pz = 0.06;
+    post.rx = 0;
+    post.rz = 0;
+    post.vx = 0;
+    post.vy = 0;
+    post.vz = 0;
+    post.wx = 0;
+    post.wz = 0;
+  }
+
+  function writePosts(row: Row): void {
+    for (let i = 0; i < row.postCount; i++) {
+      const post = row.postState[i];
+      if (!post) continue;
+      dummy.position.set(post.px, post.py, post.pz);
+      dummy.rotation.set(post.rx, 0, post.rz);
+      dummy.updateMatrix();
+      row.posts.setMatrixAt(i, dummy.matrix);
+    }
+    row.posts.instanceMatrix.needsUpdate = true;
+  }
+
+  function resolve(row: Row, crossX: number): void {
+    let index = 0;
+    for (let i = 0; i < row.count; i++) {
+      const seg = row.segments[i];
+      if (!seg) continue;
+      // Clamped containment: the barrier spans the whole road, so a squad that
+      // has drifted onto the kerb still commits to the nearest segment rather
+      // than slipping through the gap and paying nothing.
+      if (crossX <= seg.centerX + seg.halfWidth) {
+        index = i;
+        break;
+      }
+      index = i;
+    }
+
+    const chosen = row.segments[index];
+    row.resolved = true;
+    row.burst = 0;
+
+    if (chosen) {
+      hit.value = Math.floor(chosen.value);
+      hit.reward = chosen.reward;
+      hit.segmentIndex = index;
+      hit.x = chosen.centerX;
+      hit.z = row.z;
+      // Copy before iterating: a handler is allowed to unsubscribe itself.
+      for (const handler of [...handlers]) handler(hit);
+    }
+
+    // Kick every piece outward from where the squad punched through.
+    for (let i = 0; i < row.count; i++) {
+      const seg = row.segments[i];
+      if (!seg) continue;
+      const dir = seg.centerX >= crossX ? 1 : -1;
+      const away = Math.abs(seg.centerX - crossX) * 0.35;
+      seg.vx = dir * (BURST_OUT + away + rng() * 1.2);
+      seg.vy = BURST_UP + rng() * 1.4;
+      seg.vz = BURST_TOWARD + rng() * 0.9;
+      seg.wx = (rng() - 0.5) * BURST_SPIN;
+      seg.wy = (rng() - 0.5) * BURST_SPIN * 0.6;
+      seg.wz = (rng() - 0.5) * BURST_SPIN;
+      // The segment you actually took gets the loudest exit — that pop is half
+      // the reason the choice feels like it landed.
+      if (i === index) seg.pop = 1.6;
+    }
+    for (let i = 0; i < row.postCount; i++) {
+      const post = row.postState[i];
+      if (!post) continue;
+      const dir = post.x >= crossX ? 1 : -1;
+      post.vx = dir * (BURST_OUT * 0.8 + rng() * 1.4);
+      post.vy = BURST_UP * 0.7 + rng() * 1.2;
+      post.vz = BURST_TOWARD * 0.6 + rng() * 0.8;
+      post.wx = (rng() - 0.5) * BURST_SPIN * 1.4;
+      post.wz = (rng() - 0.5) * BURST_SPIN * 1.4;
+    }
+  }
+
+  function recycle(row: Row): void {
+    row.active = false;
+    row.group.visible = false;
+    row.posts.count = 0;
+    for (const seg of row.segments) seg.group.visible = false;
+    liveRows--;
+  }
+
+  // Reused every spawn so auto-pacing never allocates inside update().
+  const autoBuffer: number[] = [0, 0, 0, 0];
+
+  /**
+   * One procedurally-shaped row. Penalty magnitude escalates in tiers with run
+   * time; roughly one row in four carries no reward at all, which is what makes
+   * an all-red row (frame_018) land as a genuine "pick your loss" moment rather
+   * than a bug.
+   */
+  function autoRow(elapsed: number, z: number): void {
+    const tier = Math.min(PENALTY_POOLS.length - 1, Math.floor(elapsed / 25));
+    const pool = PENALTY_POOLS[tier] ?? PENALTY_POOLS[0];
+    if (!pool) return;
+
+    const shape = rng();
+    const count = shape < 0.18 ? 2 : shape < 0.86 ? 3 : 4;
+    const rewardAt = rng() < REWARD_ROW_CHANCE ? Math.floor(rng() * count) : -1;
+
+    for (let i = 0; i < count; i++) {
+      autoBuffer[i] =
+        i === rewardAt
+          ? (REWARD_STARTS[Math.floor(rng() * REWARD_STARTS.length)] ?? 2)
+          : (pool[Math.floor(rng() * pool.length)] ?? -1);
+    }
+    autoBuffer.length = count;
+    spawnRow(autoBuffer, z);
+  }
+
+  const system: GateSystem = {
+    update(dt, world) {
+      const speed = world.scrollSpeed;
+      const crossZ = world.squadCenter.z;
+      const crossX = world.squadCenter.x;
+
+      if (autoSpawn && !primed) {
+        primed = true;
+        // Open with the corridor already stacked, the way frame_000 does — the
+        // first decision should never be the only thing on screen.
+        for (let i = 0; i < PRIME_ROWS; i++) autoRow(world.elapsed, SPAWN_Z + i * ROW_GAP);
+      }
+
+      if (autoSpawn) {
+        spawnCarry += speed * dt;
+        if (spawnCarry >= ROW_GAP) {
+          spawnCarry -= ROW_GAP;
+          autoRow(world.elapsed, SPAWN_Z);
+        }
+      }
+
+      for (const row of rows) {
+        if (!row.active) continue;
+        row.prevZ = row.z;
+        row.z += speed * dt;
+
+        if (!row.resolved) {
+          // Climb, then resolve — so a gate crossed on the same tick it ticks
+          // over pays the number the player just saw, never the stale one.
+          if (row.z >= CLIMB_START_Z) {
+            for (let i = 0; i < row.count; i++) {
+              const seg = row.segments[i];
+              if (!seg || !seg.reward) continue;
+              if (seg.value < seg.climbMax) {
+                seg.value = Math.min(seg.climbMax, seg.value + seg.climbRate * dt);
+                applyValue(seg, false);
+              }
+            }
+          }
+          if (row.z >= crossZ) resolve(row, crossX);
+        } else {
+          row.burst += dt;
+          for (let i = 0; i < row.count; i++) {
+            const seg = row.segments[i];
+            if (!seg) continue;
+            seg.vy -= BURST_GRAVITY * dt;
+            seg.group.position.x += seg.vx * dt;
+            seg.group.position.y += seg.vy * dt;
+            seg.group.position.z += seg.vz * dt;
+            seg.group.rotation.x += seg.wx * dt;
+            seg.group.rotation.y += seg.wy * dt;
+            seg.group.rotation.z += seg.wz * dt;
+          }
+          for (let i = 0; i < row.postCount; i++) {
+            const post = row.postState[i];
+            if (!post) continue;
+            post.vy -= BURST_GRAVITY * dt;
+            post.px += post.vx * dt;
+            post.py += post.vy * dt;
+            post.pz += post.vz * dt;
+            post.rx += post.wx * dt;
+            post.rz += post.wz * dt;
+          }
+          writePosts(row);
+        }
+
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (seg && seg.pop > 0) seg.pop = Math.max(0, seg.pop - TICK_POP_DECAY * dt);
+        }
+
+        if (row.z > RECYCLE_Z || (row.resolved && row.burst > BURST_LIFE)) recycle(row);
+      }
+    },
+
+    render(alpha, world) {
+      const t = world.elapsed;
+      for (const row of rows) {
+        if (!row.active) continue;
+        row.group.position.z = row.prevZ + (row.z - row.prevZ) * alpha;
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (!seg) continue;
+          if (seg.pop > 0) {
+            const s = 1 + TICK_POP * seg.pop;
+            seg.numeral.scale.set(seg.numeralW * s, seg.numeralH * s, 1);
+          } else if (seg.numeral.scale.x !== seg.numeralW) {
+            seg.numeral.scale.set(seg.numeralW, seg.numeralH, 1);
+          }
+          // Twinkle, not spin: a slow counter-rotation plus a breath keeps the
+          // reward segment alive without competing with the numeral for the eye.
+          if (seg.sparkle.visible) {
+            const pulse = 0.42 + 0.16 * Math.sin(t * 6.2 + seg.centerX);
+            seg.sparkle.scale.set(pulse, pulse, 1);
+            seg.sparkle.rotation.z = t * 1.1;
+          }
+        }
+      }
+    },
+
+    setAutoSpawn(enabled) {
+      autoSpawn = enabled;
+      if (enabled) primed = true;
+    },
+
+    spawnRow,
+
+    onResolve(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+
+    get activeRows() {
+      return liveRows;
+    },
+
+    nextGateZ() {
+      // Rows travel from SPAWN_Z toward the camera, so "nearest" is the LARGEST
+      // z. -Infinity means nothing is pending — read it as "infinitely far up".
+      let nearest = Number.NEGATIVE_INFINITY;
+      for (const row of rows) {
+        if (!row.active || row.resolved) continue;
+        if (row.z > nearest) nearest = row.z;
+      }
+      return nearest;
+    },
+
+    reset() {
+      for (const row of rows) if (row.active) recycle(row);
+      spawnCarry = 0;
+      primed = false;
+    },
+
+    dispose() {
+      root.removeFromParent();
+      for (const row of rows) {
+        row.posts.dispose();
+        for (const seg of row.segments) seg.numeralMat.dispose();
+      }
+      quad.dispose();
+      postGeom.dispose();
+      postMat.dispose();
+      sparkleMat.dispose();
+      panelMats.penalty.dispose();
+      panelMats.reward.dispose();
+      penaltyTex.dispose();
+      rewardTex.dispose();
+      sparkleTex.dispose();
+      for (const tex of numeralCache.values()) tex.dispose();
+      numeralCache.clear();
+      handlers.clear();
+    },
+  };
+
+  return system;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
+
+/**
+ * A divider post: twin uprights on a footplate, merged into one geometry so an
+ * entire row's posts cost a single instanced draw call. Built with its base at
+ * y = 0 so an instance transform is just "where on the road".
+ */
+function buildPostGeometry(): THREE.BufferGeometry {
+  const h = GATE_HEIGHT + POST_OVERSHOOT;
+  const bar = 0.085;
+
+  const left = new THREE.BoxGeometry(bar, h, 0.16);
+  left.translate(-0.105, h / 2, 0);
+  const right = new THREE.BoxGeometry(bar, h, 0.16);
+  right.translate(0.105, h / 2, 0);
+  const foot = new THREE.BoxGeometry(0.46, 0.1, 0.38);
+  foot.translate(0, 0.05, 0);
+
+  return concat([left, right, foot]);
+}
+
+/**
+ * Minimal position/normal/uv concatenation. BufferGeometryUtils would do this,
+ * but it lives under three/examples and this is twenty lines — not worth the
+ * extra module in the bundle for three boxes merged once at boot.
+ */
+function concat(parts: readonly THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const flat = parts.map((p) => p.toNonIndexed());
+  let verts = 0;
+  for (const p of flat) verts += p.getAttribute("position").count;
+
+  const position = new Float32Array(verts * 3);
+  const normal = new Float32Array(verts * 3);
+  const uv = new Float32Array(verts * 2);
+
+  let offset = 0;
+  for (const p of flat) {
+    const pa = p.getAttribute("position");
+    const na = p.getAttribute("normal");
+    const ua = p.getAttribute("uv");
+    position.set(pa.array as ArrayLike<number>, offset * 3);
+    normal.set(na.array as ArrayLike<number>, offset * 3);
+    uv.set(ua.array as ArrayLike<number>, offset * 2);
+    offset += pa.count;
+    p.dispose();
+  }
+  for (const p of parts) p.dispose();
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geom.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geom.computeBoundingSphere();
+  return geom;
+}
+
+// ---------------------------------------------------------------------------
+// Textures
+// ---------------------------------------------------------------------------
+
+/**
+ * The barrier's vertical profile, 8×64, stretched across whatever width the
+ * segment turns out to be. One texture per colour rather than one per segment:
+ * nothing about the look varies horizontally, so the panel is a gradient strip
+ * with solid rails top and bottom, and the whole gate costs two textures.
+ *
+ * Blue is deliberately more opaque than red. In the reference you can read the
+ * road through a penalty panel but not through a reward one, and that alone
+ * makes the good segment pop before any number is parsed.
+ */
+function panelTexture(reward: boolean): THREE.CanvasTexture {
+  const w = 8;
+  const h = 64;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+
+  // Spill above and below the rails. Without a bloom pass we cannot afford,
+  // this soft bleed onto the road is what actually reads as "glowing".
+  ctx.fillStyle = reward ? "rgba(130,215,255,0.34)" : "rgba(255,95,95,0.28)";
+  ctx.fillRect(0, 0, w, 3);
+  ctx.fillRect(0, h - 3, w, 3);
+
+  const body = ctx.createLinearGradient(0, 3, 0, h - 3);
+  if (reward) {
+    body.addColorStop(0, "rgba(104,184,255,0.96)");
+    body.addColorStop(0.55, "rgba(40,116,238,0.92)");
+    body.addColorStop(1, "rgba(28,84,214,0.95)");
+  } else {
+    body.addColorStop(0, "rgba(244,72,78,0.74)");
+    body.addColorStop(0.55, "rgba(214,34,46,0.58)");
+    body.addColorStop(1, "rgba(228,50,58,0.72)");
+  }
+  ctx.fillStyle = body;
+  ctx.fillRect(0, 3, w, h - 6);
+
+  ctx.fillStyle = reward ? "#7fd8ff" : "#ff4a4a";
+  ctx.fillRect(0, 3, w, 7);
+  ctx.fillRect(0, h - 9, w, 6);
+
+  // A single bright line under the top rail. At phone scale a proper bevel is
+  // sub-pixel; one lit edge survives minification and still reads as metal.
+  ctx.fillStyle = reward ? "rgba(226,248,255,0.85)" : "rgba(255,196,196,0.72)";
+  ctx.fillRect(0, 10, w, 2);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  return tex;
+}
+
+/**
+ * THE READABILITY RULE, in one function. White fill, thick black outline, heavy
+ * weight, shrink-to-fit so a three-character value never overruns its segment.
+ *
+ * The white stroke between the outline and the fill is deliberate: 'Arial
+ * Black' does not exist on iOS, and a plain 900-weight fallback comes out
+ * noticeably thinner than the reference. Stroking white on top of the black
+ * outline fattens the glyph back up on every platform.
+ */
+function numeralTexture(cache: Map<string, THREE.CanvasTexture>, value: number): THREE.CanvasTexture {
+  const label = value > 0 ? `+${value}` : `${value}`;
+  const cached = cache.get(label);
+  if (cached) return cached;
+
+  const w = 256;
+  const h = 128;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+
+  let size = 100;
+  const font = (px: number): string =>
+    `900 ${px}px "Arial Black", "Helvetica Neue", Helvetica, Arial, sans-serif`;
+  ctx.font = font(size);
+  const maxWidth = 208;
+  while (ctx.measureText(label).width > maxWidth && size > 40) {
+    size -= 4;
+    ctx.font = font(size);
+  }
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  ctx.lineWidth = Math.max(16, size * 0.24);
+  ctx.strokeStyle = "#0a0a10";
+  ctx.strokeText(label, w / 2, h / 2 + 2);
+
+  ctx.lineWidth = Math.max(6, size * 0.09);
+  ctx.strokeStyle = "#ffffff";
+  ctx.strokeText(label, w / 2, h / 2 + 2);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(label, w / 2, h / 2 + 2);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  // Mipmaps ON, unlike the panel strip. A far-corridor numeral is minified hard
+  // and unfiltered text shimmers — which is the readability failure, one row up.
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 4;
+  cache.set(label, tex);
+  return tex;
+}
+
+/** Four-point star for the reward segment's corner accent. */
+function sparkleTexture(): THREE.CanvasTexture {
+  const s = 64;
+  const c = document.createElement("canvas");
+  c.width = s;
+  c.height = s;
+  const ctx = c.getContext("2d")!;
+
+  const core = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 3.4);
+  core.addColorStop(0, "rgba(255,255,255,1)");
+  core.addColorStop(0.35, "rgba(190,238,255,0.6)");
+  core.addColorStop(1, "rgba(120,200,255,0)");
+  ctx.fillStyle = core;
+  ctx.fillRect(0, 0, s, s);
+
+  ctx.fillStyle = "#ffffff";
+  for (let i = 0; i < 4; i++) {
+    ctx.save();
+    ctx.translate(s / 2, s / 2);
+    ctx.rotate((i * Math.PI) / 2);
+    ctx.beginPath();
+    ctx.moveTo(0, -s / 2 + 2);
+    ctx.lineTo(4.5, 0);
+    ctx.lineTo(-4.5, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  return tex;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function weightOf(spec: number | GateSegmentSpec | undefined): number {
+  if (spec === undefined) return 1;
+  if (typeof spec === "number") return 1;
+  return spec.weight ?? 1;
+}
+
+/**
+ * Seeded PRNG. Spawn variety and burst jitter both run through it so the whole
+ * module obeys loop.ts's rule: the same run pays the same on any device.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}

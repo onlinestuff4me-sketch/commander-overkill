@@ -54,6 +54,27 @@ frame wins — say so and correct this file.
   (`frame_023`, `frame_030`). `frame_035` shows **two** bars — separate groups
   each carry one.
 
+### The squad splits, and that is load-bearing
+
+Surfaced while building the crowd, and it resolves something that otherwise
+does not add up.
+
+The road is about 6.8 m wide and a unit is about 0.58 m, so **roughly 11 units
+fit abreast — a hard cap at around 70 troops.** Past that, a single blob has
+nowhere to go but backwards, and the silhouette stops being wider-than-deep.
+The reference never lets that happen: at ~60 units it **splits into two groups**
+(hence the two HP bars in `frame_035`), and each group stays within the width
+budget.
+
+So "wider than deep" is not a formation preference — it is a consequence of a
+splitting rule, and the split is what keeps the crowd reading as a crowd instead
+of a column. **Our contract currently has one `squadLane` and one `health`, so
+we cannot express this yet.** It needs a `types.ts` change and a product call on
+whether the player steers both groups together or independently.
+
+Until then a single blob deepens past ~100 units and the read degrades. Known
+and deliberate, not an oversight.
+
 ## Bullets — the firehose
 
 Three distinct tiers appear in 14 seconds:
@@ -69,6 +90,22 @@ Three distinct tiers appear in 14 seconds:
 
 Tracers are **elongated along travel**, never round dots. Density scales with
 troop count; colour and shape change with weapon tier.
+
+### The cone is narrow — trust the measurement, not your eye
+
+Measured off `frame_035`: the stream widens about **1.5 m over 12 m of depth, a
+~4° half-angle.** It reads on screen as a 25° fan only because this camera views
+the corridor at a grazing ~22°, which stretches lateral motion and squashes
+forward motion.
+
+**The apparent width comes from the squad being wide, not from angular spread.**
+Tuning the spread up until it matches what your eye sees on the reference sprays
+bullets straight off the road. This is the easiest thing in the whole document
+to get wrong by eyeballing it.
+
+Related: the sprites are **billboards**, not quads lying along their travel
+axis. A tracer oriented along its own velocity is foreshortened to ~37% by this
+camera and reads as a stubby dot. The reference is clearly billboarding too.
 
 ## Gates — how upgrades are presented
 
@@ -116,6 +153,10 @@ This is `frame_023`, and it is the beat Mischa called out specifically:
    clump, each with a thick black outline, drifting up and fading.
 3. **Blue/cyan swirl ribbons** arc around the squad — curved energy streaks
    orbiting the mass, not a radial burst.
+   - Alongside them, **bright vertical light shafts rise through the crowd**.
+     Missed on the first pass of this teardown and caught while building the
+     effect; they are a large part of why the moment reads as *energy* rather
+     than as decoration, and they cost nothing extra to draw.
 4. **The clump visibly grows** in the same beat. New units pop in at the blob's
    edge and settle inward.
 

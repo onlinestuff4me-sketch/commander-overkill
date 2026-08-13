@@ -41,8 +41,19 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
 
   // Two lights, no shadow maps. Shadows are the second thing that kills a
   // mobile frame budget; the cartoon look does not need them.
+  //
+  // THE KEY LIGHT IS UP-SCREEN FOR A REASON. Every element draws its own fake
+  // contact shadow, and a shadow's direction is the opposite of the light's. A
+  // light on the camera side (the flattering choice, and where this started)
+  // throws every shadow up-screen — directly BEHIND the unit casting it, where
+  // it is hidden. The shadows are what seat units on the road, so losing them
+  // makes the whole crowd hover.
+  //
+  // Placing the key up-screen-left throws shadows down-screen-right, which is
+  // both visible and what the reference frames show. Backlighting is paid for
+  // by the strong hemisphere fill below.
   const key = new THREE.DirectionalLight(0xffffff, 2.1);
-  key.position.set(4, 10, 6);
+  key.position.set(-4, 10, -6);
   scene.add(key);
   scene.add(new THREE.HemisphereLight(0xcfefff, 0x4a7a3a, 1.5));
 
