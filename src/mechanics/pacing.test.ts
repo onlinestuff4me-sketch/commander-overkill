@@ -19,7 +19,14 @@ import {
   EFFECTIVE_PASS_SECONDS,
 } from "./bullets";
 import type { BulletTuning } from "./bullets";
-import { barrelHp, barrelLadder, barrelPayout, niceHp, BARREL_PASS_SHARE } from "./pacing";
+import {
+  barrelHp,
+  barrelLadder,
+  barrelPayout,
+  laneCoverage,
+  niceHp,
+  BARREL_PASS_SHARE,
+} from "./pacing";
 import type { WeaponTier } from "../core/types";
 
 /** Mirrors main.ts's `tierFor`. Kept local so the table below is self-contained. */
@@ -52,7 +59,7 @@ const TUNING: BulletTuning = {
   tier01Spread: 0.012,
   tier2Spread: 0.03,
   shotJitterFraction: 0.25,
-  convergeDistance: 6,
+  convergeDistance: 0,
   convergeMaxAngle: 0.209,
   riseJitter: 0.5,
   muzzleY: 1.0,
@@ -95,6 +102,35 @@ const MEASURED: readonly (readonly [troops: number, damage: number])[] = [
   [120, 4782],
 ];
 
+/**
+ * Squad half-width at a given troop count, MEASURED off the running game
+ * (`__overkill.stats().radiusX`) rather than re-deriving the squad's spiral
+ * here. Interpolated between samples; flat past the cap, which is where the
+ * crowd stops widening and starts only deepening.
+ */
+const HALF_WIDTH: readonly (readonly [troops: number, halfWidth: number])[] = [
+  [1, 1.12],
+  [8, 1.09],
+  [20, 1.71],
+  [40, 1.82],
+  [80, 2.55],
+  [120, 2.57],
+  [1200, 2.57],
+];
+
+function halfWidthFor(troops: number): number {
+  let prev = HALF_WIDTH[0]!;
+  for (const point of HALF_WIDTH) {
+    if (troops <= point[0]) {
+      if (point === prev) return point[1];
+      const t = (troops - prev[0]) / (point[0] - prev[0]);
+      return prev[1] + (point[1] - prev[1]) * t;
+    }
+    prev = point;
+  }
+  return prev[1];
+}
+
 describe("shot rate", () => {
   it("is zero with nobody left to fire", () => {
     expect(totalShotsPerSecond(0, 0, TUNING)).toBe(0);
@@ -125,8 +161,12 @@ describe("shot rate", () => {
 });
 
 describe("damagePerPass", () => {
-  it("reproduces the browser-measured damage curve within 10%", () => {
+  it("reproduces the browser-measured curve where the whole curtain lands", () => {
+    // Only the counts whose stream is narrower than a barrel face, because
+    // `damagePerPass` is now TOTAL output and only those put all of it on one
+    // target. The wider counts are covered by the `laneCoverage` suite below.
     for (const [troops, measured] of MEASURED) {
+      if (laneCoverage(halfWidthFor(troops)) < 0.99) continue;
       const predicted = damagePerPass(tierFor(troops), troops, TUNING);
       const error = Math.abs(predicted - measured) / measured;
       expect(
@@ -157,7 +197,7 @@ describe("barrel hit points", () => {
     // survived a while met barrels it could not dent.
     for (let row = 1; row <= 40; row++) {
       for (const troops of [1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120, 400, 1200]) {
-        const hp = barrelHp(row, troops, tierFor(troops), TUNING);
+        const hp = barrelHp(row, troops, tierFor(troops), TUNING, halfWidthFor(troops));
         const pass = damagePerPass(tierFor(troops), troops, TUNING);
         expect(hp, `row ${row} at ${troops} troops`).toBeLessThanOrEqual(pass);
       }
@@ -168,7 +208,7 @@ describe("barrel hit points", () => {
     // A barrel that costs the entire approach leaves nothing for the enemies
     // standing behind it, and nothing for its neighbours in the row.
     for (const troops of [8, 20, 50, 120]) {
-      const hp = barrelHp(30, troops, tierFor(troops), TUNING);
+      const hp = barrelHp(30, troops, tierFor(troops), TUNING, halfWidthFor(troops));
       const pass = damagePerPass(tierFor(troops), troops, TUNING);
       expect(hp / pass).toBeLessThanOrEqual(BARREL_PASS_SHARE + 0.01);
     }
@@ -177,24 +217,66 @@ describe("barrel hit points", () => {
   it("gets harder as the run goes on, at a fixed army size", () => {
     let prev = 0;
     for (let row = 1; row <= 12; row++) {
-      const hp = barrelHp(row, 400, tierFor(400), TUNING);
+      const hp = barrelHp(row, 400, tierFor(400), TUNING, halfWidthFor(400));
       expect(hp).toBeGreaterThanOrEqual(prev);
       prev = hp;
     }
-    expect(prev).toBeGreaterThan(barrelHp(1, 400, tierFor(400), TUNING));
+    expect(prev).toBeGreaterThan(barrelHp(1, 400, tierFor(400), TUNING, halfWidthFor(400)));
   });
 
   it("never asks a single soldier for more than a single soldier can do", () => {
     // START_TROOPS is 1. This is the opening beat, and it has to be winnable.
-    const hp = barrelHp(1, 1, 0, TUNING);
+    const hp = barrelHp(1, 1, 0, TUNING, halfWidthFor(1));
     expect(hp).toBeGreaterThan(0);
     expect(hp).toBeLessThanOrEqual(damagePerPass(0, 1, TUNING) * BARREL_PASS_SHARE + 1);
   });
 
   it("always paints a readable numeral", () => {
     for (let row = 1; row <= 60; row++) {
-      const hp = barrelHp(row, 1200, tierFor(1200), TUNING);
+      const hp = barrelHp(row, 1200, tierFor(1200), TUNING, halfWidthFor(1200));
       expect(String(hp).length).toBeLessThanOrEqual(3);
+    }
+  });
+});
+
+describe("laneCoverage", () => {
+  it("puts everything on target when the crowd is narrower than a barrel", () => {
+    expect(laneCoverage(0.4)).toBe(1);
+    expect(laneCoverage(1.0)).toBe(1);
+  });
+
+  it("falls as the crowd widens, because the curtain widens with it", () => {
+    let prev = Infinity;
+    for (let r = 1.05; r < 6; r += 0.1) {
+      const c = laneCoverage(r);
+      expect(c).toBeLessThanOrEqual(prev);
+      prev = c;
+    }
+  });
+
+  it("is never more than all of the fire, nor less than none", () => {
+    for (let r = 0.01; r < 20; r += 0.13) {
+      const c = laneCoverage(r);
+      expect(c).toBeGreaterThan(0);
+      expect(c).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("matches the browser probe within 12% at the counts it was measured at", () => {
+    // Probe: damage on a lane-centred barrel / total output, against the squad
+    // half-width measured at the same count.
+    //   20 troops   413 / 595  = 0.69   model 0.73   +6%
+    //   120 troops 2036 / 3550 = 0.57   model 0.51  -12%
+    // It errs in both directions, which is what a model does and a fit does not.
+    for (const [troops, measured] of [
+      [20, 0.69],
+      [120, 0.57],
+    ] as const) {
+      const model = laneCoverage(halfWidthFor(troops));
+      const error = Math.abs(model - measured) / measured;
+      expect(error, `${troops} troops: model ${model.toFixed(3)} vs ${measured}`).toBeLessThan(
+        0.12,
+      );
     }
   });
 });

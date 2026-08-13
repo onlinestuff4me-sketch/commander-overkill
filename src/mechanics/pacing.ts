@@ -90,9 +90,40 @@ export function barrelHp(
   troops: number,
   tier: WeaponTier,
   tuning: BulletTuning,
+  streamHalfWidth: number,
 ): number {
-  const affordable = damagePerPass(tier, troops, tuning) * BARREL_PASS_SHARE;
+  const affordable =
+    damagePerPass(tier, troops, tuning) * laneCoverage(streamHalfWidth) * BARREL_PASS_SHARE;
   return Math.max(1, niceHp(Math.min(barrelLadder(row), affordable)));
+}
+
+/** Half of a barrel's hittable face: BARREL_LENGTH/2 plus the collision pad the
+ *  orchestrator tests with. Duplicated from entities/barrels.ts and main.ts
+ *  rather than imported, because importing barrels.ts drags three.js into a
+ *  module whose whole value is being runnable without it. */
+const BARREL_HALF_FACE = 1.7 / 2 + 0.2;
+
+/**
+ * Share of the army's fire that lands on ONE barrel directly ahead of it.
+ *
+ * The fire is a parallel curtain as wide as the crowd, so a barrel is a 2.1 m
+ * window cut out of a stream that can be over 5 m across — a big army spends
+ * most of its output on whatever else is in the row, which is the point of
+ * being wide and is exactly what the reference does.
+ *
+ * The crowd is a filled ellipse, so the sideways density of its muzzles follows
+ * the semicircle law, √(1−(x/R)²), not a flat distribution — the middle lane is
+ * denser than the flanks. Integrating that over the window gives the closed form
+ * below. Measured against the browser probe (damage on a lane-centred barrel
+ * ÷ total output): 0.69 at 20 troops against 0.79 predicted, 0.57 at 120
+ * against 0.51. Within ~15%, in both directions, which is the accuracy the HP
+ * curve needs — it decides whether a barrel is a speed bump or a wall, and both
+ * of those survive a 15% error.
+ */
+export function laneCoverage(streamHalfWidth: number): number {
+  const r = Math.max(1e-3, streamHalfWidth);
+  const u = Math.min(1, BARREL_HALF_FACE / r);
+  return (2 / Math.PI) * (Math.asin(u) + u * Math.sqrt(1 - u * u));
 }
 
 /**

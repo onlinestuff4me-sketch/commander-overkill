@@ -256,8 +256,9 @@ export interface BulletTuning {
   /**
    * CONVERGENCE. Metres over which a round's lateral offset from the squad's
    * firing axis decays by 1/e. Lower = the army's fire focuses into a column
-   * sooner. This is what makes aiming feel like aiming: see the long note above
-   * `#converge`.
+   * sooner. **Zero disables it entirely**, and zero is the shipped default —
+   * the fire travels as a parallel curtain the full width of the crowd. See the
+   * long note above `#advance`.
    */
   convergeDistance: number;
   /** Hard cap on how far inward a round may be aimed, radians. The outermost
@@ -338,10 +339,9 @@ function defaultTuning(): BulletTuning {
     tier01Spread: 0.012,
     tier2Spread: 0.03,
     shotJitterFraction: 0.25,
-    // 6 m and 12°: measured to put 93% of a 50-troop army's fire inside a
-    // barrel's 2.1 m window while leaving the fire 4.5 m wide 2 m off the
-    // muzzles, so every soldier still visibly shoots its own stream.
-    convergeDistance: 6,
+    // OFF. The army fires as a parallel curtain as wide as it is; see the note
+    // above `#advance` for why this stopped being 6.
+    convergeDistance: 0,
     convergeMaxAngle: 0.209,
     riseJitter: 0.5,
 
@@ -1202,10 +1202,37 @@ class Bullets implements BulletSystem, BulletView {
    *     5.3 m at 2 m out), so every soldier visibly shoots its own stream.
    *   * By target depth it is a column: 1.0 m at 12 m, inside the barrel window.
    *   * 93% of a 50-troop army's damage now lands on the barrel it is aimed at.
+   *
+   * ===================== AND WHY IT IS NOW OFF BY DEFAULT ====================
+   *
+   * All of the above is still true, and it is still the wrong behaviour for
+   * this game. It was derived from `frame_030` of Part1.mov, where a single
+   * barrel sits in the squad's lane and "did the army hit it" is the only
+   * question worth asking. `reference-media/reference-clip-1a.mov` shows the
+   * mechanic the game is actually built on, and it is the opposite:
+   *
+   *   * the stream is made of individually visible parallel COLUMNS, roughly
+   *     15 of them spanning ~475 px of a 720 px frame at 45% depth, and
+   *   * every column registers on whatever barrel or barrier it happens to
+   *     cross, so a barrel clipped by the right-hand edge of the stream ticks
+   *     down slowly while one squarely inside it melts.
+   *
+   * That makes the crowd's WIDTH into a weapon — a wide army covers several
+   * lanes at once and a narrow one drills a single hole — and it turns aiming
+   * into a question of coverage rather than one of a single lane. Focusing all
+   * fire into one column throws that away, and no amount of tuning the decay
+   * distance recovers it, because the whole point is the parts of the stream
+   * that DON'T point at what you are aiming at.
+   *
+   * Setting `convergeDistance` to 0 restores the parallel curtain. The decay is
+   * kept, rather than deleted, because it is still the right model for a
+   * focused-fire powerup or a boss-phase weapon.
    */
   #advance(dt: number): void {
     const t = this.tuning;
-    const invDc = 1 / Math.max(0.25, t.convergeDistance);
+    // Zero means parallel: no re-aiming at all, so a round keeps the lateral
+    // velocity it left the muzzle with.
+    const invDc = t.convergeDistance > 0 ? 1 / Math.max(0.25, t.convergeDistance) : 0;
     const tanMax = Math.tan(Math.max(0, t.convergeMaxAngle));
 
     // Backwards, because expiring swap-removes the tail into the current slot —
@@ -1296,7 +1323,10 @@ class Bullets implements BulletSystem, BulletView {
     // `#advance`, so the sub-tick catch-up below places the round on the path it
     // is actually going to fly.
     const cap = Math.tan(Math.max(0, t.convergeMaxAngle)) * speed;
-    let lean = -(sx - axisX) * (1 / Math.max(0.25, t.convergeDistance)) * speed;
+    let lean =
+      t.convergeDistance > 0
+        ? -(sx - axisX) * (1 / Math.max(0.25, t.convergeDistance)) * speed
+        : 0;
     if (lean > cap) lean = cap;
     else if (lean < -cap) lean = -cap;
 
@@ -1454,13 +1484,21 @@ export function liveBullets(tier: WeaponTier, troops: number, t: BulletTuning): 
 export const EFFECTIVE_PASS_SECONDS = 4.25;
 
 /**
- * Damage one barrel standing in the squad's lane takes on one full approach.
+ * TOTAL damage the army delivers over one barrel-approach — the whole curtain,
+ * wherever it lands.
  *
  * This exists so barrel hit points can be DERIVED from the weapon model instead
  * of hand-fitted to it. Hand-fitted numbers were the standing problem: every
  * change to a fire rate silently invalidated the HP curve, so the two had to be
  * retuned together and in practice neither was. Route HP through here and a
  * rate change carries itself.
+ *
+ * NOT what a single barrel takes. Since the fire stopped converging it travels
+ * as a curtain the width of the crowd, so one barrel intercepts only the share
+ * of it that overlaps its 1.7 m face — see `laneCoverage` in mechanics/pacing.ts.
+ * Total output is a property of the WEAPON; where it lands is a property of the
+ * crowd's geometry, and keeping the two apart is what stops one of them
+ * silently absorbing an error in the other.
  */
 export function damagePerPass(tier: WeaponTier, troops: number, t: BulletTuning): number {
   const perBullet = tier === 2 ? t.dartDamage : t.tracerDamage;

@@ -123,7 +123,13 @@ let contentSpawning = true;
 
 function spawnRow(): void {
   rowIndex++;
-  const hp = barrelHp(rowIndex, world.troops, tierFor(world.troops), bullets.tuning);
+  const hp = barrelHp(
+    rowIndex,
+    world.troops,
+    tierFor(world.troops),
+    bullets.tuning,
+    squad.radiusX,
+  );
   for (const lane of ROW_LANES) {
     // Every third row rides a motorcycle elite, so the variant actually shows up.
     const mounted = rowIndex % 3 === 0 && lane === 0;
@@ -317,7 +323,7 @@ document.addEventListener("visibilitychange", () => {
  *
  * Destructive: it clears the corridor and leaves the run reset behind it.
  */
-function probeDamagePerPass(troops: number, lane = 0): {
+function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
   troops: number;
   tier: WeaponTier;
   /** Total damage the barrel absorbed between spawn and passing the squad. */
@@ -348,7 +354,11 @@ function probeDamagePerPass(troops: number, lane = 0): {
   // the wrong geometry.
   for (let i = 0; i < 90; i++) tick(dt);
 
-  const id = barrels.spawn(lane, SPAWN_Z, PROBE_HP);
+  // `barrelLane` defaults to the squad's own lane — the head-on case. Passing a
+  // different one measures COVERAGE: with fire travelling as a parallel curtain,
+  // a barrel off to one side takes only the share of the stream that overlaps
+  // it, which is the mechanic the whole width of the crowd now buys.
+  const id = barrels.spawn(barrelLane, SPAWN_Z, PROBE_HP);
   let ticks = 0;
   let last = PROBE_HP;
   // First and last tick on which a round actually landed. The window is the
