@@ -77,10 +77,18 @@ const renderables: System[] = [
 function payTroops(amount: number): void {
   const before = world.troops;
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
-  const gained = world.troops - before;
-  if (gained <= 0) return;
-  floaters.spawn(squad.center, gained, squad.radiusX);
-  growthFx.play(squad.center, squad.radius);
+  const delta = world.troops - before;
+  if (delta === 0) return;
+  if (delta > 0) {
+    floaters.spawn(squad.center, delta, squad.radiusX);
+    growthFx.play(squad.center, squad.radius);
+    return;
+  }
+  // A red gate is the same beat run backwards, and it has to be as legible as
+  // the payout — the player needs to see the size of what it cost, not just
+  // watch a bar shrink. Counted off ACTUAL losses, so a -20 taken at 8 troops
+  // rains eight, not twenty.
+  floaters.drop(squad.center, -delta, squad.radiusX);
 }
 
 gates.onResolve((hit) => payTroops(hit.value));
