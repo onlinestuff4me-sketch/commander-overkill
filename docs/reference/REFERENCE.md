@@ -25,6 +25,32 @@ frame wins — say so and correct this file.
 
 ---
 
+## ⚠️ READ THIS BEFORE MEASURING ANYTHING
+
+**Three separate calibration bugs in this project had the same root cause: a
+measurement taken off a reference frame in SCREEN units, and then used as a
+WORLD value.** Every one of them shipped, rendered wrong, and had to be found by
+looking at the result. Expect this trap; it is not obvious in the moment.
+
+1. *"The blob is ~5 deep by 9 wide"* — a screen reading, used as a world ratio.
+   Flattened the crowd into a rank so units piled on top of each other.
+2. *"The bullet cone is ~25°"* — an apparent angle. The real cone is ~4°, and it
+   **converges**; a grazing camera stretches lateral motion.
+3. *"Tracers are ~1.9 m long"* — measured off the reference's **yellow enemy
+   soldiers**, not its bullets. Real length is 0.25–0.31 m, a 6× error, and it
+   made our fire read as a steam plume instead of discrete rounds.
+
+**The two cameras are not the same.** The reference sits roughly **43° above the
+horizon**; ours sits at **22°** (`src/core/renderer.ts`). At 22°, one metre of
+world *depth* covers only ~0.375 of the screen that one metre of world *width*
+does. So any depth-vs-width ratio read off a reference frame must be divided out
+by *their* camera and re-applied through *ours* before it means anything.
+
+**Measure in object-relative units.** Helmet diameters, road widths, body
+widths — quantities that are camera-independent. Then convert. A pixel count is
+only meaningful alongside the pixel count of something whose world size you know
+in the same screen row.
+
 ## Camera & staging
 
 - Fixed portrait camera, elevated three-quarter view, looking down a road that
