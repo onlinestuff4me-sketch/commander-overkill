@@ -100,7 +100,14 @@ enemies.onKilled(() => bossBar.damage(1));
 // ── Placeholder content pacing ─────────────────────────────────────────────
 
 const ROW_LANES = [-0.62, 0, 0.62] as const;
-const SPAWN_EVERY = 3.2;
+/**
+ * Spacing is authored in TIME but experienced as DISTANCE, so this has to move
+ * with scrollSpeed or the corridor silently gets denser every time the world
+ * slows down. At 6 m/s, 4.2s ≈ 25m between rows — close enough that the next
+ * decision is visible while the current one resolves, which is the stacking the
+ * reference uses.
+ */
+const SPAWN_EVERY = 4.2;
 const SPAWN_Z = -58;
 let spawnTimer = SPAWN_EVERY;
 let rowIndex = 0;

@@ -54,7 +54,10 @@ export function createWorld(center: THREE.Vector3): WorldState {
     troops: 1,
     squadLane: 0,
     squadCenter: center,
-    scrollSpeed: 9,
+    // 9 m/s put barrels and gates past the player before there was time to
+    // shoot them, so rewards went unearned — the decision arrived and left
+    // before you could act on it. 6 stretches the approach from ~7s to ~11s.
+    scrollSpeed: 6,
     elapsed: 0,
     weaponTier: 0,
     health: 1,
