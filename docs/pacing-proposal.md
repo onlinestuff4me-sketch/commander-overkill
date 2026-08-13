@@ -1,7 +1,7 @@
 # Proposal — making the corridor feel authored
 
-_Written 2026-08-13, for Mischa. Needs three decisions before the work starts;
-they are at the bottom._
+_Written 2026-08-13, for Mischa. The three decisions it asked for have been
+answered — see the bottom. Nothing here is blocked._
 
 Everything that arrives in the corridor is now authored **except when it
 arrives**. Barrel hit points derive from the weapon model, gate rows are shaped
@@ -119,31 +119,34 @@ stall, where they run away with it, how often a run dies early.
 
 ---
 
-## Decisions I need from you
+## Decisions — ANSWERED by Mischa, 2026-08-13
 
-These three set the shape of the curve. I can pick defaults and proceed if you
-would rather not decide now — I have marked what I would choose — but the answers
-change the work materially, so they are worth two minutes.
+All three came back as the proposed defaults. These are now the targets the
+pacing curve is built against; treat them as decisions of record.
 
-**1. How long should one run be?**
-Pacing *is* a curve over a duration. Without the duration I am guessing the
-shape. My default would be **90 seconds to 2 minutes** — long enough for the
-army to visibly compound, short enough for the bus ride the PRD describes.
+| Question | Answer |
+|---|---|
+| How long is one run? | **90 seconds to 2 minutes**, first gate to boss |
+| Army size at the end of a strong run | **300–500 troops** |
+| How often should a run end in failure? | **Roughly 1 in 3** |
 
-**2. How big should the army be at the end of a strong run?**
-This sets the whole reward economy — gate values, barrel payouts, how fast
-rewards climb. The reference clip runs to several hundred troops. My default
-would be **~300–500**, which is where the crowd looks most impressive and the
-camera has stepped back once or twice.
+What each one pins down:
 
-**3. How often should a run end in failure?**
-This sets how hard the penalties bite and how long the opening mercy rule lasts.
-My default would be **roughly one run in three ends early** — enough that
-survival feels earned, not so much that it feels arbitrary.
-
----
+- **90 s – 2 min** sets the number of beats in a run. At 6 m/s that is 540–720 m
+  of road, so with a minimum clear distance between beats it is roughly 20–28
+  of them. That is the budget the beat sequence in step 2 has to fill.
+- **300–500 troops** sets the reward economy. Starting at 1, reaching ~400 over
+  ~25 beats means the average beat has to roughly compound the army — which
+  makes the blue gates' climbing values, not barrel payouts, the main engine.
+  It also means a strong run steps the camera back twice (120 and 250) and
+  stops just short of the third.
+- **1 in 3 failing** sets how hard the red gates bite and when the opening mercy
+  rule (`MERCY_TROOPS = 10`) should stop protecting the player. It is also the
+  number step 4's autopilot measures directly, so this is falsifiable rather
+  than a matter of opinion.
 
 ## Sequencing
 
-Steps 1 and 2 are decision-free and I can start on them immediately. Step 3
-waits on the answers above. Step 4 can land alongside either.
+Steps 1 and 2 are decision-free. Step 3 is now unblocked by the answers above.
+Step 4 can land alongside either, and is what will tell us whether the 300–500
+and 1-in-3 targets are actually being hit.
