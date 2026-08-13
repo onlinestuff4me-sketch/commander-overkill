@@ -424,6 +424,7 @@ class Squad implements SquadSystem {
   #radiusX = 0;
   #radiusZ = 0;
   #shapedFor = -1;
+  #shapedAtZoom = 1;
 
   // --- centre steering ---
   #centerX = 0;
@@ -622,7 +623,7 @@ class Squad implements SquadSystem {
   update(dt: number, world: WorldState): void {
     this.#time += dt;
     this.setCount(world.troops);
-    this.#reshape();
+    this.#reshape(world.zoom);
 
     // The centre travels the whole road at every size. A crowd wider than the
     // road overhangs it, which is what the reference does and what keeps a big
@@ -807,9 +808,10 @@ class Squad implements SquadSystem {
 
 
   /** Clump ellipse from troop count. Only runs when the count actually moves. */
-  #reshape(): void {
-    if (this.#shapedFor === this.#count) return;
+  #reshape(zoom: number): void {
+    if (this.#shapedFor === this.#count && this.#shapedAtZoom === zoom) return;
     this.#shapedFor = this.#count;
+    this.#shapedAtZoom = zoom;
 
     const root = Math.sqrt(this.#count);
     const idealX = SPREAD * root * (1 + SMALL_SQUAD_FLARE / Math.max(1, this.#count));
@@ -819,7 +821,13 @@ class Squad implements SquadSystem {
     // somewhere — so it goes backwards, and density only starts climbing after
     // the depth cap too. This is the reference's behaviour past ~50 units.
     const squeeze = idealX > 0 ? idealX / Math.max(this.#radiusX, 1e-4) : 1;
-    this.#radiusZ = Math.min(RADIUS_Z_MAX, SPREAD * DEPTH_RATIO * root * squeeze);
+    // The depth cap is a FRAMING budget, not a road one — it is where the rear
+    // rank reaches the bottom of the screen. Pulling the camera back is exactly
+    // the thing that buys more of it, so it scales with the zoom. Width does
+    // not: the road does not get wider just because you are looking from
+    // further away, and letting the crowd widen with the zoom would walk it out
+    // over the water.
+    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
   }
 }
 

@@ -15,6 +15,7 @@ import * as THREE from "three";
 import { GameLoop } from "./core/loop";
 import { StateMachine } from "./core/state";
 import { createStage } from "./core/renderer";
+import { createZoom } from "./core/zoom";
 import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
 import type { System, WeaponTier } from "./core/types";
@@ -39,6 +40,7 @@ const stage = createStage(canvas);
 const state = new StateMachine();
 const touch = new TouchDriver(canvas);
 const world = createWorld(new THREE.Vector3());
+const zoom = createZoom(stage.camera, stage.scene);
 
 const corridor = createCorridor();
 stage.scene.add(corridor);
@@ -165,6 +167,8 @@ function resetRun(): void {
   bossBar.reset(80);
   spawnTimer = SPAWN_EVERY;
   rowIndex = 0;
+  zoom.reset(world.troops);
+  world.zoom = zoom.distance;
 }
 
 /**
@@ -276,6 +280,12 @@ function tick(dt: number): void {
     bossBar.update(dt, world);
 
     scrolled += world.scrollSpeed * dt;
+
+    // Last, so it steps on the count this tick actually ended with — a gate
+    // that pays 200 troops should move the camera on the same beat the +1s
+    // bloom, not one tick later.
+    zoom.update(dt, world.troops);
+    world.zoom = zoom.distance;
 
     if (world.troops <= 0) resetRun();
 }
@@ -468,6 +478,8 @@ if (import.meta.env.DEV) {
         squadX: Number(squad.center.x.toFixed(2)),
         radiusX: Number(squad.radiusX.toFixed(2)),
         calls: stage.renderer.info.render.calls,
+        zoom: Number(world.zoom.toFixed(3)),
+        radiusZ: Number(squad.radiusZ.toFixed(2)),
         tris: stage.renderer.info.render.triangles,
       }),
     },

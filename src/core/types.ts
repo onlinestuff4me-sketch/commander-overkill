@@ -34,6 +34,13 @@ export interface WorldState {
   weaponTier: WeaponTier;
   /** Squad health, 0..1. Owned by the game; drives the green bar. */
   health: number;
+  /**
+   * How far back the camera has stepped, as a multiple of its resting distance.
+   * 1 at every troop count the crowd still fits on screen at. Owned by the game
+   * (see core/zoom.ts); the squad reads it because the extra room the camera
+   * buys is room the crowd is allowed to grow into.
+   */
+  zoom: number;
 }
 
 /**
@@ -61,5 +68,6 @@ export function createWorld(center: THREE.Vector3): WorldState {
     elapsed: 0,
     weaponTier: 0,
     health: 1,
+    zoom: 1,
   };
 }
