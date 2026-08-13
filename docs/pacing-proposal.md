@@ -40,8 +40,8 @@ Three consequences:
 
 ## The proposal, in four steps
 
-Each step is shippable on its own and visible to you in the build. Steps 1 and 2
-need no decisions from you. Step 3 is the one that needs your answers.
+Each step is shippable on its own and visible to you in the build. All four are
+unblocked — the decisions step 3 depended on are answered at the bottom.
 
 ### Step 1 — One conductor owns the corridor
 
@@ -89,7 +89,8 @@ Give the run a **length**, ramp the beats toward it, and put the boss at the
 end. Difficulty becomes a curve across a known duration rather than a timer that
 climbs forever.
 
-*This is the step that needs your answers* — see below.
+*Targets:* a run is 90 s to 2 min and a strong one ends at 300–500 troops. See
+the decisions at the bottom.
 
 *Cost:* the pacing curve is small. **A real boss entity is not** — it is its own
 milestone, and I would sequence it after step 3's curve lands, so you can feel
