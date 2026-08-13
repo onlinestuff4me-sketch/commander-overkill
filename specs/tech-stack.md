@@ -59,6 +59,26 @@ wants a lifecycle script.
   is the sandbox blocking the system cert store. npm still exits 0 — check the
   exit code, not the word ERROR.
 
+### `npm --prefix` does NOT move the cache. Only `cwd` does.
+
+Measured here, and it silently defeats the guardrail above:
+
+```
+# from projects/, using --prefix commander-overkill
+npm config get cache  →  /Users/mischa/.npm          ← home directory
+
+# from inside commander-overkill/
+npm config get cache  →  .../commander-overkill/.npm-cache
+```
+
+`--prefix` changes where npm looks for `package.json`. It does **not** change
+where npm looks for `.npmrc` — that is read from the *working directory*. So any
+npm command run from the workspace root with `--prefix` writes to `~/.npm`, and
+nothing warns you.
+
+**Always `cd` into the project.** This applies to `.claude/launch.json` too: use
+a `cwd` field, never `--prefix`.
+
 ### Known advisory, accepted
 
 `nanoid <3.3.18` (high) arrives via `vite → postcss → nanoid`. It is a

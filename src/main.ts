@@ -119,6 +119,31 @@ function spawnRow(): void {
   }
 }
 
+/**
+ * Placeholder starting strength. The reference starts you at ONE soldier, and
+ * we should too — but that only works when the first gate row is guaranteed to
+ * offer a survivable segment, and our pacing is still random. At one troop a
+ * single red segment ends the run in three seconds, which makes the prototype
+ * impossible to look at. Revisit when gate pacing is authored rather than rolled.
+ */
+const START_TROOPS = 8;
+
+/**
+ * Zero troops is a loss. Restarting immediately (rather than freezing on an
+ * empty road) keeps the prototype iterable — there is no debrief screen yet,
+ * and a frozen screen teaches nobody anything.
+ */
+function resetRun(): void {
+  world.troops = START_TROOPS;
+  world.health = 1;
+  barrels.clear();
+  enemies.clear();
+  gates.reset();
+  bossBar.reset(80);
+  spawnTimer = SPAWN_EVERY;
+  rowIndex = 0;
+}
+
 /** Hoisted so the per-tick rider seating allocates nothing. */
 function seatRider(_id: number, tag: number, x: number, topY: number, z: number): void {
   if (tag >= 0) enemies.pin(tag, x, topY, z);
@@ -168,8 +193,13 @@ const road = corridor.children[0] as Mesh;
 const roadTex = (road.material as MeshLambertMaterial).map as CanvasTexture;
 let scrolled = 0;
 
-const loop = new GameLoop({
-  update(dt) {
+/**
+ * One simulation step. Split out of the loop callback so the debug harness at
+ * the bottom of this file can drive it directly — an offscreen browser pane
+ * throttles requestAnimationFrame to a dead stop, so verification screenshots
+ * have to advance the world themselves.
+ */
+function tick(dt: number): void {
     if (state.state !== "running") return;
     world.elapsed += dt;
     world.squadLane = touch.lane;
@@ -210,14 +240,19 @@ const loop = new GameLoop({
     bossBar.update(dt, world);
 
     scrolled += world.scrollSpeed * dt;
-  },
 
-  render(alpha) {
-    for (const system of renderables) system.render(alpha, world);
-    roadTex.offset.y = (scrolled / (70 / roadTex.repeat.y)) % 1;
-    stage.renderer.render(stage.scene, stage.camera);
-  },
+    if (world.troops <= 0) resetRun();
+}
 
+function draw(alpha: number): void {
+  for (const system of renderables) system.render(alpha, world);
+  roadTex.offset.y = (scrolled / (70 / roadTex.repeat.y)) % 1;
+  stage.renderer.render(stage.scene, stage.camera);
+}
+
+const loop = new GameLoop({
+  update: tick,
+  render: draw,
   onStats(stats) {
     bus.emit("frame:stats", stats);
   },
@@ -227,6 +262,7 @@ mountPerfOverlay(ui, stage.renderer);
 
 state.transition("briefing");
 state.transition("running");
+world.troops = START_TROOPS;
 loop.start();
 
 // A backgrounded run should not drain a phone battery, and stopping also means
@@ -235,6 +271,45 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) loop.stop();
   else loop.start();
 });
+
+/**
+ * HEADLESS DRIVE — dev builds only, stripped from production.
+ *
+ * An offscreen browser pane reports `document.hidden` and throttles
+ * requestAnimationFrame to *zero* frames, so screenshotting a live run captures
+ * whatever frame it happened to freeze on. This lets a verification pass pose
+ * the world at an exact state — "45 troops, gate 6 metres out" — and render
+ * that deterministically, which is a better way to compare against a specific
+ * reference frame than trying to catch the moment live.
+ */
+if (import.meta.env.DEV) {
+  Object.assign(window, {
+    __overkill: {
+      world,
+      /** Advance `ticks` fixed steps, then draw once. */
+      step(ticks = 60): void {
+        for (let i = 0; i < ticks; i++) tick(1 / 60);
+        draw(0);
+      },
+      setTroops(n: number): void {
+        world.troops = clamp(Math.round(n), 0, MAX_TROOPS);
+      },
+      setLane(n: number): void {
+        touch.lane = clamp(n, -1, 1);
+      },
+      pay: payTroops,
+      stats: () => ({
+        troops: world.troops,
+        tier: world.weaponTier,
+        elapsed: Number(world.elapsed.toFixed(2)),
+        squadX: Number(squad.center.x.toFixed(2)),
+        radiusX: Number(squad.radiusX.toFixed(2)),
+        calls: stage.renderer.info.render.calls,
+        tris: stage.renderer.info.render.triangles,
+      }),
+    },
+  });
+}
 
 // Debug sliders are opt-in: lil-gui is ~30kB and has no business in a playtest
 // build the player is holding.

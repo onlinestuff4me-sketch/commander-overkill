@@ -33,7 +33,13 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const scene = new THREE.Scene();
   // Fog hides the corridor's far end so we never have to draw geometry that is
   // about to be culled anyway, and it reads as bright haze rather than a void.
-  scene.fog = new THREE.Fog(0x7cc4e8, 34, 62);
+  //
+  // The far plane must sit BEYOND the spawn distance. Content spawns at z=-58,
+  // which is ~67m from this camera; the first cut faded out at 62, so barrels
+  // and gates were fully hazed before the player ever saw them — you cannot
+  // plan a route through a decision you cannot read. The reference keeps
+  // distant barrels crisp and hazes only the horizon.
+  scene.fog = new THREE.Fog(0x7cc4e8, 62, 105);
 
   const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 100);
   camera.position.copy(CAMERA_POS);

@@ -11,7 +11,10 @@ export default defineConfig(({ command }) => ({
   server: {
     // Bind to the LAN so a phone on the same Wi-Fi can open the printed URL.
     host: true,
-    port: 5173,
+    // 5173 is swarm-game's; keeping off it means both projects can run at once
+    // and neither silently serves the other.
+    port: 5174,
+    strictPort: true,
   },
 
   build: {
