@@ -36,8 +36,14 @@ plainly unauthored.
 This is the largest remaining piece of decision-free work, and there is a
 written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Nothing
 in it is blocked: Mischa has answered the three questions it asked. A run is
-**90 s to 2 min**, a strong run ends at **300–500 troops**, and **~1 in 3 runs
-should fail**. Those are the targets the curve is built against.
+**90 s to 2 min**, a strong run ends at **300–500 troops**, and the failure rate
+**scales by level** — 1 in 8 on levels 1–2, 1 in 5 on levels 3–4.
+
+That last one is not a tuning value. Penalties are absolute numbers while the
+army grows exponentially, so a `-5` is 62% of an 8-troop squad and 1.2% of a
+400-troop one — the exact inverse of "forgiving early, punishing late". The
+proposal's fix is proportional penalties with a per-level cap on what one gate
+may take. Read that section before touching `PENALTY_POOLS`.
 
 The specific defect to fix first: **gates and barrels are two independent
 spawners that both drop content at z = −58**, one every 16 m and one every
