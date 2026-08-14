@@ -41,6 +41,13 @@ particular.
 measures the game played perfectly; 0.3 s is the setting the brief's per-level
 failure bands should be read against.
 
+**Where the LOOK still falls short:**
+[`docs/reference/gap-analysis.md`](reference/gap-analysis.md) audits our build
+against the reference game screen by screen and ranks what to build. Short
+version: the mechanics are close, the WORLD is the gap — the reference is a
+suspension bridge over water and ours is a grey strip on a green field, and that
+one difference does more work than everything else on the list combined.
+
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
 
