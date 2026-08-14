@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3 (second pass)._
+_Last updated: 2026-08-14, session 3 (third pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -15,20 +15,25 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
 **The economy is measured, not guessed.** `__overkill.sample(16, 110, 0.3)` plays
-sixteen full autopilot runs with a 0.3 s reaction time: median **509 troops**
-against a 300–500 target, spread 223–1036, and **0 of 16 wiped**.
+sixteen full autopilot runs with a 0.3 s reaction time: median **319 troops**
+against a 300–500 target, spread 244–663, and **0 of 16 wiped**.
 
-That last number is the honest bad news and it should not be tuned away. Since a
-row can now be walked around, a player who reads the board correctly cannot be
-killed — every option is upside against less upside. Fixing that properly means
-**levels** (see #1): late levels need content that is unavoidable by
-construction, which the width distribution (`ROW_WIDTHS`) has the hooks for and
-nothing yet drives. Inflating penalties now would only make the mid-game
-miserable without putting the difficulty anywhere in particular.
+Read the median as a FLOOR. The autopilot positions itself well but makes no
+attempt to fill a reward's target — it never chooses which segment to pour fire
+into — so under the strategic rule below it collects only what the baseline climb
+and incidental fire happen to finish. A player who commits will beat it.
 
-Note the autopilot plays near-optimally, so its wipe rate is a FLOOR, not the
-brief's per-level target. `sample()` takes a reaction time for this reason; 0.3 s
-is the setting the failure-rate bands should be read against.
+**Zero wipes is the honest bad news and should not be tuned away.** Since a row
+can be walked around, a player who reads the board correctly cannot be killed —
+every option is upside against less upside. Fixing that properly means **levels**
+(see #1): late levels need content that is unavoidable by construction, which
+`ROW_WIDTHS` has the hooks for and nothing yet drives. Inflating penalties now
+would only make the mid-game miserable without putting the difficulty anywhere in
+particular.
+
+`sample()` takes a reaction time because a bot re-deciding sixty times a second
+measures the game played perfectly; 0.3 s is the setting the brief's per-level
+failure bands should be read against.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -358,6 +363,36 @@ pointless and made "or fight through them", one half of every blockade, free. Th
 autopilot measured it exactly: with dodging available and a flat breach cost, the
 median run went to 660 troops with zero wipes.
 
+**A REWARD IS EARNED BY FILLING IT, NOT BY WALKING INTO IT.** Mischa's call,
+picked over the generous alternative (pay whatever number is showing when you
+smash it) because it is what makes committing your fire to one segment a decision
+rather than a preference. Fire is a curtain, so splitting it between two blues
+fills neither.
+
+Three things have to be true for that rule to be fair, and all three are now
+enforced rather than hoped for:
+
+1. **The goal is visible.** Every blue carries a gold plate above it reading its
+   target (`targetTexture` in mechanics/gates.ts). Without it the rewards were,
+   accurately, "arbitrary and surprising — sometimes 9 or 10, sometimes 34".
+2. **The goal is always reachable.** `climbSpan` is the LOWER of what the economy
+   wants to pay (`rewardSpan`) and what the guns can actually deliver over the
+   approach — the same rule barrel hit points follow. The orchestrator reports
+   the weapon side via `gates.reportFirepower()`, because the weapon model
+   belongs to main.ts and a gate reaching for the bullet tuning would be exactly
+   the module-to-module coupling the contract forbids. Before this, a one-troop
+   squad met unfillable targets and blues sailed past paying nothing.
+3. **Failing is loud.** A blue smashed unfilled goes grey and its goal plate
+   snaps red and oversized. A reward that quietly does not arrive reads as a bug,
+   and was reported as one.
+
+**BACKLOG, Mischa's idea and worth building:** a reward variant that is
+attractive but PUNISHES a miss — walk through it unfilled and you lose the number
+that was showing instead of gaining it. The hooks are all here: `seg.failed` is
+already computed in `breakSegment`, and paying `-Math.floor(seg.value)` on it is
+a one-line change plus a distinct panel colour so the player can tell the two
+kinds apart before committing.
+
 **A row's penalties are capped as a whole, not per segment**
 (`ROW_PENALTY_CAP = 0.42` in `gates.ts`). A per-segment cap was correct while the
 crowd stood in one lane; it stopped being correct once the crowd spanned the
@@ -459,6 +494,10 @@ ships, pinned by postcss. Revisit when postcss bumps.
   share of the army per body that reaches you. There are still no mines, enemies
   do not shoot back, and a pack is the only enemy the director ever places —
   `spawnElite` and the biker variant are built and unused.
+- **The autopilot does not aim.** It positions the crowd but never chooses a
+  segment to concentrate fire on, so it under-collects under the fill-to-earn
+  rule and every economy median here is a floor. Teaching it to hold a lane until
+  a target fills is the next real improvement to the instrument.
 - **The autopilot ignores enemies.** `bestLane()` scores gate segments only, so
   it will happily dodge a row straight into a pack. Every economy number here is
   therefore slightly pessimistic about a good player and blind to whether the

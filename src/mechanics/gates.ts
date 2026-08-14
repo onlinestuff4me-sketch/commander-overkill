@@ -169,6 +169,27 @@ const JACKPOT_CHANCE = 0.2;
 const JACKPOT_MULTIPLE = 2.8;
 
 /**
+ * Share of what the army could POSSIBLY pour into one segment that its target
+ * is set to — and the reason a target is always reachable.
+ *
+ * A reward now pays only if it is filled (see `breakSegment`), which makes an
+ * unreachable target not a hard reward but a dead one. A playtester met exactly
+ * that at one troop: the first blues were unfillable, so they sailed past paying
+ * nothing, with no way to tell why.
+ *
+ * So the ceiling is the LOWER of what the economy wants to pay (`rewardSpan`)
+ * and what the guns can deliver over an approach — the same "authored ladder vs
+ * what you can actually chew through" rule barrel hit points follow. At 0.62 you
+ * have to put most of an approach's fire into one segment to fill it, which is
+ * the commitment the strategic rule is for; splitting between two blues fills
+ * neither.
+ */
+const REWARD_COMMIT_SHARE = 0.62;
+/** Floor on a target's climb, so there is always something to chase even when
+ *  the army is one soldier and the guns deliver almost nothing. */
+const REWARD_REACH_MIN = 4;
+
+/**
  * Where a row of `count` segments sits on the road, and how wide it is.
  *
  * Pure and exported so the layout rules can be checked without a GPU — the same
@@ -300,6 +321,25 @@ const SEGMENT_WIDTH = 2.35;
  * narrower gaps and is the harder shape, so it is the minority.
  */
 const ROW_FLUSH_CHANCE = 0.72;
+
+/**
+ * The goal plate's geometry, in metres.
+ *
+ * Sized off the SEGMENT rather than off the number, so a narrow segment's goal
+ * cannot bleed over its neighbour's — the same rule the panel numeral follows —
+ * and capped so a wide segment does not get a billboard. It floats clear of the
+ * panel top because the sky behind it is the only background in this scene with
+ * no detail to compete with.
+ */
+const TARGET_WIDTH_FRAC = 0.72;
+const TARGET_MAX_WIDTH = 2.1;
+const TARGET_LIFT = 0.62;
+/** Slow breathing pulse, so the eye finds the goal without it strobing. */
+const TARGET_PULSE = 0.06;
+const TARGET_PULSE_RATE = 3.1;
+/** How far the goal plate jumps when its segment is smashed unfilled. Big
+ *  enough to catch the eye on a frame where a lot else is also happening. */
+const TARGET_FAIL_SCALE = 1.3;
 
 /** Candidate positions `bestLane` scores across the road. 24 puts them ~0.47 m
  *  apart, finer than the tolerance any single decision turns on. */
@@ -447,6 +487,18 @@ export interface GateSystem extends System {
    * obviously worse than a human. It is not AI and is not shipped behaviour.
    */
   bestLane(): number;
+  /**
+   * Tell the gate module how much damage the army lands on ONE segment over a
+   * full approach. Call once per tick, before anything spawns.
+   *
+   * On the API rather than computed here because the weapon model belongs to
+   * the orchestrator — `pacing.damageOnSegment()` needs the bullet tuning and
+   * the weapon tier, and a gate reaching across for those is exactly the
+   * module-to-module coupling the contract exists to prevent. What gates does
+   * with it is set a reward target that is always reachable; see
+   * REWARD_COMMIT_SHARE.
+   */
+  reportFirepower(damagePerSegment: number): void;
   /** Face values of every live unresolved segment. Diagnostics only. */
   debugValues(): number[];
   readonly activeRows: number;
@@ -558,8 +610,24 @@ interface Segment {
   panel: THREE.Mesh;
   numeral: THREE.Mesh;
   sparkle: THREE.Mesh;
+  /** The gold goal plate floating above a blue segment. Hidden on penalties. */
+  target: THREE.Mesh;
+  targetMat: THREE.MeshBasicMaterial;
+  /** Integer currently baked into the goal plate. -Infinity = none yet. */
+  targetShown: number;
+  /** Unpulsed width of the goal plate, metres. The pulse scales from this. */
+  targetW: number;
   numeralMat: THREE.MeshBasicMaterial;
   reward: boolean;
+  /**
+   * Smashed through before its climb reached the ceiling, so it paid NOTHING.
+   *
+   * The strategic rule, chosen over the generous one: a reward is earned by
+   * filling it, not by walking into it. That only works if failing is as legible
+   * as succeeding, which is what this drives — the panel goes grey and the goal
+   * plate turns red rather than the number quietly not arriving.
+   */
+  failed: boolean;
   /** Set when the crowd smashed through this segment. Only crossed segments
    *  burst, and only crossed segments charge — see `resolve`. */
   crossed: boolean;
@@ -645,6 +713,14 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
    *  it to score a position the way `resolve` will actually judge it, and it has
    *  no world to read. */
   let lastHalfWidth = 0.3;
+  /** Scroll speed and squad plane from the last update, so a target can be sized
+   *  against the time a row will ACTUALLY spend climbing rather than a constant
+   *  that silently goes stale when the world speeds up. */
+  let lastSpeed = 6;
+  let lastCrossZ = -1.6;
+  /** Damage the army will land on one segment over an approach, supplied by the
+   *  orchestrator (it owns the weapon model). Zero until the first report. */
+  let lastSegmentDamage = 0;
   let autoSpawn = options?.autoSpawn ?? true;
 
   const root = new THREE.Group();
@@ -750,13 +826,31 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       sparkle.visible = false;
       segGroup.add(sparkle);
 
+      // Same fog rule as the numeral: the goal is the one thing on a distant row
+      // the player is trying to read, so it does not haze out with the panel.
+      const targetMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        fog: false,
+      });
+      const target = new THREE.Mesh(quad, targetMat);
+      target.visible = false;
+      segGroup.add(target);
+
       segments.push({
         group: segGroup,
         panel,
         numeral,
         sparkle,
+        target,
+        targetMat,
+        targetShown: Number.NEGATIVE_INFINITY,
+        targetW: 1,
         numeralMat,
         reward: false,
+        failed: false,
         crossed: false,
         broken: false,
         burst: 0,
@@ -829,7 +923,18 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // One roll per ROW, not per segment: a jackpot is the row's character, and
     // two of them side by side would just be a bigger ramp. Drawn unconditionally
     // so a row with no blue in it still advances the stream by the same amount.
-    const climbSpan = rewardSpan(lastTroops, rng() < JACKPOT_CHANCE);
+    // What the guns could pour into one segment on the way in: the free baseline
+    // climb over the time the row is in the corridor, plus the damage the
+    // orchestrator says will land on it.
+    const approach = Math.max(0.5, (lastCrossZ - z) / lastSpeed);
+    const reachable = Math.max(
+      REWARD_REACH_MIN,
+      (REWARD_CLIMB_RATE * approach + lastSegmentDamage * CLIMB_PER_DAMAGE) * REWARD_COMMIT_SHARE,
+    );
+    const climbSpan = Math.max(
+      1,
+      Math.min(rewardSpan(lastTroops, rng() < JACKPOT_CHANCE), Math.round(reachable)),
+    );
 
     // Normalise weights into world widths across the row's own span — which is
     // a slice of the road, not the whole of it. See SEGMENT_WIDTH.
@@ -851,6 +956,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       const reward = value > 0;
 
       seg.reward = reward;
+      seg.failed = false;
       seg.crossed = false;
       seg.broken = false;
       seg.burst = 0;
@@ -869,6 +975,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       seg.group.rotation.set(0, 0, 0);
 
       seg.panel.material = reward ? panelMats.reward : panelMats.penalty;
+      seg.numeralMat.color.setRGB(1, 1, 1);
+      seg.targetMat.color.setRGB(1, 1, 1);
       seg.panel.position.set(0, GATE_BASE_Y + GATE_HEIGHT / 2, 0);
       seg.panel.scale.set(width, GATE_HEIGHT, 1);
 
@@ -884,6 +992,18 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       seg.sparkle.visible = reward;
       const outer = seg.centerX >= 0 ? 1 : -1;
       seg.sparkle.position.set(outer * width * 0.4, GATE_BASE_Y + 0.16, 0.06);
+
+      // The goal plate sits ABOVE the panel, in clear sky, where it is legible
+      // from the far end of the corridor — which is the whole point of it. Only
+      // blues have a goal; a red is not something you are climbing toward.
+      seg.target.visible = reward;
+      seg.targetShown = Number.NEGATIVE_INFINITY;
+      if (reward) {
+        seg.targetW = Math.min(width * TARGET_WIDTH_FRAC, TARGET_MAX_WIDTH);
+        seg.target.scale.set(seg.targetW, seg.targetW / 2, 1);
+        seg.target.position.set(0, GATE_BASE_Y + GATE_HEIGHT + TARGET_LIFT, 0.05);
+        applyTarget(seg);
+      }
 
       applyValue(seg, true);
     }
@@ -926,6 +1046,16 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     row.group.position.set(0, 0, z);
     liveRows++;
     return true;
+  }
+
+  /** Re-bake the goal plate only when the ceiling actually changes — once per
+   *  row in practice, since the target is fixed when the row is placed. */
+  function applyTarget(seg: Segment): void {
+    const goal = Math.max(1, Math.floor(seg.climbMax));
+    if (goal === seg.targetShown) return;
+    seg.targetShown = goal;
+    seg.targetMat.map = targetTexture(numeralCache, goal);
+    seg.targetMat.needsUpdate = true;
   }
 
   /** Re-bake the numeral only when the integer on screen actually changes. */
@@ -998,7 +1128,16 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     seg.broken = true;
     seg.burst = 0;
 
-    const value = Math.floor(seg.value);
+    // THE STRATEGIC RULE: a blue pays only if it was FILLED.
+    //
+    // The generous alternative — pay whatever number is showing when you walk
+    // into it — is more immediately satisfying and was what this used to do, and
+    // Mischa picked this one on purpose: it is what makes committing your fire
+    // to one segment a decision instead of a preference. The cost is that
+    // failing has to be as loud as succeeding, which is what `failed` drives in
+    // render(); a reward that quietly does not arrive reads as a bug, and did.
+    seg.failed = seg.reward && seg.value < seg.climbMax;
+    const value = seg.failed ? 0 : Math.floor(seg.value);
     if (value !== 0) {
       hit.value = value;
       hit.troops = value;
@@ -1101,6 +1240,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     update(dt, world) {
       lastTroops = world.troops;
       lastHalfWidth = world.squadHalfWidth;
+      lastSpeed = Math.max(0.1, world.scrollSpeed);
+      lastCrossZ = world.squadCenter.z;
       const speed = world.scrollSpeed;
       const crossZ = world.squadCenter.z;
       const crossX = world.squadCenter.x;
@@ -1210,6 +1351,26 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           } else if (seg.numeral.scale.x !== seg.numeralW) {
             seg.numeral.scale.set(seg.numeralW, seg.numeralH, 1);
           }
+          // A blue smashed before it filled goes grey. This is the only thing
+          // separating "you earned nothing" from "nothing happened", and the
+          // second one reads as a bug — which is exactly how the missing reward
+          // was reported before the goal existed.
+          if (seg.failed) seg.numeralMat.color.setRGB(0.62, 0.58, 0.6);
+
+          // The goal breathes so the eye finds it from the far end of the
+          // corridor, and snaps red and oversized the moment its segment is
+          // smashed unfilled. The failure has to land on the thing that was
+          // making the promise.
+          if (seg.target.visible) {
+            const miss = seg.failed ? 1 : 0;
+            const breathe = 1 + Math.sin(t * TARGET_PULSE_RATE + seg.centerX) * TARGET_PULSE;
+            const grow = seg.failed ? TARGET_FAIL_SCALE : breathe;
+            // From the stored base width, never from the mesh's current scale —
+            // reading back a value this loop just wrote compounds every frame.
+            seg.target.scale.set(seg.targetW * grow, (seg.targetW * grow) / 2, 1);
+            seg.targetMat.color.setRGB(1, 1 - miss * 0.72, 1 - miss * 0.78);
+          }
+
           // Twinkle, not spin: a slow counter-rotation plus a breath keeps the
           // reward segment alive without competing with the numeral for the eye.
           if (seg.sparkle.visible) {
@@ -1276,6 +1437,10 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         }
       }
       return out;
+    },
+
+    reportFirepower(damagePerSegment) {
+      lastSegmentDamage = Math.max(0, damagePerSegment);
     },
 
     bestLane() {
@@ -1493,6 +1658,94 @@ function panelTexture(reward: boolean): THREE.CanvasTexture {
  * noticeably thinner than the reference. Stroking white on top of the black
  * outline fattens the glyph back up on every platform.
  */
+/**
+ * THE TARGET PLATE — the gold number floating above a blue segment.
+ *
+ * A blue only pays if its climb reaches its ceiling, and until this existed that
+ * ceiling was invisible: a playtester correctly described the rewards as
+ * "arbitrary and surprising — sometimes 9 or 10, sometimes 34". They were never
+ * arbitrary, but a goal you cannot see is indistinguishable from one that is.
+ *
+ * Drawn as its own texture rather than folded into the panel numeral, because
+ * the panel's cache is keyed by one integer and a combined "12 / 34" label would
+ * key on the pair — a run climbing through every integer toward a dozen
+ * different targets would mint hundreds of canvases.
+ *
+ * Gold on a dark plate, with a chevron, so it reads as a GOAL rather than as a
+ * second score. Never additive: the sky is bright enough to wash an additive
+ * sprite to white (see entities/pickups.ts).
+ */
+function targetTexture(
+  cache: Map<string, THREE.CanvasTexture>,
+  value: number,
+): THREE.CanvasTexture {
+  const key = `goal${value}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+
+  const w = 256;
+  const h = 128;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+
+  // Rounded plate, so the number sits on something rather than floating loose
+  // over whatever the sky is doing behind it.
+  const r = 34;
+  ctx.beginPath();
+  ctx.moveTo(18 + r, 14);
+  ctx.arcTo(w - 18, 14, w - 18, h - 14, r);
+  ctx.arcTo(w - 18, h - 14, 18, h - 14, r);
+  ctx.arcTo(18, h - 14, 18, 14, r);
+  ctx.arcTo(18, 14, w - 18, 14, r);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(20, 16, 8, 0.82)";
+  ctx.fill();
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = "#ffc93c";
+  ctx.stroke();
+
+  const label = `${value}`;
+  let size = 74;
+  const font = (px: number): string =>
+    `900 ${px}px "Arial Black", "Helvetica Neue", Helvetica, Arial, sans-serif`;
+  ctx.font = font(size);
+  while (ctx.measureText(label).width > 132 && size > 34) {
+    size -= 4;
+    ctx.font = font(size);
+  }
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+
+  // A target arrow ahead of the number: "climb to this".
+  const numW = ctx.measureText(label).width;
+  const startX = w / 2 - (numW + 34) / 2;
+  ctx.fillStyle = "#ffc93c";
+  ctx.beginPath();
+  ctx.moveTo(startX, h / 2 - 20);
+  ctx.lineTo(startX + 22, h / 2);
+  ctx.lineTo(startX, h / 2 + 20);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.lineWidth = Math.max(6, size * 0.16);
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#3a2405";
+  ctx.strokeText(label, startX + 34, h / 2 + 3);
+  ctx.fillStyle = "#ffe07a";
+  ctx.fillText(label, startX + 34, h / 2 + 3);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 4;
+  cache.set(key, tex);
+  return tex;
+}
+
 function numeralTexture(cache: Map<string, THREE.CanvasTexture>, value: number): THREE.CanvasTexture {
   const label = value > 0 ? `+${value}` : `${value}`;
   const cached = cache.get(label);
