@@ -62,6 +62,20 @@ export interface WorldState {
    *  because more bullets and harder bullets should not look the same. */
   fireRate: number;
   /**
+   * How many of the troops are ELITES — recruits pulled off a barrel, who are
+   * bigger, gold, and shoot like several ordinary soldiers.
+   *
+   * A COUNT, NOT A SET OF SOLDIERS. Nothing tracks which specific body is an
+   * elite; the squad simply paints this many of them, spread through the crowd.
+   * That is what makes elites the last thing a red gate can take from you —
+   * ordinary losses shrink the crowd around them and only bite here once
+   * `troops` has fallen to the elite count itself. Investment survives; the
+   * bodies around it are what get eaten.
+   *
+   * Owned by the game, and never allowed to exceed `troops`.
+   */
+  elites: number;
+  /**
    * How far back the camera has stepped, as a multiple of its resting distance.
    * 1 at every troop count the crowd still fits on screen at. Owned by the game
    * (see core/zoom.ts); the squad reads it because the extra room the camera
@@ -98,6 +112,7 @@ export function createWorld(center: THREE.Vector3): WorldState {
     health: 1,
     firepower: 1,
     fireRate: 1,
+    elites: 0,
     zoom: 1,
   };
 }

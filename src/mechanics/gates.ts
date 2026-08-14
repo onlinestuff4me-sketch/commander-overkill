@@ -111,7 +111,6 @@ const RECYCLE_Z = 15;
  *
  * A slow baseline remains so a one-soldier squad still sees a gate grow.
  */
-const CLIMB_START_Z = -58;
 const REWARD_CLIMB_RATE = 0.9;
 
 /**
@@ -124,8 +123,60 @@ const REWARD_CLIMB_RATE = 0.9;
  * having grown.
  */
 const CLIMB_PER_DAMAGE = 1 / 55;
-/** Ceiling, as headroom above the start value. +2 tops out at +9, as observed. */
-const REWARD_CLIMB_SPAN = 7;
+/**
+ * How high a blue may climb, in troops.
+ *
+ * WAS A FLAT +7, and that was the whole problem with the reward beat: a gate
+ * started at +3 and stopped at +10, so it ticked over seven numbers and paid
+ * about a tenth of a mid-size army. Nothing about that is worth chasing. The
+ * satisfying version is a number that keeps climbing while you hold your fire on
+ * it and then pays a slab of troops, and a fixed span can never be that at both
+ * ten troops and three hundred.
+ *
+ * SUB-LINEAR IN THE ARMY, and the exponent is the whole tuning. The first fix
+ * for the flat span made it PROPORTIONAL — nine-tenths of the crowd — which is
+ * compound interest by another name: every reward multiplied the army by ~1.9,
+ * so a measured run passed 680 troops inside 60 seconds against a 300–500 target
+ * at 120. An exponent below 1 keeps the early jumps enormous in relative terms
+ * (the power fantasy the opening levels are supposed to be) while the late game
+ * settles into something a difficulty curve can actually track.
+ *
+ *   troops     1      10     50    100    300    500
+ *   span       8*     10     29     47     99    142
+ *   ×army     ×9    ×2.0   ×1.6   ×1.5   ×1.3   ×1.3      (* the floor)
+ *
+ * The floor is what keeps a one-soldier squad's first gate meaningful.
+ */
+const REWARD_SPAN_BASE = 1.92;
+const REWARD_SPAN_EXPONENT = 0.685;
+const REWARD_SPAN_MIN = 8;
+
+/**
+ * THE JACKPOT — because "climb to a big number" and "grow at a sane rate" are
+ * only compatible if the big numbers are rare.
+ *
+ * Playtest asked for barriers that climb and climb and then pay a slab, and the
+ * honest tension is that a slab every row IS the runaway curve above. So the
+ * ordinary blue is deliberately modest and roughly one in five runs to nearly
+ * three times as far. Those are the rows worth committing to and holding fire
+ * on, and the rest is the spacing that makes them land.
+ *
+ * Rolled from the module's own seeded stream, so a given seed lays out the same
+ * jackpots every run; the span itself is `rewardSpan()`, which is pure and
+ * tested.
+ */
+const JACKPOT_CHANCE = 0.2;
+const JACKPOT_MULTIPLE = 2.8;
+
+/**
+ * How far a blue segment may climb above where it started, for an army of
+ * `troops`. Pure so the growth curve can be checked without a GPU.
+ */
+export function rewardSpan(troops: number, jackpot = false): number {
+  const n = Math.max(1, troops);
+  const span = REWARD_SPAN_BASE * Math.pow(n, REWARD_SPAN_EXPONENT);
+  return Math.max(REWARD_SPAN_MIN, Math.round(span * (jackpot ? JACKPOT_MULTIPLE : 1)));
+}
 
 /** Burst velocities, metres/sec. The barrier must visibly come apart, not vanish. */
 const BURST_OUT = 2.2;
@@ -140,8 +191,14 @@ const BURST_GRAVITY = 13;
  */
 const BURST_LIFE = 1.6;
 
-/** Auto-spawn: chance a row contains a blue segment at all (frame_018 has none). */
-const REWARD_ROW_CHANCE = 0.72;
+/**
+ * Auto-spawn: chance a row contains a blue segment at all (frame_018 has none).
+ *
+ * Lowered from 0.72 now that a blue can climb into the hundreds. A big reward
+ * every row would be a ramp rather than a decision — the payoff has to be
+ * spaced out by rows that only cost, or there is nothing to weigh it against.
+ */
+const REWARD_ROW_CHANCE = 0.58;
 
 /**
  * THE OPENING IS AUTHORED, NOT ROLLED.
@@ -178,13 +235,65 @@ const CROSS_FRACTION = 1 / 3;
  *  44 m/s cannot step over the plane between two ticks. */
 const GATE_HIT_DEPTH = 0.9;
 
-/** Penalties escalate every 25s of run time. Index = difficulty tier. */
-const PENALTY_POOLS: readonly (readonly number[])[] = [
-  [-1, -1, -2, -3, -4, -5],
-  [-2, -4, -5, -5, -10, -10],
-  [-5, -10, -10, -15, -20, -20],
+/**
+ * PENALTIES ARE A SHARE OF THE ARMY, painted as an absolute number.
+ *
+ * They used to be a fixed table (-1 to -20) while the army grows exponentially,
+ * which made them the exact inverse of what the difficulty curve wants: a -5 is
+ * 62% of an eight-troop squad and 1.2% of a four-hundred-troop one. Brutal where
+ * the design wants forgiveness, irrelevant where it wants teeth.
+ *
+ * Both reference clips scale them the same way — Part1 shows -1 to -20 against
+ * an army of 1 to 60, clip1a shows a -300 against an army in the hundreds. The
+ * magnitudes always tracked the crowd.
+ *
+ * Bands are per difficulty tier, and the tier still escalates with run time.
+ */
+const PENALTY_BANDS: readonly (readonly [lo: number, hi: number])[] = [
+  [0.06, 0.14],
+  [0.12, 0.22],
+  [0.18, 0.32],
 ];
-const REWARD_STARTS: readonly number[] = [1, 2, 2, 3, 3, 4];
+/**
+ * Most of the army a SINGLE segment may take, whatever the band rolls.
+ *
+ * This is what makes "a bad row costs you, a bad row does not end you" true by
+ * construction rather than by luck. At 0.35 it takes several consecutive
+ * worst-case rows with no rewards in between to wipe out.
+ */
+const PENALTY_CAP = 0.35;
+/**
+ * Most of the army a WHOLE ROW may take, and the fix for the one way this game
+ * could kill you out of nowhere.
+ *
+ * `PENALTY_CAP` bounds a single segment, which was fine when a crowd stood in
+ * one lane. It stopped being fine when the crowd grew to span the road: a wide
+ * army covers a third of every segment in the row, so it smashes ALL of them and
+ * pays all of them. Three segments at the cap is 105% of the army — a full wipe,
+ * from one barrier, with no read on screen that said so. A 120 s autopilot run
+ * hit exactly that at 680 troops and went to zero on a single row.
+ *
+ * The wide crowd taking every segment is the mechanic, not the bug, so the fix
+ * is here rather than there: a row's penalties are scaled down together until
+ * they sum inside this budget. They stay proportional to each other, so the
+ * "which of these is least bad" decision is unchanged — the row simply cannot
+ * ask for more than the army can survive.
+ *
+ * 0.45 means the worst possible row costs a little under half of everything, and
+ * two of them back to back with no reward between is a genuine emergency rather
+ * than an execution.
+ */
+const ROW_PENALTY_CAP = 0.42;
+/** Floor, so a penalty is never a no-op at small counts. */
+const PENALTY_MIN = 1;
+
+/**
+ * Where a blue STARTS, as a share of the army. The climb is the interesting
+ * part now, so the opening number is deliberately modest — it is the promise,
+ * not the payout.
+ */
+const REWARD_START_FRACTION = 0.06;
+const REWARD_START_MIN = 1;
 /** Numerals pre-baked at init so a spawn never stalls on a canvas draw. */
 const PREWARM: readonly number[] = [
   -1, -2, -3, -4, -5, -10, -15, -20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
@@ -285,8 +394,17 @@ export function composeAutoRow(
   // A squad this small cannot absorb a wrong answer, so it is not asked one:
   // the penalties stay mild and a blue segment is always on the board.
   const mercy = troops < MERCY_TROOPS;
-  const tier = mercy ? 0 : Math.min(PENALTY_POOLS.length - 1, Math.floor(elapsed / 25));
-  const pool = PENALTY_POOLS[tier] ?? PENALTY_POOLS[0]!;
+  const tier = mercy ? 0 : Math.min(PENALTY_BANDS.length - 1, Math.floor(elapsed / 25));
+  const band = PENALTY_BANDS[tier] ?? PENALTY_BANDS[0]!;
+  const army = Math.max(1, troops);
+
+  /** One penalty as a SHARE of the army. Kept as a share until the whole row has
+   *  been rolled, because the row budget below can only be applied once every
+   *  segment's appetite is known. `roll` is passed in rather than drawn here so
+   *  that every segment consumes exactly one draw whichever branch it takes —
+   *  see the loop below. */
+  const penaltyShare = (roll: number): number =>
+    Math.min(PENALTY_CAP, band[0] + roll * (band[1] - band[0]));
 
   const shape = rng();
   const count = shape < 0.18 ? 2 : shape < 0.86 ? 3 : 4;
@@ -298,11 +416,29 @@ export function composeAutoRow(
   const pick = Math.floor(rng() * count);
   const rewardAt = rolled || mercy ? pick : -1;
 
+  // Two passes: gather the row's appetite in shares, then spend the budget.
+  let wanted = 0;
+  for (let i = 0; i < count; i++) {
+    // ONE DRAW PER SEGMENT, whichever branch it takes. The reward branch used to
+    // pick from a table and the penalty branch from another, so both consumed a
+    // draw; a reward computed without one would desync every later row the
+    // moment mercy forced a blue that would not otherwise have been there.
+    const roll = rng();
+    const share = i === rewardAt ? 0 : penaltyShare(roll);
+    out[i] = share;
+    wanted += share;
+  }
+
+  // Scale the whole row down together if it asks for more than a run can
+  // survive. Proportional, so the ranking between "least bad" and "worst" that
+  // the player is actually reading survives the squeeze intact.
+  const trim = wanted > ROW_PENALTY_CAP ? ROW_PENALTY_CAP / wanted : 1;
+
   for (let i = 0; i < count; i++) {
     out[i] =
       i === rewardAt
-        ? (REWARD_STARTS[Math.floor(rng() * REWARD_STARTS.length)] ?? 2)
-        : (pool[Math.floor(rng() * pool.length)] ?? -1);
+        ? Math.max(REWARD_START_MIN, Math.round(army * REWARD_START_FRACTION))
+        : -Math.max(PENALTY_MIN, Math.round(army * out[i]! * trim));
   }
   out.length = count;
   return count;
@@ -322,6 +458,19 @@ interface Segment {
   /** Set when the crowd smashed through this segment. Only crossed segments
    *  burst, and only crossed segments charge — see `resolve`. */
   crossed: boolean;
+  /**
+   * Set when this segment is gone: either the crowd drove through it, or a blue
+   * one was shot until it hit its ceiling and paid out early.
+   *
+   * A segment that is not broken BLOCKS BULLETS. That is the whole reason this
+   * is per-segment rather than per-row: fire is a curtain the width of the
+   * crowd, so one lane can be walled off by a red while the lanes either side
+   * of it shoot clean through to whatever is behind.
+   */
+  broken: boolean;
+  /** Seconds since this segment broke, so debris from an early break does not
+   *  share the row's timer. */
+  burst: number;
   /** Float. Rewards climb; the displayed value is `Math.floor` of this. */
   value: number;
   /** Integer currently baked into the numeral texture. -Infinity = none yet. */
@@ -374,6 +523,9 @@ const WHITE = new THREE.Color(0xffffff);
 
 export function createGates(scene: THREE.Scene, options?: GateOptions): GateSystem {
   const rng = mulberry32(options?.seed ?? 0x0c0ffee);
+  /** Troop count as of the last update. `spawnRow` needs it to size a blue's
+   *  ceiling and does not otherwise see the world. */
+  let lastTroops = 1;
   let autoSpawn = options?.autoSpawn ?? true;
 
   const root = new THREE.Group();
@@ -487,6 +639,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         numeralMat,
         reward: false,
         crossed: false,
+        broken: false,
+        burst: 0,
         value: 0,
         shown: Number.NEGATIVE_INFINITY,
         climbRate: 0,
@@ -546,6 +700,11 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
     const count = Math.max(1, Math.min(MAX_SEGMENTS, specs.length));
 
+    // One roll per ROW, not per segment: a jackpot is the row's character, and
+    // two of them side by side would just be a bigger ramp. Drawn unconditionally
+    // so a row with no blue in it still advances the stream by the same amount.
+    const climbSpan = rewardSpan(lastTroops, rng() < JACKPOT_CHANCE);
+
     // Normalise weights into world widths across the full road.
     let weightSum = 0;
     for (let i = 0; i < count; i++) weightSum += weightOf(specs[i]);
@@ -563,6 +722,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
       seg.reward = reward;
       seg.crossed = false;
+      seg.broken = false;
+      seg.burst = 0;
       seg.value = value;
       seg.shown = Number.NEGATIVE_INFINITY;
       seg.pop = 0;
@@ -570,7 +731,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       seg.halfWidth = width / 2;
       seg.climbRate = typeof spec === "number" ? REWARD_CLIMB_RATE : (spec.climbRate ?? REWARD_CLIMB_RATE);
       seg.climbMax =
-        typeof spec === "number" ? value + REWARD_CLIMB_SPAN : (spec.climbMax ?? value + REWARD_CLIMB_SPAN);
+        typeof spec === "number" ? value + climbSpan : (spec.climbMax ?? value + climbSpan);
       cursor += width;
 
       seg.group.visible = true;
@@ -691,6 +852,45 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
    * decision — steering changes the MIX, and a narrow squad still takes one
    * segment whole.
    */
+  /**
+   * Blow one segment apart and pay what it is worth.
+   *
+   * Called from two places that used to be one: the crowd driving through, and
+   * a blue segment being SHOT until it reaches its ceiling. The second is the
+   * new one — a reward you have poured enough fire into should pay out where it
+   * stands, not wait to be walked into, and breaking it is what opens the lane
+   * for the rest of the stream.
+   */
+  function breakSegment(row: Row, i: number, fromX: number, loud: boolean): void {
+    const seg = row.segments[i];
+    if (!seg || seg.broken) return;
+    seg.broken = true;
+    seg.burst = 0;
+
+    const value = Math.floor(seg.value);
+    if (value !== 0) {
+      hit.value = value;
+      hit.troops = value;
+      hit.share = 1;
+      hit.reward = seg.reward;
+      hit.segmentIndex = i;
+      hit.x = seg.centerX;
+      hit.z = row.z;
+      // Copy before iterating: a handler is allowed to unsubscribe itself.
+      for (const handler of [...handlers]) handler(hit);
+    }
+
+    const dir = seg.centerX >= fromX ? 1 : -1;
+    const away = Math.abs(seg.centerX - fromX) * 0.35;
+    seg.vx = dir * (BURST_OUT + away + rng() * 1.2);
+    seg.vy = BURST_UP + rng() * 1.4;
+    seg.vz = BURST_TOWARD + rng() * 0.9;
+    seg.wx = (rng() - 0.5) * BURST_SPIN;
+    seg.wy = (rng() - 0.5) * BURST_SPIN * 0.6;
+    seg.wz = (rng() - 0.5) * BURST_SPIN;
+    if (loud) seg.pop = 1.6;
+  }
+
   function resolve(row: Row, crossX: number, halfWidth: number): void {
     row.resolved = true;
     row.burst = 0;
@@ -728,40 +928,12 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
     for (let i = 0; i < row.count; i++) {
       const seg = row.segments[i];
-      if (!seg || !seg.crossed) continue;
-      const value = Math.floor(seg.value);
-      if (value === 0) continue;
-
-      hit.value = value;
-      hit.troops = value;
-      hit.share = 1;
-      hit.reward = seg.reward;
-      hit.segmentIndex = i;
-      hit.x = seg.centerX;
-      hit.z = row.z;
-      // Copy before iterating: a handler is allowed to unsubscribe itself.
-      for (const handler of [...handlers]) handler(hit);
+      // A segment the crowd did not smash through stays standing and sails past
+      // intact, and one already shot to pieces is not charged twice.
+      if (!seg || !seg.crossed || seg.broken) continue;
+      breakSegment(row, i, crossX, i === dominant);
     }
 
-    // Kick every piece outward from where the squad punched through.
-    for (let i = 0; i < row.count; i++) {
-      const seg = row.segments[i];
-      // A segment the crowd did not smash through stays standing and sails
-      // past intact. THIS IS THE WHOLE POINT: what breaks is exactly what you
-      // paid for, so the wreckage is an honest receipt.
-      if (!seg || !seg.crossed) continue;
-      const dir = seg.centerX >= crossX ? 1 : -1;
-      const away = Math.abs(seg.centerX - crossX) * 0.35;
-      seg.vx = dir * (BURST_OUT + away + rng() * 1.2);
-      seg.vy = BURST_UP + rng() * 1.4;
-      seg.vz = BURST_TOWARD + rng() * 0.9;
-      seg.wx = (rng() - 0.5) * BURST_SPIN;
-      seg.wy = (rng() - 0.5) * BURST_SPIN * 0.6;
-      seg.wz = (rng() - 0.5) * BURST_SPIN;
-      // The segment MOST of the crowd went through gets the loudest exit — that
-      // pop is half the reason the choice feels like it landed.
-      if (i === dominant) seg.pop = 1.6;
-    }
     for (let i = 0; i < row.postCount; i++) {
       const post = row.postState[i];
       if (!post) continue;
@@ -792,6 +964,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
   const system: GateSystem = {
     update(dt, world) {
+      lastTroops = world.troops;
       const speed = world.scrollSpeed;
       const crossZ = world.squadCenter.z;
       const crossX = world.squadCenter.x;
@@ -820,30 +993,45 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         if (!row.resolved) {
           // Climb, then resolve — so a gate crossed on the same tick it ticks
           // over pays the number the player just saw, never the stale one.
-          if (row.z >= CLIMB_START_Z) {
-            for (let i = 0; i < row.count; i++) {
-              const seg = row.segments[i];
-              if (!seg || !seg.reward) continue;
-              if (seg.value < seg.climbMax) {
-                seg.value = Math.min(seg.climbMax, seg.value + seg.climbRate * dt);
-                applyValue(seg, false);
-              }
-            }
-          }
-          if (row.z >= crossZ) resolve(row, crossX, world.squadHalfWidth);
-        } else {
-          row.burst += dt;
           for (let i = 0; i < row.count; i++) {
             const seg = row.segments[i];
-            if (!seg) continue;
-            seg.vy -= BURST_GRAVITY * dt;
-            seg.group.position.x += seg.vx * dt;
-            seg.group.position.y += seg.vy * dt;
-            seg.group.position.z += seg.vz * dt;
-            seg.group.rotation.x += seg.wx * dt;
-            seg.group.rotation.y += seg.wy * dt;
-            seg.group.rotation.z += seg.wz * dt;
+            if (!seg || !seg.reward || seg.broken) continue;
+            if (seg.value < seg.climbMax) {
+              seg.value = Math.min(seg.climbMax, seg.value + seg.climbRate * dt);
+              applyValue(seg, false);
+            }
+            // AT THE CEILING IT BREAKS ITSELF. A reward you have poured enough
+            // fire into pays out where it stands rather than waiting to be
+            // walked into — and breaking it is what unblocks the lane, so the
+            // stream flows on to whatever is behind.
+            if (seg.value >= seg.climbMax) breakSegment(row, i, seg.centerX, true);
           }
+          if (row.z >= crossZ) resolve(row, crossX, world.squadHalfWidth);
+        }
+
+        // Debris moves per SEGMENT now, not per row: a blue can break on its own
+        // while its neighbours are still standing and still blocking.
+        let standing = 0;
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (!seg) continue;
+          if (!seg.broken) {
+            standing++;
+            continue;
+          }
+          seg.burst += dt;
+          seg.vy -= BURST_GRAVITY * dt;
+          seg.group.position.x += seg.vx * dt;
+          seg.group.position.y += seg.vy * dt;
+          seg.group.position.z += seg.vz * dt;
+          seg.group.rotation.x += seg.wx * dt;
+          seg.group.rotation.y += seg.wy * dt;
+          seg.group.rotation.z += seg.wz * dt;
+          if (seg.burst > BURST_LIFE) seg.group.visible = false;
+        }
+
+        if (row.resolved) {
+          row.burst += dt;
           for (let i = 0; i < row.postCount; i++) {
             const post = row.postState[i];
             if (!post) continue;
@@ -855,6 +1043,11 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
             post.rz += post.wz * dt;
           }
           writePosts(row);
+        } else if (standing === 0) {
+          // Every segment shot away before the crowd arrived: nothing left to
+          // charge, so retire the row rather than resolving an empty barrier.
+          row.resolved = true;
+          row.burst = 0;
         }
 
         for (let i = 0; i < row.count; i++) {
@@ -906,23 +1099,34 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     },
 
     shootAt(x, z, pad, amount) {
-      let any = false;
+      let blocked = false;
       for (const row of rows) {
         if (!row.active || row.resolved) continue;
         const dz = z - row.z;
         if (dz > pad + GATE_HIT_DEPTH || dz < -pad - GATE_HIT_DEPTH) continue;
         for (let i = 0; i < row.count; i++) {
           const seg = row.segments[i];
-          if (!seg || !seg.reward) continue;
+          // A broken segment is a hole in the barrier and lets fire through.
+          if (!seg || seg.broken) continue;
           if (x < seg.centerX - seg.halfWidth - pad) continue;
           if (x > seg.centerX + seg.halfWidth + pad) continue;
-          if (seg.value >= seg.climbMax) continue;
-          seg.value = Math.min(seg.climbMax, seg.value + amount * CLIMB_PER_DAMAGE);
-          applyValue(seg, false);
-          any = true;
+
+          // ANY standing segment stops the round, red or blue. A barrier is a
+          // physical thing: the stream should visibly end at the nearest one and
+          // only reach what is behind it once that has come apart. Fire is a
+          // curtain the width of the crowd, so a red walls off ITS lane while
+          // the columns either side shoot clean past.
+          blocked = true;
+          if (!seg.reward) continue;
+
+          if (seg.value < seg.climbMax) {
+            seg.value = Math.min(seg.climbMax, seg.value + amount * CLIMB_PER_DAMAGE);
+            applyValue(seg, false);
+            if (seg.value >= seg.climbMax) breakSegment(row, i, seg.centerX, true);
+          }
         }
       }
-      return any;
+      return blocked;
     },
 
     debugValues() {

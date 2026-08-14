@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-13, end of session 2._
+_Last updated: 2026-08-14, session 3._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -10,9 +10,18 @@ _Last updated: 2026-08-13, end of session 2._
 **Repo:** `onlinestuff4me-sketch/commander-overkill`, public, `main`.
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
-**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 34 passing;
-`npm run build` succeeds; the page loads with no console errors. 78 draw calls
-and 139k triangles at 461 troops with the camera stepped back to 1.7.
+**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 55 passing;
+`npm run build` succeeds; the page loads with no console errors. 75 draw calls
+and 199k triangles at 508 troops with the camera stepped back to 1.7.
+
+**The economy is measured, not guessed.** `__overkill.sample(16, 110)` plays
+sixteen full autopilot runs: median **436 troops**, against a 300–500 target, and
+**3 of 16 wiped**. A 50-second sample — the first two penalty tiers, which is the
+closest thing we have to "levels 1–2" — wipes **0 of 16** at a median of 258. Read
+that as the difficulty ramp inside one run currently standing in for the level
+ramp: the opening is the power fantasy the brief asks for, and the back half is
+already at the brief's level 3–4 difficulty. Re-run `sample()` after touching
+anything in `gates.ts`.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -24,35 +33,32 @@ guardrails, the architecture invariants, and how to verify work.
 Ranked. Nothing here is blocked on Mischa except items 3 and 4, which are
 product calls rather than engineering ones.
 
-### 1. Author the content pacing — step 1 of 4 is done
+### 1. LEVELS. The economy is tuned; there is nothing to tune it per-level FOR
 
-**The conductor has landed** (`mechanics/director.ts`): one cursor owns the
-corridor, gates no longer pace themselves, and nothing can share a plane. What
-remains is steps 2–4 of the plan — beats instead of a fixed cycle, levels with
-proportional penalties, and the autopilot that makes a failure rate measurable.
+The pacing plan in [`docs/pacing-proposal.md`](pacing-proposal.md) is done except
+for its last piece. The conductor owns the corridor (`mechanics/director.ts`),
+penalties are proportional and capped per row, the reward span is sub-linear, and
+`__overkill.sample()` measures a failure rate instead of arguing about one.
 
-Read the module header before changing the cycle: the old three-timer schedule
-was over-subscribed by ~50% against any legible gap, so content density had to
-drop, and the gap between two placements depends on the PAIR (16 m gate-to-gate,
-11 m otherwise) because what needs separating is decisions, not objects.
+What is missing is the **level** itself. Mischa's answer specced failure rates in
+plateauing bands — 1 in 8 at levels 1–2, easing to 1 in 3 by 16–21, implying a
+~21-level game — and there is no level concept in the code to hang those on. The
+only difficulty axis is `elapsed`, which drives `PENALTY_BANDS` in tiers of 25
+seconds. That accidentally produces the right SHAPE (a run ramps through the
+bands) but it cannot express "level 7 is harder than level 3 from its first
+second", and it means a long level and a hard level are the same thing.
 
-This is still the largest remaining piece of decision-free work, and there is a
-written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Nothing
-in it is blocked: Mischa has answered the three questions it asked. A run is
-**90 s to 2 min**, a strong run ends at **300–500 troops**, and the failure rate
-**scales by level in plateauing bands** — 1 in 8 (levels 1–2) easing out to
-1 in 3 by level 16–21, which implies a ~21-level game. On failure the player
-picks retry-the-level or start-over; meta progression is a later revisit.
+Concretely, this wants: a level number on `WorldState`, `PENALTY_BANDS` and the
+director's beat weights selected by it rather than by `elapsed`, an end-of-level
+boundary (the boss bar is the obvious place), and the retry/start-over choice
+Mischa asked for. `sample()` is already the instrument that says whether each
+band lands on its target rate.
 
-That last one is not a tuning value. Penalties are absolute numbers while the
-army grows exponentially, so a `-5` is 62% of an 8-troop squad and 1.2% of a
-400-troop one — the exact inverse of "forgiving early, punishing late". The
-proposal's fix is proportional penalties with a per-level cap on what one gate
-may take. Read that section before touching `PENALTY_POOLS`.
-
-The specific defect to fix first: **gates and barrels are two independent
-spawners that both drop content at z = −58**, one every 16 m and one every
-4.2 s. When those cadences come back into phase they spawn on top of each other.
+Read `director.ts`'s header before changing the beat cycle: the old three-timer
+schedule was over-subscribed by ~50% against any legible gap, so content density
+had to drop, and the gap between two placements depends on the PAIR (16 m
+gate-to-gate, 11 m otherwise) because what needs separating is decisions, not
+objects.
 
 ### 2. Decide the camera ANGLE — still blocks accurate calibration
 
@@ -91,19 +97,26 @@ Worth saying plainly: the stepped camera zoom may have made this unnecessary.
 461 troops now fit on screen as one crowd. Do not build the split until
 something actually fails without it.
 
-### 4. The RPG layer has its first piece — the rest is untouched
+### 4. The RPG layer has three pieces now — the rest is untouched
 
-`world.firepower` and `world.fireRate` are the QUALITY axis, raised only by
-weapon pickups off barrels, and deliberately kept out of the barrel and enemy
-hit-point models so an upgrade is a real advantage rather than something the
-difficulty curve immediately eats. Crowd size is the quantity axis. Those being
-separate is what makes "a big weak army" and "a small elite one" expressible at
-all — `tierFor(troops)` previously made quality a pure function of quantity.
+`world.firepower`, `world.fireRate` and `world.elites` are the QUALITY axis,
+raised only by pickups off barrels, and all three are deliberately kept out of
+the barrel and enemy hit-point models so an upgrade is a real advantage rather
+than something the difficulty curve immediately eats. Crowd size is the quantity
+axis. Those being separate is what makes "a big weak army" and "a small elite
+one" expressible at all — `tierFor(troops)` previously made quality a pure
+function of quantity. `ui/loadout.ts` is the readout; it draws nothing until you
+have actually picked something up.
 
-What is still missing: there is no readout for either multiplier, so the player
-can feel a minigun but cannot see what they have. And a recruit currently pays
-plain troops rather than joining as a genuinely stronger unit; making it one
-needs a per-unit strength in the squad, which the crowd does not model.
+An elite is a COUNT, not a set of soldiers: nothing tracks which body is which,
+the squad paints `world.elites` of them spread through the crowd, and they are
+worth `ELITE_SHOOTER_WEIGHT` (4) rifles each. That is also why they are the last
+thing you lose — ordinary losses shrink the crowd around them.
+
+What is still missing on this axis: elites only multiply the rate, so a hundred
+of them look and behave like a stronger version of the same soldier rather than a
+different unit. Unit types with their own geometry are the next real step, and
+they want a second `InstancedMesh` rather than more tint.
 
 ### 5. Nothing else from the RPG layer exists yet
 
@@ -121,12 +134,14 @@ against the `WorldState`/`System` contract without a single interface change.
 
 | Module | State |
 |---|---|
-| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. |
+| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. Per-instance tint: crimson death flash, gold elites at 1.34× scale. |
 | `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, three weapon tiers, pooled at 768. Fires a **parallel curtain** — convergence is off. Exports the derived damage model. |
-| `mechanics/gates.ts` | Segmented red/blue barriers, heavy outlined numerals, the climbing blue reward, burst on pass. Row composition is a pure exported function. |
+| `mechanics/gates.ts` | Segmented red/blue barriers, heavy outlined numerals, the climbing blue reward, burst on pass or on hitting its ceiling. Blocks fire per segment. Row composition and the reward span are pure exported functions. |
+| `mechanics/director.ts` | The conductor. One cursor owns every placement in the corridor, in weighted beats with pair-dependent spacing. Pure, seeded, tested. |
+| `ui/troopcount.ts`, `ui/netpop.ts`, `ui/loadout.ts` | Army size top-left, the net `+14`/`−12` over the crowd, and what you are carrying. All DOM, all silent until they have something to say. |
 | `mechanics/pacing.ts` | Barrel hit points, payouts, and the lane-coverage model. Pure arithmetic, no three.js, fully tested. |
 | `entities/barrels.ts` | Numbered destructible cover that counts down under fire, chunky plank debris, riders that drop when it dies. |
-| `entities/enemies.ts` | Instanced walkers, gold rim-lit elites, motorcycle variant, HP bars. |
+| `entities/enemies.ts` | Instanced walkers, gold rim-lit elites, motorcycle variant, HP bars. **Its `elite` is an ENEMY kind** and has nothing to do with `world.elites`, which is the player's gold veterans. Unfortunate collision; rename the enemy one if it ever causes a bug. |
 | `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. Four draw calls. |
@@ -187,9 +202,19 @@ __overkill.pay(n)            // triggers the full growth beat
 __overkill.stats()           // troops, tier, draw calls, triangles
 __overkill.bulletStats()     // live rounds and their extent — density vs reference
 __overkill.setSpawning(bool) // suspend content pacing
+__overkill.setElites(n)      // gold veterans, worth 4 rifles each
 __overkill.probeDamagePerPass(troops)  // measured damage over one barrel approach
 __overkill.damageCurve()     // that swept across troop counts
+__overkill.autopilot(secs)   // one run steered at the best segment; troop curve
+__overkill.sample(runs, secs) // many runs; median, spread and WIPE RATE
 ```
+
+**`sample()` is how the difficulty brief becomes a number.** A failure rate is a
+property of many runs, and half the tuning arguments on this project have been
+about whether one unlucky playthrough meant the economy was wrong. It resets the
+run between each, so it is destructive; `autopilot()` is the single-run version
+and also reports `worstDrop`, the biggest one-tick loss as a share of the army —
+which is the number that catches a wipe mechanism before it costs you a run.
 
 **`damageCurve()` is the instrument the whole barrel curve rests on.** It spawns
 a barrel with effectively infinite hit points, runs the real update order for a
@@ -248,6 +273,49 @@ firehose's damage and made the upgrade a downgrade. Damage is the lever that
 changes the numbers without changing the picture, and barrel HP reads it through
 `damagePerPass`, so nothing needed re-tuning by hand.
 
+**A row's penalties are capped as a whole, not per segment**
+(`ROW_PENALTY_CAP = 0.42` in `gates.ts`). A per-segment cap was correct while the
+crowd stood in one lane; it stopped being correct once the crowd spanned the
+road, because a wide army smashes EVERY segment in the row and pays all of them.
+Three segments at the old 35% cap is 105% of the army — a wipe from one barrier,
+with nothing on screen that said so, and a measured autopilot run hit exactly
+that at 680 troops. The wide crowd taking everything is the mechanic; the fix
+belongs on the row. Penalties are scaled down together so the "least bad" ranking
+the player is reading survives the squeeze.
+
+**The reward span is sub-linear in the army** (`rewardSpan()` in `gates.ts`,
+`base × n^0.685`). Making it PROPORTIONAL was the obvious fix for a flat +7 span
+and it is compound interest by another name: every reward multiplied the army by
+~1.9 and a measured run passed 680 troops in 60 seconds against a 300–500 target
+at 120. Sub-linear keeps the early jumps enormous in relative terms and lets the
+late game be tuned at all. The satisfying big climbs are bought back with a
+**jackpot** — one row in five runs ~2.8× as far — rather than by raising the
+baseline, which is also what makes them worth committing to.
+
+**Fire stops at the nearest standing barrier.** `gates.shootAt()` reports
+`blocked` for any unbroken segment and `main.ts` consumes the round, so the
+curtain visibly ends at the front barrier and only reaches the barrel behind it
+once that segment has come apart. A blue breaks itself the moment it hits its
+ceiling, which is what opens the lane. An earlier session argued from a
+screenshot that the reference lets fire pass through; Mischa's call overrode it,
+and the per-segment version is better anyway — one blue can break while its
+neighbours still stand and still block.
+
+**Additive blending needs a dark scene, and ours is not one.** Our sky is
+`0x7cc4e8`, already at 0.9 in blue, so any additive sprite over it clips to
+white. The pickup rim glow was additive AND fogged (three mixes toward the fog
+colour, which additive then adds at full strength), which is why playtesting
+reported objects "encased in a white cloud". It is now a normal-blended hollow
+gold RING with a fully transparent centre. `barrels.ts` and `bullets.ts` already
+carried the fog half of this rule; the sky half is new.
+
+**Per-unit colour is `instanceColor`, which MULTIPLIES the baked vertex colours.**
+That is one float3 per soldier for a whole repaint with no second material and no
+second draw call, and it is what makes a dying unit flash crimson and an elite
+read gold. It also constrains the palette: the tint cannot pick out one part of
+the body, and a bright multiplier clips the near-white shirt to a flat acid
+colour, so the elite tint deliberately darkens as well as warms.
+
 **Barrel payouts are capped at 10 troops** (`barrelPayout`). A tenth of hit
 points was fine when barrels topped out at 50; now that they reach 250, three
 late-run barrels at an uncapped tenth would out-earn a whole row of gates and
@@ -283,16 +351,20 @@ ships, pinned by postcss. Revisit when postcss bumps.
 
 ## Known gaps and placeholders
 
-- **Content pacing is a fixed metronome** — see #4 above.
+- **There are no levels** — see #1 above. Difficulty ramps on `elapsed` alone.
 - **The boss bar is a display with nothing behind it.** No boss entity exists;
-  it is currently driven by enemy kills.
+  it is currently driven by enemy kills. It is also the obvious place to hang an
+  end-of-level boundary once levels exist.
+- **Enemies and mines are thin.** Mischa asked for more destructive obstacles to
+  space the big reward climbs out. Walkers exist and cost troops on a breach;
+  there are no mines, and enemy density is one pack per `combat`/`surge` beat.
 - **Enemies do not shoot back.** The reference's gold elites fire orange tracers.
   Adding it is a small hook in `enemies.ts` plus a call into `bullets.ts`.
 - **Zero troops restarts the run immediately.** There is no debrief screen, no
   score, and no run summary. This is more visible now that runs start at 1 troop.
 - **No audio at all.**
 - **Test coverage is the pacing math only** (`mechanics/pacing.test.ts`,
-  `mechanics/gates.test.ts`). Anything that constructs three.js objects needs a
+  `mechanics/gates.test.ts`, `mechanics/director.test.ts`). Anything that constructs three.js objects needs a
   DOM and a GPU and is not covered; that is why row composition was extracted as
   a pure function. Do the same when you want to test another module's rules.
 - **The perf overlay (`?perf`) never populates in an offscreen pane**, because

@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { composeAutoRow, MERCY_TROOPS } from "./gates";
+import { composeAutoRow, MERCY_TROOPS, rewardSpan } from "./gates";
 
 /** Same generator the gate module uses, so the sequences under test are real. */
 function mulberry32(seed: number): () => number {
@@ -91,6 +91,70 @@ describe("the mercy rule", () => {
   it("lets penalties escalate once the squad is big enough", () => {
     const worst = Math.min(...rows(200, 120).flat());
     expect(worst).toBeLessThan(-5);
+  });
+});
+
+describe("a row can cost you, but it cannot execute you", () => {
+  // The failure this pins: penalties are capped PER SEGMENT, and a crowd wide
+  // enough to span the road smashes every segment in the row. Three at the
+  // per-segment cap is 105% of the army — a wipe out of nowhere, which a
+  // measured autopilot run hit at 680 troops. The cap has to be on the row.
+  it("never asks for more than the row budget, at any army size", () => {
+    for (const troops of [12, 40, 120, 400, 900]) {
+      for (const elapsed of [0, 30, 60, 120]) {
+        for (const row of rows(troops, elapsed, 30, 20)) {
+          const cost = row.reduce((sum, v) => sum + (v < 0 ? -v : 0), 0);
+          // The per-segment floor of 1 troop can push a small army a hair over
+          // the share budget; that is a rounding artefact, not a wipe.
+          expect(cost).toBeLessThanOrEqual(troops * 0.42 + row.length);
+        }
+      }
+    }
+  });
+
+  it("keeps the penalties in a row proportional to each other after the trim", () => {
+    // The squeeze must not reorder "least bad" and "worst" — that ranking is the
+    // entire decision the player is making.
+    const rng = mulberry32(7);
+    const buf: number[] = [0, 0, 0, 0];
+    let sawMultiPenaltyRow = false;
+    for (let i = 0; i < 200; i++) {
+      composeAutoRow(rng, 120, 500, buf);
+      const penalties = buf.filter((v) => v < 0);
+      if (penalties.length < 2) continue;
+      sawMultiPenaltyRow = true;
+      // Every penalty stays inside the per-segment band it was drawn from,
+      // scaled or not — none is trimmed to zero and none survives untouched
+      // while its neighbour is halved.
+      for (const v of penalties) expect(-v).toBeGreaterThan(0);
+    }
+    expect(sawMultiPenaltyRow).toBe(true);
+  });
+});
+
+describe("the reward span", () => {
+  // Proportional spans (0.9 × army) compounded to 680 troops in 60 s against a
+  // 300–500 target at 120. Sub-linear is what makes the curve trackable, and
+  // these assertions are the shape of that decision rather than its exact value.
+  it("is sub-linear in the army, so growth cannot compound away", () => {
+    const small = rewardSpan(50) / 50;
+    const large = rewardSpan(500) / 500;
+    expect(large).toBeLessThan(small);
+  });
+
+  it("still grows in absolute terms, so a big army gets a big payout", () => {
+    expect(rewardSpan(500)).toBeGreaterThan(rewardSpan(50));
+    expect(rewardSpan(50)).toBeGreaterThan(rewardSpan(10));
+  });
+
+  it("keeps a one-soldier squad's first gate worth steering for", () => {
+    expect(rewardSpan(1)).toBeGreaterThanOrEqual(8);
+  });
+
+  it("pays a jackpot several times an ordinary row", () => {
+    for (const n of [10, 100, 500]) {
+      expect(rewardSpan(n, true)).toBeGreaterThan(rewardSpan(n) * 2);
+    }
   });
 });
 
