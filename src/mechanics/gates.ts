@@ -95,6 +95,10 @@ const PRIME_ROWS = 3;
 const RECYCLE_Z = 15;
 
 /**
+ * Legacy per-second climb. ZERO, and it must stay zero — see the note in
+ * `update()`. Kept as a field on `GateSegmentSpec` only so a hand-authored row
+ * can still be given a timed climb for a scripted moment.
+ *
  * THE CLIMB IS DRIVEN BY YOUR FIRE.
  *
  * Reference: the same gate reads +2 at 3.75 s and +9 at 5.33 s. That was first
@@ -111,18 +115,12 @@ const RECYCLE_Z = 15;
  *
  * A slow baseline remains so a one-soldier squad still sees a gate grow.
  */
-const REWARD_CLIMB_RATE = 0.9;
+const REWARD_CLIMB_RATE = 0;
 
-/**
- * Troops added per point of bullet damage landed on a blue segment.
- *
- * Calibrated against the reference beat rather than taste: a mid-size army puts
- * ~250 damage/second into one segment, and the reference climbs +7 in ~1.6 s, so
- * ~400 damage should buy the whole span. 1/55 lands a full span in ~1.5 s for a
- * ~20-troop squad and faster for a bigger one, which is the intended reward for
- * having grown.
- */
-const CLIMB_PER_DAMAGE = 1 / 55;
+// A `CLIMB_PER_DAMAGE` constant used to convert damage straight into troops.
+// It is gone: it made the climb rate depend on the absolute damage scale, so
+// every weapon change silently retuned how hard rewards were to fill. Progress
+// is a fraction of `seg.need` now — see `shootAt`.
 /**
  * How high a blue may climb, in troops.
  *
@@ -185,9 +183,21 @@ const JACKPOT_MULTIPLE = 2.8;
  * neither.
  */
 const REWARD_COMMIT_SHARE = 0.62;
-/** Floor on a target's climb, so there is always something to chase even when
- *  the army is one soldier and the guns deliver almost nothing. */
-const REWARD_REACH_MIN = 4;
+/**
+ * The same share, for a squad under `MERCY_TROOPS`.
+ *
+ * Filling a reward is a commitment, and a commitment is only a decision if you
+ * can survive getting it wrong. At one troop you cannot: miss the first blue and
+ * you are still at one troop, so you still cannot fill the next one, and the run
+ * stalls at the bottom forever. A measured sixteen-run sample caught exactly
+ * that — a median of 565 troops with a MINIMUM of 1, which is not a hard run, it
+ * is a run that never started.
+ *
+ * At 0.28 the opening rewards fill on a fraction of an approach's fire, which is
+ * the "obvious lost opportunities, rarely fatal" the brief asks of levels 1–2.
+ * The share snaps back to the real one the moment the squad can absorb a miss.
+ */
+const MERCY_COMMIT_SHARE = 0.28;
 
 /**
  * Where a row of `count` segments sits on the road, and how wide it is.
@@ -646,6 +656,13 @@ interface Segment {
   burst: number;
   /** Float. Rewards climb; the displayed value is `Math.floor` of this. */
   value: number;
+  /** Where this segment's number started, so the climb can be interpolated from
+   *  a fill fraction rather than accumulated in troops. */
+  start: number;
+  /** Damage landed on this segment so far. */
+  dealt: number;
+  /** Damage needed to fill it — the target is `dealt >= need`. */
+  need: number;
   /** Integer currently baked into the numeral texture. -Infinity = none yet. */
   shown: number;
   climbRate: number;
@@ -664,6 +681,16 @@ interface Segment {
 }
 
 interface Post {
+  /**
+   * Launched into the air already, so the per-tick check that frees a post whose
+   * segments have gone does not re-throw it every frame.
+   *
+   * Posts used to stand until the whole ROW resolved, which meant a blue that
+   * broke early left its two uprights behind — a pair of blue sticks standing on
+   * empty road, and on the grass verge when the row sat against a kerb. That is
+   * one of the "floating objects" in the playtest video.
+   */
+  loose: boolean;
   x: number;
   vx: number;
   vy: number;
@@ -713,10 +740,9 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
    *  it to score a position the way `resolve` will actually judge it, and it has
    *  no world to read. */
   let lastHalfWidth = 0.3;
-  /** Scroll speed and squad plane from the last update, so a target can be sized
-   *  against the time a row will ACTUALLY spend climbing rather than a constant
-   *  that silently goes stale when the world speeds up. */
-  let lastSpeed = 6;
+  /** Squad plane from the last update. A row's cost is scaled by how much road
+   *  it will actually get before it arrives, and that needs to know where the
+   *  finish line is. */
   let lastCrossZ = -1.6;
   /** Damage the army will land on one segment over an approach, supplied by the
    *  orchestrator (it owns the weapon model). Zero until the first report. */
@@ -855,6 +881,9 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         broken: false,
         burst: 0,
         value: 0,
+        start: 0,
+        dealt: 0,
+        need: 1,
         shown: Number.NEGATIVE_INFINITY,
         climbRate: 0,
         climbMax: 0,
@@ -883,7 +912,9 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
     const postState: Post[] = [];
     for (let i = 0; i < MAX_POSTS; i++) {
-      postState.push({ x: 0, vx: 0, vy: 0, vz: 0, wx: 0, wz: 0, px: 0, py: 0, pz: 0, rx: 0, rz: 0 });
+      postState.push({
+        loose: false, x: 0, vx: 0, vy: 0, vz: 0, wx: 0, wz: 0, px: 0, py: 0, pz: 0, rx: 0, rz: 0,
+      });
     }
 
     return {
@@ -923,18 +954,11 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // One roll per ROW, not per segment: a jackpot is the row's character, and
     // two of them side by side would just be a bigger ramp. Drawn unconditionally
     // so a row with no blue in it still advances the stream by the same amount.
-    // What the guns could pour into one segment on the way in: the free baseline
-    // climb over the time the row is in the corridor, plus the damage the
-    // orchestrator says will land on it.
-    const approach = Math.max(0.5, (lastCrossZ - z) / lastSpeed);
-    const reachable = Math.max(
-      REWARD_REACH_MIN,
-      (REWARD_CLIMB_RATE * approach + lastSegmentDamage * CLIMB_PER_DAMAGE) * REWARD_COMMIT_SHARE,
-    );
-    const climbSpan = Math.max(
-      1,
-      Math.min(rewardSpan(lastTroops, rng() < JACKPOT_CHANCE), Math.round(reachable)),
-    );
+    // The target is now a pure ECONOMY number. It used to be capped by what the
+    // guns could deliver, which was the right instinct answered in the wrong
+    // place: reachability is handled by `seg.need` above, which scales the COST
+    // of filling to the army rather than shrinking the prize.
+    const climbSpan = Math.max(1, rewardSpan(lastTroops, rng() < JACKPOT_CHANCE));
 
     // Normalise weights into world widths across the row's own span — which is
     // a slice of the road, not the whole of it. See SEGMENT_WIDTH.
@@ -961,6 +985,21 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       seg.broken = false;
       seg.burst = 0;
       seg.value = value;
+      seg.start = value;
+      seg.dealt = 0;
+      // What it costs to fill: a share of everything the army could land on one
+      // segment over a full approach. Scale-free by construction — a one-soldier
+      // squad and a five-hundred-strong one both have to commit the same SHARE
+      // of their fire, which is the decision, and neither can be handed a target
+      // its guns cannot reach.
+      // Scaled by the road this row will ACTUALLY get. `lastSegmentDamage` is a
+      // full approach's worth, and the three rows the corridor is primed with at
+      // boot are only ~18 m out — a fifth of one. Charging them a full approach
+      // is what made a playtester's first few rewards unobtainable, and it is
+      // the same bug in a second place: a target you cannot reach.
+      const share = lastTroops < MERCY_TROOPS ? MERCY_COMMIT_SHARE : REWARD_COMMIT_SHARE;
+      const road = Math.min(1, Math.max(0.15, (lastCrossZ - z) / (lastCrossZ - SPAWN_Z)));
+      seg.need = Math.max(1, lastSegmentDamage * share * road);
       seg.shown = Number.NEGATIVE_INFINITY;
       seg.pop = 0;
       seg.centerX = cursor + width / 2;
@@ -1069,6 +1108,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
   }
 
   function resetPost(post: Post): void {
+    post.loose = false;
     post.px = post.x;
     post.py = 0;
     // Nudged toward camera so the post's front face wins the depth test against
@@ -1136,7 +1176,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // to one segment a decision instead of a preference. The cost is that
     // failing has to be as loud as succeeding, which is what `failed` drives in
     // render(); a reward that quietly does not arrive reads as a bug, and did.
-    seg.failed = seg.reward && seg.value < seg.climbMax;
+    seg.failed = seg.reward && seg.dealt < seg.need;
     const value = seg.failed ? 0 : Math.floor(seg.value);
     if (value !== 0) {
       hit.value = value;
@@ -1211,6 +1251,8 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     for (let i = 0; i < row.postCount; i++) {
       const post = row.postState[i];
       if (!post) continue;
+      if (post.loose) continue;
+      post.loose = true;
       const dir = post.x >= crossX ? 1 : -1;
       post.vx = dir * (BURST_OUT * 0.8 + rng() * 1.4);
       post.vy = BURST_UP * 0.7 + rng() * 1.2;
@@ -1240,7 +1282,6 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     update(dt, world) {
       lastTroops = world.troops;
       lastHalfWidth = world.squadHalfWidth;
-      lastSpeed = Math.max(0.1, world.scrollSpeed);
       lastCrossZ = world.squadCenter.z;
       const speed = world.scrollSpeed;
       const crossZ = world.squadCenter.z;
@@ -1273,10 +1314,17 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           for (let i = 0; i < row.count; i++) {
             const seg = row.segments[i];
             if (!seg || !seg.reward || seg.broken) continue;
-            if (seg.value < seg.climbMax) {
-              seg.value = Math.min(seg.climbMax, seg.value + seg.climbRate * dt);
-              applyValue(seg, false);
-            }
+            // NOTHING CLIMBS ON A TIMER ANY MORE.
+            //
+            // A slow baseline used to run here every tick regardless of whether
+            // a round had ever touched the segment, on the theory that a
+            // one-soldier squad should still see a gate grow. At 0.9/s over a
+            // ~9.4 s approach that is +8.5 — more than the whole target — so
+            // every reward filled itself while the player watched, which is the
+            // exact opposite of the mechanic. A playtester caught it on video:
+            // a blue climbing +1 → +4 with not one bullet fired.
+            //
+            // The climb lives in `shootAt` now, and only there.
             // AT THE CEILING IT BREAKS ITSELF. A reward you have poured enough
             // fire into pays out where it stands rather than waiting to be
             // walked into — and breaking it is what unblocks the lane, so the
@@ -1306,6 +1354,40 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           seg.group.rotation.z += seg.wz * dt;
           if (seg.burst > BURST_LIFE) seg.group.visible = false;
         }
+
+        // A post holds up the segments either side of it. Once both are gone it
+        // is holding up nothing, so it falls — otherwise a blue that broke early
+        // leaves its uprights standing on bare road.
+        for (let i = 0; i < row.postCount; i++) {
+          const post = row.postState[i];
+          if (!post || post.loose) continue;
+          const left = i > 0 ? row.segments[i - 1] : undefined;
+          const right = i < row.count ? row.segments[i] : undefined;
+          const held = (left && !left.broken) || (right && !right.broken);
+          if (held) continue;
+          post.loose = true;
+          const dir = post.x >= row.centerX ? 1 : -1;
+          post.vx = dir * (BURST_OUT * 0.7 + rng() * 1.1);
+          post.vy = BURST_UP * 0.6 + rng();
+          post.vz = BURST_TOWARD * 0.5 + rng() * 0.7;
+          post.wx = (rng() - 0.5) * BURST_SPIN;
+          post.wz = (rng() - 0.5) * BURST_SPIN;
+        }
+
+        // Loose posts fall whether or not the row itself was smashed.
+        let anyLoose = false;
+        for (let i = 0; i < row.postCount; i++) {
+          const post = row.postState[i];
+          if (!post || !post.loose || row.smashed) continue;
+          anyLoose = true;
+          post.vy -= BURST_GRAVITY * dt;
+          post.px += post.vx * dt;
+          post.py += post.vy * dt;
+          post.pz += post.vz * dt;
+          post.rx += post.wx * dt;
+          post.rz += post.wz * dt;
+        }
+        if (anyLoose) writePosts(row);
 
         if (row.smashed) {
           row.burst += dt;
@@ -1417,10 +1499,17 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           blocked = true;
           if (!seg.reward) continue;
 
-          if (seg.value < seg.climbMax) {
-            seg.value = Math.min(seg.climbMax, seg.value + amount * CLIMB_PER_DAMAGE);
+          if (seg.dealt < seg.need) {
+            seg.dealt += amount;
+            // Interpolated from a FILL FRACTION rather than accumulated in
+            // troops. The two are the same picture on screen and completely
+            // different to reason about: a fraction makes "how much of my fire
+            // does this cost" independent of what the numbers happen to be, so
+            // one soldier and five hundred face the same decision.
+            const fill = Math.min(1, seg.dealt / seg.need);
+            seg.value = seg.start + (seg.climbMax - seg.start) * fill;
             applyValue(seg, false);
-            if (seg.value >= seg.climbMax) breakSegment(row, i, seg.centerX, true);
+            if (fill >= 1) breakSegment(row, i, seg.centerX, true);
           }
         }
       }

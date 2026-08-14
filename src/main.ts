@@ -664,6 +664,14 @@ function tick(dt: number): void {
     //    not where it was last tick.
     barrels.update(dt, world);
     enemies.update(dt, world);
+    // BEFORE the seating pass, and it has to be here: pickups was in
+    // `renderables` (so it drew) but its update was never called, which is the
+    // whole of the "floating objects" bug. Without a tick its clock never
+    // advanced, so the staleness retirement never fired; its previous-position
+    // history never refreshed, so render interpolated against a frozen frame;
+    // and a collected prize never flew, never landed and never retired. A gold
+    // ring simply stopped in mid-air while its barrel drove on underneath.
+    pickups.update(dt, world);
     barrels.forEachLive(seatRider);
     resolveHits();
 

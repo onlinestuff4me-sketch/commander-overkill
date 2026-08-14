@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3 (third pass)._
+_Last updated: 2026-08-14, session 3 (fourth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -14,14 +14,21 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**The economy is measured, not guessed.** `__overkill.sample(16, 110, 0.3)` plays
-sixteen full autopilot runs with a 0.3 s reaction time: median **319 troops**
-against a 300–500 target, spread 244–663, and **0 of 16 wiped**.
+**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`:
+median **588 troops** against a 300–500 target, and **0 of 32 wiped**. A 50 s
+sample medians 99.
 
-Read the median as a FLOOR. The autopilot positions itself well but makes no
-attempt to fill a reward's target — it never chooses which segment to pour fire
-into — so under the strategic rule below it collects only what the baseline climb
-and incidental fire happen to finish. A player who commits will beat it.
+**These medians carry roughly ±25% run-to-run noise at n=16.** The distribution
+has a long tail (a good run reaches the 1200 cap, a bad one never gets going), so
+a sixteen-run sample cannot resolve a 12% tuning change — one attempt to trim the
+median moved it the wrong way by more than the change was worth. Use n≥32 before
+believing any adjustment, and do not chase a number inside the noise band.
+
+**The failure mode is a STALL, not a wipe.** `min` is 1 in most samples: a run
+that never grew, because filling a reward needs committed fire and a squad that
+misses its first few blues stays too small to fill the next. Nothing ever reaches
+zero troops, so `wiped` stays 0 while the run is over in every way that matters.
+Count stalls alongside wipes when the level system lands.
 
 **Zero wipes is the honest bad news and should not be tuned away.** Since a row
 can be walked around, a player who reads the board correctly cannot be killed —
@@ -363,6 +370,29 @@ pointless and made "or fight through them", one half of every blockade, free. Th
 autopilot measured it exactly: with dodging available and a flat breach cost, the
 median run went to 660 troops with zero wipes.
 
+**THE CLIMB COMES FROM YOUR BULLETS AND FROM NOTHING ELSE.** A slow per-second
+baseline used to run in `update()` for every unbroken blue whether or not a round
+had ever touched it. At 0.9/s over a ~9.4 s approach that is +8.5 — more than a
+whole early target — so rewards filled themselves while the player watched, which
+is the exact inverse of the mechanic the module header describes. A playtester
+caught it on video: +1 climbing to +4 with not one bullet fired.
+`REWARD_CLIMB_RATE` is 0 and must stay 0.
+
+**Progress is a FRACTION, not an accumulation.** Each blue carries `need`, the
+damage required to fill it, taken as a share of what the army lands on one
+segment over an approach and scaled by how much road the row will actually get.
+The displayed number is interpolated from `dealt / need`. Two consequences worth
+keeping: the same decision ("what share of my fire does this cost") is posed
+identically at one troop and at five hundred, and the old `CLIMB_PER_DAMAGE`
+constant is gone — it tied fill speed to the absolute damage scale, so every
+weapon change silently retuned how hard rewards were to earn.
+
+The share is `MERCY_COMMIT_SHARE` (0.28) under `MERCY_TROOPS` and
+`REWARD_COMMIT_SHARE` (0.62) above it. The mercy branch is not decoration: at the
+full share a one-troop squad that misses its first blue is still a one-troop
+squad, so it misses the next one too, and the run stalls at the bottom forever.
+That measured as a median of 565 with a minimum of 1.
+
 **A REWARD IS EARNED BY FILLING IT, NOT BY WALKING INTO IT.** Mischa's call,
 picked over the generous alternative (pay whatever number is showing when you
 smash it) because it is what makes committing your fire to one segment a decision
@@ -375,13 +405,12 @@ enforced rather than hoped for:
 1. **The goal is visible.** Every blue carries a gold plate above it reading its
    target (`targetTexture` in mechanics/gates.ts). Without it the rewards were,
    accurately, "arbitrary and surprising — sometimes 9 or 10, sometimes 34".
-2. **The goal is always reachable.** `climbSpan` is the LOWER of what the economy
-   wants to pay (`rewardSpan`) and what the guns can actually deliver over the
-   approach — the same rule barrel hit points follow. The orchestrator reports
-   the weapon side via `gates.reportFirepower()`, because the weapon model
-   belongs to main.ts and a gate reaching for the bullet tuning would be exactly
-   the module-to-module coupling the contract forbids. Before this, a one-troop
-   squad met unfillable targets and blues sailed past paying nothing.
+2. **The goal is always reachable**, and reachability is handled by the COST of
+   filling rather than by shrinking the prize. `seg.need` scales to the army;
+   `climbSpan` stays a pure economy number. The orchestrator reports the weapon
+   side via `gates.reportFirepower()`, because the weapon model belongs to
+   main.ts and a gate reaching for the bullet tuning would be exactly the
+   module-to-module coupling the contract forbids.
 3. **Failing is loud.** A blue smashed unfilled goes grey and its goal plate
    snaps red and oversized. A reward that quietly does not arrive reads as a bug,
    and was reported as one.
@@ -435,6 +464,26 @@ second draw call, and it is what makes a dying unit flash crimson and an elite
 read gold. It also constrains the palette: the tint cannot pick out one part of
 the body, and a bright multiplier clips the near-white shirt to a flat acid
 colour, so the elite tint deliberately darkens as well as warms.
+
+**EVERY SYSTEM MUST BE IN THE TICK, AND `renderables` IS NOT THE TICK.**
+`entities/pickups.ts` sat in the `renderables` array — so it drew every frame —
+while `pickups.update()` was never called. Its clock never advanced, so the
+staleness retirement never fired; its previous-position history never refreshed,
+so render interpolated against a frozen frame; and a collected prize never flew,
+never landed and never retired. The result was a gold ring stopping dead in
+mid-air while its barrel drove on underneath it, which is exactly the "floating
+objects" a playtester reported three times running. A scene probe measured it at
+194 samples out of 200 carrying at least one ring more than 1.4 m from any
+barrel; after the fix, 17 out of 200, all of them prizes legitimately in flight.
+
+`renderables` drives `render()` only. Update order is spelled out explicitly in
+`tick()` for exactly this reason — and this is the failure mode that argues for
+keeping it that way rather than looping an array.
+
+**A post falls once both its segments are gone.** Posts used to stand until the
+whole ROW resolved, so a blue that broke early on its own left two uprights
+behind — blue sticks standing on empty road, and on the grass verge when the row
+sat against a kerb. The other half of the "floating objects" report.
 
 **Enemies are red, and that was a legibility bug rather than art direction.** A
 walker pack at z −30 was reported as "strange artifacts hovering over the road".
