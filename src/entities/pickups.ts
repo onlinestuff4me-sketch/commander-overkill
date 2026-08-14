@@ -86,6 +86,15 @@ export interface PickupSystem extends System {
    * orchestrator's to apply — this is the flight, not the reward.
    */
   collect(id: number): void;
+  /**
+   * Take one pickup off the board immediately — no flight, no reward.
+   *
+   * For the case where its barrel could not be created (the barrel pool is
+   * capped at 16). The staleness timer would have caught it a quarter of a
+   * second later, and a quarter of a second is fifteen frames of a gold-ringed
+   * prize hanging in mid-air with nothing under it.
+   */
+  retire(id: number): void;
   /** Drop everything. For a run restart. */
   clear(): void;
 }
@@ -254,6 +263,11 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
       p.fromX = p.x;
       p.fromY = p.y;
       p.fromZ = p.z;
+    },
+
+    retire(id) {
+      const p = pool[id];
+      if (p) retire(p);
     },
 
     clear() {

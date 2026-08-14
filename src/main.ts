@@ -26,6 +26,7 @@ import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
 import {
   barrelHp,
   barrelPayout,
+  damageOnSegment,
   enemyHp,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
@@ -279,6 +280,11 @@ enemies.onKilled(() => bossBar.damage(1));
  */
 const BARREL_SPACING = 1.95;
 const BARREL_CLUSTER = 3;
+/** A barrel's own width, for fitting a cluster into a gap. */
+const BARREL_FACE = 1.7;
+/** Metres of daylight kept between a compound placement's two halves, so they
+ *  read as two options rather than as one cluttered obstacle. */
+const CLUSTER_CLEARANCE = 0.5;
 /**
  * Segments a compound placement's gate row may have.
  *
@@ -354,10 +360,39 @@ function clusterX(width: number, side: number): number {
 }
 
 /**
+ * Centre a cluster of at most `max` items inside the stretch of road between
+ * `from` and `to`, dropping items until it fits. Returns the centre and how many
+ * survived; 0 means the stretch is too narrow for even one.
+ *
+ * THIS IS THE FIX FOR THE FLOATING GOLD OBJECTS. A compound placement put its
+ * barrel cluster on "the other side" of the gate row, which is not the same
+ * thing as "in the road the gate row left over": a 5.6 m cluster placed against
+ * the far kerb still overlapped a row reaching past the centreline, so barrels
+ * ended up INSIDE a gate panel — hidden by it, while the pickup they were
+ * carrying hovered above the barrier in its gold ring with nothing under it.
+ * Reported, reasonably, as floating artifacts.
+ */
+function fitCluster(
+  from: number,
+  to: number,
+  max: number,
+  spacing: number,
+  itemWidth: number,
+): { x: number; count: number } {
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const room = hi - lo;
+  let count = max;
+  while (count > 1 && (count - 1) * spacing + itemWidth > room) count--;
+  if ((count - 1) * spacing + itemWidth > room) return { x: 0, count: 0 };
+  return { x: (lo + hi) / 2, count };
+}
+
+/**
  * `side` is the director's lateral request: −1 left, +1 right, 0 free. It is how
  * a guard gets lined up with the prize it is guarding — see mechanics/director.ts.
  */
-function place(what: Placement, z: number, side = 0): void {
+function place(what: Placement, z: number, side = 0, free?: { x: number; count: number }): void {
   switch (what) {
     case "gate": {
       const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer);
@@ -374,13 +409,16 @@ function place(what: Placement, z: number, side = 0): void {
         bullets.tuning,
         squad.radiusX,
       );
-      const width = (BARREL_CLUSTER - 1) * BARREL_SPACING + 1.7;
-      const cx = clusterX(width, side);
-      for (let i = 0; i < BARREL_CLUSTER; i++) {
-        const x = cx + (i - (BARREL_CLUSTER - 1) / 2) * BARREL_SPACING;
+      const width = (BARREL_CLUSTER - 1) * BARREL_SPACING + BARREL_FACE;
+      const cx = free ? free.x : clusterX(width, side);
+      const n = free ? free.count : BARREL_CLUSTER;
+      for (let i = 0; i < n; i++) {
+        const x = cx + (i - (n - 1) / 2) * BARREL_SPACING;
         const lane = x / CORRIDOR_HALF_WIDTH;
         const rider = pickups.spawn(pickForRow(), x, barrels.riderY, z);
-        barrels.spawn(lane, z, hp, rider);
+        // If the barrel pool is full there is nothing for the prize to sit on,
+        // and an unpinned pickup is a gold-ringed object hovering over the road.
+        if (barrels.spawn(lane, z, hp, rider) < 0 && rider >= 0) pickups.retire(rider);
       }
       return;
     }
@@ -425,8 +463,20 @@ function place(what: Placement, z: number, side = 0): void {
       // run heavy in one axis and empty in the other is a choice you made.
       const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
       const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer, COMPOUND_SEGMENTS);
-      gates.spawnRow(gateBuffer, z, rowPlacement(rowRng, count, dir));
-      place("barrels", z, -dir);
+      const placed = rowPlacement(rowRng, count, dir);
+      gates.spawnRow(gateBuffer, z, placed);
+      // Into the road the ROW left over, not merely onto the far kerb — see
+      // fitCluster. A cluster that does not fit sheds barrels rather than
+      // straddling the barrier.
+      const inner = placed.centerX - dir * placed.halfSpan;
+      const fit = fitCluster(
+        -dir * (CORRIDOR_HALF_WIDTH - PLACE_INSET),
+        inner - dir * CLUSTER_CLEARANCE,
+        BARREL_CLUSTER,
+        BARREL_SPACING,
+        BARREL_FACE,
+      );
+      if (fit.count > 0) place("barrels", z, -dir, fit);
       return;
     }
   }
@@ -578,6 +628,12 @@ function tick(dt: number): void {
     world.elapsed += dt;
     world.squadLane = touch.lane;
     world.weaponTier = tierFor(world.troops);
+
+    // Before anything spawns: the gate module sizes a reward's target off what
+    // the guns can actually deliver, and only this file knows the weapon model.
+    gates.reportFirepower(
+      damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX),
+    );
 
     if (contentSpawning) {
       // Distance, not time. Spacing is authored in metres of road, so it holds

@@ -120,10 +120,33 @@ const BARREL_HALF_FACE = 1.7 / 2 + 0.2;
  * curve needs — it decides whether a barrel is a speed bump or a wall, and both
  * of those survive a 15% error.
  */
-export function laneCoverage(streamHalfWidth: number): number {
+export function laneCoverage(streamHalfWidth: number, halfFace = BARREL_HALF_FACE): number {
   const r = Math.max(1e-3, streamHalfWidth);
-  const u = Math.min(1, BARREL_HALF_FACE / r);
+  const u = Math.min(1, halfFace / r);
   return (2 / Math.PI) * (Math.asin(u) + u * Math.sqrt(1 - u * u));
+}
+
+/**
+ * Damage the army lands on ONE gate segment over a full approach.
+ *
+ * The same shape as the barrel model — total weapon output times the share of a
+ * parallel curtain that overlaps one face — and it exists for the same reason:
+ * a gate's reward target has to be DERIVED from what the guns can actually
+ * deliver, not hand-picked. Hand-picked was the bug a playtester found from the
+ * other end: at one troop the targets were unreachable, so blues sailed past
+ * paying nothing "inexplicably".
+ *
+ * A segment face is wider than a barrel's, so it intercepts more of the curtain.
+ */
+export const GATE_HALF_FACE = 2.35 / 2;
+
+export function damageOnSegment(
+  troops: number,
+  tier: WeaponTier,
+  tuning: BulletTuning,
+  streamHalfWidth: number,
+): number {
+  return damagePerPass(tier, troops, tuning) * laneCoverage(streamHalfWidth, GATE_HALF_FACE);
 }
 
 /**
