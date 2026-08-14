@@ -43,19 +43,33 @@ Three consequences:
 Each step is shippable on its own and visible to you in the build. All four are
 unblocked — the decisions step 3 depended on are answered at the bottom.
 
-### Step 1 — One conductor owns the corridor
+### Step 1 — One conductor owns the corridor — ✅ DONE
 
-Replace both spawners with a single **director** that owns the timeline and
-places everything, gates included (`gates.setAutoSpawn(false)`; the director
-calls `gates.spawnRow` explicitly).
+`mechanics/director.ts`. One cursor walks one cycle and answers "place this
+now"; `main.ts` executes it. Gates no longer pace themselves
+(`autoSpawn: false`), so the second metronome is gone and **two things can no
+longer occupy the same stretch of road by construction**.
 
-It enforces one rule immediately: **a minimum clear distance between anything and
-anything else.** That alone removes the overlap.
+Two things came out of building it that were not in the plan:
 
-*What you would see:* the same content, but never stacked on itself, and always
-with enough road between decisions to read them.
+- **The old schedules were unschedulable in principle.** Combined demand was
+  1/16 + 1/25.2 + 1/50.4 = 0.122 placements per metre — one every 8.2 m. Ask for
+  a legible 11 m gap and that simply does not fit, so "the same content, never
+  stacked" was not achievable. Gates now land every ~19.6 m against 16 m before;
+  barrel rows are sparser. The cycle makes that trade explicit instead of
+  resolving it by collision.
+- **The gap has to depend on the PAIR, not be a constant.** 11 m between a gate
+  and a barrel row is fine — a barrel asks nothing of the player's thumb. 11 m
+  between two gates is 1.8 s to read a decision, act on it, and read the next.
+  Gate-to-gate is 16 m, the figure the gate module used on its own. What needs
+  separating is decisions, not objects.
 
-*Cost:* small. This is a restructure, not new content.
+The corridor is also primed at the start of a run by **replaying the director**
+for 40 m, so the opening layout obeys the same spacing rule as everything after
+it rather than being a hand-placed special case that can drift.
+
+*Verified:* 15 tests over spacing, mix, determinism and reset; driven in a
+browser from the opening frame to 42 s.
 
 ### Step 2 — Beats, not a metronome
 
