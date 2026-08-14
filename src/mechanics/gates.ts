@@ -145,7 +145,7 @@ const REWARD_CLIMB_RATE = 0;
  *
  * The floor is what keeps a one-soldier squad's first gate meaningful.
  */
-const REWARD_SPAN_BASE = 2.2;
+const REWARD_SPAN_BASE = 3.1;
 const REWARD_SPAN_EXPONENT = 0.6;
 const REWARD_SPAN_MIN = 8;
 
@@ -354,6 +354,12 @@ const TARGET_FAIL_SCALE = 1.3;
 /** Candidate positions `bestLane` scores across the road. 24 puts them ~0.47 m
  *  apart, finer than the tolerance any single decision turns on. */
 const LANE_SAMPLES = 24;
+/** Fill fraction past which a reward is judged likely to complete. Used only by
+ *  `bestLane`, which is a measuring hand rather than shipped behaviour. */
+const LIKELY_FILL = 0.5;
+/** Beyond this Z a row is far enough out that steering onto a blue now will
+ *  fill it before it arrives, so it is worth committing to on sight. */
+const COMMIT_Z = -22;
 
 /**
  * Chance of a 2-wide and a 3-wide row, per difficulty tier; the remainder is
@@ -546,6 +552,16 @@ export function composeAutoRow(
    *  mechanics/director.ts) puts a second thing in the gap, and a four-wide row
    *  covers 84% of the road — there would be no gap to put it in. */
   maxCount = MAX_SEGMENTS,
+  /**
+   * Guarantee a blue in this row.
+   *
+   * The reward roll is independent per row, so two all-red rows in a row is a
+   * one-in-six event and three is one in fourteen — often enough that a playtest
+   * hits a stretch of pure loss with nothing to steer toward, which does not
+   * read as difficulty, it reads as the game having stopped offering anything.
+   * The orchestrator sets this after any row that carried no reward.
+   */
+  forceReward = false,
 ): number {
   // A squad this small cannot absorb a wrong answer, so it is not asked one:
   // the penalties stay mild and a blue segment is always on the board.
@@ -581,7 +597,7 @@ export function composeAutoRow(
   // only when needed would desync every row after the squad crossed it.
   const rolled = rng() < REWARD_ROW_CHANCE;
   const pick = Math.floor(rng() * count);
-  const rewardAt = rolled || mercy ? pick : -1;
+  const rewardAt = rolled || mercy || forceReward ? pick : -1;
 
   // Two passes: gather the row's appetite in shares, then spend the budget.
   let wanted = 0;
@@ -609,6 +625,13 @@ export function composeAutoRow(
   }
   out.length = count;
   return count;
+}
+
+/** Did this row come out with a reward on it? For the caller's no-two-dry-rows
+ *  rule; reading the buffer is cheaper than returning a second value. */
+export function rowHasReward(out: readonly number[], count: number): boolean {
+  for (let i = 0; i < count; i++) if ((out[i] ?? 0) > 0) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1200,16 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // failing has to be as loud as succeeding, which is what `failed` drives in
     // render(); a reward that quietly does not arrive reads as a bug, and did.
     seg.failed = seg.reward && seg.dealt < seg.need;
-    const value = seg.failed ? 0 : Math.floor(seg.value);
+    // A BLUE YOU DID NOT FILL TAKES WHAT YOU CLIMBED.
+    //
+    // It used to pay nothing, which is a consequence you have to be told about
+    // rather than one you feel. Charging the number on the panel makes the climb
+    // a commitment in both directions: every point you put into a segment is a
+    // point you lose if you walk into it early, so abandoning a half-filled blue
+    // is now a real mistake and not merely a wasted opportunity. It is also the
+    // clearest possible signal — the number you were watching go up comes off
+    // your army in red.
+    const value = seg.failed ? -Math.floor(seg.value) : Math.floor(seg.value);
     if (value !== 0) {
       hit.value = value;
       hit.troops = value;
@@ -1561,7 +1593,18 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
             if (!seg || seg.broken) continue;
             const lo = Math.max(x - half, seg.centerX - seg.halfWidth);
             const hi = Math.min(x + half, seg.centerX + seg.halfWidth);
-            if (hi - lo >= seg.halfWidth * 2 * CROSS_FRACTION) score += seg.value;
+            if (hi - lo < seg.halfWidth * 2 * CROSS_FRACTION) continue;
+            // A HALF-FILLED BLUE IS A LIABILITY, not a prize. Since an unfilled
+            // reward now charges what you climbed, scoring one at face value
+            // measures a player who walks into every blue on the board and pays
+            // for all of them — which it duly did: 16 wipes in 32 runs the
+            // moment the rule landed. Past the halfway mark it is likely to
+            // finish and is worth its number; short of that it costs it.
+            // Far away there is still road enough to fill it, so committing now
+            // is the right move and the number is worth its face. Close in, an
+            // unstarted blue can no longer be finished and is purely a bill.
+            const committed = seg.dealt >= seg.need * LIKELY_FILL || row.z < COMMIT_Z;
+            score += seg.reward && !committed ? -seg.value : seg.value;
           }
           if (score > bestScore) {
             bestScore = score;

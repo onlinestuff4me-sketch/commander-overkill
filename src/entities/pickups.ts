@@ -43,8 +43,10 @@ export const PICKUP_KINDS: readonly PickupKind[] = ["recruit", "minigun", "rocke
 /** Live pickups. One per barrel, and barrels cap at 16. */
 const CAPACITY = 16;
 
-/** Metres the pickup hovers above whatever it is sitting on. */
-const HOVER = 0.5;
+/** Metres the pickup sits above whatever it is on. Nearly zero: at 0.5 it read
+ *  as a floating object rather than as a prize STANDING on the barrel, which is
+ *  what the reference shows and what makes the two obviously one thing. */
+const HOVER = 0.12;
 /** Bob amplitude and rate. A prize should never be as still as scenery. */
 const BOB = 0.09;
 const BOB_RATE = 2.6;
@@ -71,6 +73,11 @@ const GLOW_SIZE = 1.25;
 /** Seconds without a `pin` before a pickup is assumed orphaned and retired.
  *  Two ticks would do; this is generous enough to survive a frame hitch. */
 const STALE_TIME = 0.25;
+
+/** Name plate geometry, metres. Wide enough to carry seven characters at a size
+ *  that survives the far end of the corridor. */
+const LABEL_WIDTH = 2.2;
+const LABEL_LIFT = 0.72;
 
 export interface PickupSystem extends System {
   readonly object: THREE.Group;
@@ -126,6 +133,43 @@ interface Pickup {
 export function createPickups(scene: THREE.Scene): PickupSystem {
   const object = new THREE.Group();
   scene.add(object);
+
+  /**
+   * A NAME PLATE OVER EVERY PRIZE.
+   *
+   * Boxes and spheres have a ceiling on how much they can say, and at the size a
+   * barrel occupies out at z −40 a rocket launcher and a minigun are the same
+   * grey smudge. Playtest was blunt about it: "I'm not understanding what the
+   * items are above the barrels."
+   *
+   * So the shape carries it as far as it can and the word carries the rest.
+   * One plate per kind, one draw call each, only drawn when that kind is on the
+   * road. Same heavy white-on-black treatment as the gate numerals, because that
+   * is the type in this game that has already been proven to read at distance.
+   */
+  const labelTex: Record<PickupKind, THREE.CanvasTexture> = {
+    recruit: labelTexture("TROOPS", "#8fd4ff"),
+    minigun: labelTexture("MINIGUN", "#7fc2ff"),
+    rocket: labelTexture("ROCKET", "#ff9a5c"),
+  };
+  const labels = {} as Record<PickupKind, THREE.InstancedMesh>;
+  for (const kind of PICKUP_KINDS) {
+    const mat = new THREE.MeshBasicMaterial({
+      map: labelTex[kind],
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+      // Same rule as the gate numerals: the panel may haze with distance, the
+      // words may not. A label you cannot read is not a label.
+      fog: false,
+    });
+    const mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), mat, CAPACITY);
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    mesh.renderOrder = 6;
+    labels[kind] = mesh;
+    object.add(mesh);
+  }
 
   const geo: Record<PickupKind, THREE.BufferGeometry> = {
     recruit: recruitGeometry(),
@@ -305,6 +349,7 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
 
     render(alpha, _world) {
       const counts: Record<string, number> = { recruit: 0, minigun: 0, rocket: 0 };
+      const labelCounts: Record<string, number> = { recruit: 0, minigun: 0, rocket: 0 };
       let glowCount = 0;
 
       for (const p of pool) {
@@ -333,12 +378,25 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
         m.compose(pos, glowQuat, scl);
         glow.setMatrixAt(glowCount, m);
         glowCount++;
+
+        // The word sits above the object, billboarded like the glow. Hidden
+        // during the collect flight — by then you know what you got.
+        if (p.fly <= 0) {
+          pos.set(x, y + LABEL_LIFT, z - 0.06);
+          scl.set(LABEL_WIDTH, LABEL_WIDTH / 4, 1);
+          m.compose(pos, glowQuat, scl);
+          labels[p.kind].setMatrixAt(labelCounts[p.kind]!, m);
+          labelCounts[p.kind]!++;
+        }
       }
 
       for (const kind of PICKUP_KINDS) {
         const mesh = meshes[kind];
         mesh.count = counts[kind]!;
         mesh.instanceMatrix.needsUpdate = true;
+        const label = labels[kind];
+        label.count = labelCounts[kind]!;
+        label.instanceMatrix.needsUpdate = true;
       }
       glow.count = glowCount;
       glow.instanceMatrix.needsUpdate = true;
@@ -348,6 +406,12 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
       scene.remove(object);
       for (const kind of PICKUP_KINDS) geo[kind].dispose();
       glow.geometry.dispose();
+      for (const kind of PICKUP_KINDS) {
+        labels[kind].geometry.dispose();
+        (labels[kind].material as THREE.Material).dispose();
+        labelTex[kind].dispose();
+        labels[kind].dispose();
+      }
       bodyMat.dispose();
       glowMat.dispose();
       glowTex.dispose();
@@ -477,6 +541,58 @@ function rocketGeometry(): THREE.BufferGeometry {
  * additive blending that veil is what turned a distant recruit into a pale blob.
  * A rim light belongs strictly outside the silhouette.
  */
+/**
+ * A word on a dark plate, in the gate numerals' heavy outlined style.
+ *
+ * `accent` tints the text toward the thing it names — warm for the rocket, cool
+ * for the guns — so the colour agrees with the object below it even before the
+ * word itself resolves.
+ */
+function labelTexture(text: string, accent: string): THREE.CanvasTexture {
+  const w = 256;
+  const h = 64;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+
+  const r = 16;
+  ctx.beginPath();
+  ctx.moveTo(8 + r, 6);
+  ctx.arcTo(w - 8, 6, w - 8, h - 6, r);
+  ctx.arcTo(w - 8, h - 6, 8, h - 6, r);
+  ctx.arcTo(8, h - 6, 8, 6, r);
+  ctx.arcTo(8, 6, w - 8, 6, r);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(10, 14, 22, 0.82)";
+  ctx.fill();
+
+  let size = 36;
+  const font = (px: number): string =>
+    `900 ${px}px "Arial Black", "Helvetica Neue", Helvetica, Arial, sans-serif`;
+  ctx.font = font(size);
+  while (ctx.measureText(text).width > w - 44 && size > 16) {
+    size -= 2;
+    ctx.font = font(size);
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(5, size * 0.2);
+  ctx.strokeStyle = "#0a0e16";
+  ctx.strokeText(text, w / 2, h / 2 + 1);
+  ctx.fillStyle = accent;
+  ctx.fillText(text, w / 2, h / 2 + 1);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 function glowTexture(): THREE.CanvasTexture {
   const size = 128;
   const c = document.createElement("canvas");

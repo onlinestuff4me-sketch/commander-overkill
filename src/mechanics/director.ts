@@ -58,7 +58,14 @@
  *   blockade    a gate row on one side, an enemy pack standing in the gap
  *   crossroads  a barrel cluster on one side, a gate row on the other
  */
-export type Placement = "gate" | "barrels" | "walkers" | "blockade" | "crossroads";
+export type Placement =
+  | "gate"
+  | "barrels"
+  | "walkers"
+  | "elites"
+  | "bikers"
+  | "blockade"
+  | "crossroads";
 
 /**
  * A placement plus which side of the road it wants.
@@ -113,6 +120,15 @@ export const BEATS: readonly Beat[] = [
 
   // Somewhere for the guns to matter, with no decision on top of it.
   { name: "combat", places: ["barrels", "walkers"], sides: [1, 1], trail: 4, weight: 2 },
+
+  // Gold-rimmed heavies. They advance slowly and soak, so they are the beat
+  // that asks whether you invested in firepower rather than in bodies.
+  { name: "heavies", places: ["elites"], trail: 5, weight: 2 },
+
+  // Motorbikes, which close much faster than anything else on the road. The
+  // only enemy that punishes reading the board late rather than reading it
+  // wrong — which is a different mistake, and worth having one of.
+  { name: "charge", places: ["bikers", "gate"], sides: [1, -1], trail: 4, weight: 1 },
 
   // The two mechanics interacting: shoot through the cover, then immediately
   // choose. This is the beat a fixed cycle could only produce by accident.

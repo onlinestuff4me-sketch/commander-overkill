@@ -27,12 +27,19 @@ import {
   barrelHp,
   barrelPayout,
   damageOnSegment,
+  ELITE_PASS_SHARE,
   enemyHp,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
 import type { Placement } from "./mechanics/director";
-import { composeAutoRow, createGates, MERCY_TROOPS, rowPlacement } from "./mechanics/gates";
+import {
+  composeAutoRow,
+  createGates,
+  MERCY_TROOPS,
+  rowHasReward,
+  rowPlacement,
+} from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
 import { createPickups } from "./entities/pickups";
@@ -56,7 +63,7 @@ const world = createWorld(new THREE.Vector3());
 const zoom = createZoom(stage.camera, stage.scene);
 
 const corridor = createCorridor();
-stage.scene.add(corridor);
+stage.scene.add(corridor.object);
 
 // The reference has no hero avatar — the squad IS the player. entities/commander.ts
 // stays in the tree because the brief specs a named hero and specs/prd.md still
@@ -347,6 +354,29 @@ const gateBuffer: number[] = [0, 0, 0, 0];
 /** The director's own stream, kept apart from the gate module's so that tuning
  *  gate variety cannot silently reshuffle the corridor's pacing. */
 const rowRng = createRng(0xc0ffee);
+/**
+ * True when the last gate row carried no blue at all.
+ *
+ * Never two dry rows running: a stretch of pure loss with nothing to steer
+ * toward does not read as difficulty, it reads as the game having stopped
+ * offering anything. One all-red row is a "pick your loss" moment — the
+ * reference has them — and two in a row is just the road taking troops off you.
+ */
+let lastRowWasDry = false;
+
+/** Compose a row into `gateBuffer`, honouring the no-two-dry-rows rule. */
+function composeRow(maxCount?: number): number {
+  const count = composeAutoRow(
+    rowRng,
+    world.elapsed,
+    world.troops,
+    gateBuffer,
+    maxCount,
+    lastRowWasDry,
+  );
+  lastRowWasDry = !rowHasReward(gateBuffer, count);
+  return count;
+}
 
 /**
  * What the next barrel carries.
@@ -380,6 +410,23 @@ function pickForRow(): PickupKind {
 function walkerHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
 }
+
+/** Heavies and bikers are single bodies rather than a pack of eight, so each one
+ *  soaks a much larger share of a pass — see ELITE_PASS_SHARE in pacing.ts. */
+function eliteHp(): number {
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
+}
+
+/** A biker arrives sooner, so it gets less of the approach to be shot at and is
+ *  priced accordingly. Two thirds of a heavy. */
+function bikerHp(): number {
+  return Math.max(20, Math.round(eliteHp() * 0.66));
+}
+
+const ELITE_SQUAD = 3;
+const ELITE_SPACING = 1.8;
+const BIKER_SQUAD = 2;
+const BIKER_SPACING = 2.4;
 
 /**
  * A world X for a cluster of `width` metres, biased toward `side` when the
@@ -429,7 +476,7 @@ function fitCluster(
 function place(what: Placement, z: number, side = 0, free?: { x: number; count: number }): void {
   switch (what) {
     case "gate": {
-      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer);
+      const count = composeRow();
       gates.spawnRow(gateBuffer, z, rowPlacement(rowRng, count, side));
       return;
     }
@@ -465,6 +512,36 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
       return;
     }
 
+    // BUILT SINCE THE ENEMY MODULE WAS WRITTEN AND NEVER ONCE SPAWNED. The
+    // orchestrator only ever placed walker packs, so two finished, tested enemy
+    // types sat unreachable behind an unused entry point — the cheapest content
+    // in the project, for the cost of a case each.
+
+    case "elites": {
+      // Gold-rimmed heavies, a short line of them. They hold their ground rather
+      // than rushing, so they are cover you have to chew through.
+      const width = (ELITE_SQUAD - 1) * ELITE_SPACING + 1;
+      const cx = clusterX(width, side);
+      for (let i = 0; i < ELITE_SQUAD; i++) {
+        const x = cx + (i - (ELITE_SQUAD - 1) / 2) * ELITE_SPACING;
+        enemies.spawnElite(x / CORRIDOR_HALF_WIDTH, z, eliteHp(), false);
+      }
+      return;
+    }
+
+    case "bikers": {
+      // Fast. A biker closes at more than four times a walker's pace, which is
+      // what makes it the one enemy that punishes reacting late rather than
+      // choosing wrong.
+      const width = (BIKER_SQUAD - 1) * BIKER_SPACING + 1.4;
+      const cx = clusterX(width, side);
+      for (let i = 0; i < BIKER_SQUAD; i++) {
+        const x = cx + (i - (BIKER_SQUAD - 1) / 2) * BIKER_SPACING;
+        enemies.spawnElite(x / CORRIDOR_HALF_WIDTH, z, bikerHp(), true);
+      }
+      return;
+    }
+
     // ---- compound placements: two things on ONE plane, on opposite sides ----
     //
     // Everything above is sequential, and sequential content cannot force a
@@ -476,7 +553,7 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
       // The gate takes one side; the walkers stand in the gap on the other, so
       // the clear road is not clear. Pay the row, or fight through the bodies.
       const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
-      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer, COMPOUND_SEGMENTS);
+      const count = composeRow(COMPOUND_SEGMENTS);
       const placed = rowPlacement(rowRng, count, dir);
       gates.spawnRow(gateBuffer, z, placed);
       // Middle of whatever road the row left over, so the pack stands squarely
@@ -496,7 +573,7 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
       // and they are on opposite kerbs — this is the beat that teaches that a
       // run heavy in one axis and empty in the other is a choice you made.
       const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
-      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer, COMPOUND_SEGMENTS);
+      const count = composeRow(COMPOUND_SEGMENTS);
       const placed = rowPlacement(rowRng, count, dir);
       gates.spawnRow(gateBuffer, z, placed);
       // Into the road the ROW left over, not merely onto the far kerb — see
@@ -574,6 +651,7 @@ function resetRun(): void {
   rowIndex = 0;
   pickups.clear();
   pickupCursor = 0;
+  lastRowWasDry = false;
   world.elites = 0;
   world.gunners = 0;
   world.rocketeers = 0;
@@ -696,7 +774,7 @@ function tierFor(troops: number): WeaponTier {
   return 2;
 }
 
-const road = corridor.children[0] as Mesh;
+const road = corridor.object.children[0] as Mesh;
 const roadTex = (road.material as MeshLambertMaterial).map as CanvasTexture;
 let scrolled = 0;
 
@@ -774,6 +852,9 @@ function tick(dt: number): void {
     loadout.update(dt, world);
     netPop.update(dt, world);
 
+    // The bridge scrolls too, so its towers sweep past and their shadows move
+    // across the crowd rather than lying on the deck like paint.
+    corridor.update(dt, world.scrollSpeed);
     scrolled += world.scrollSpeed * dt;
 
     // Last, so it steps on the count this tick actually ended with — a gate
