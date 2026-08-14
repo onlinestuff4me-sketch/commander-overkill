@@ -111,10 +111,10 @@ function payTroops(amount: number): void {
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
   const delta = world.troops - before;
   // ELITES ARE THE LAST THING YOU LOSE. Ordinary losses eat the crowd around
-  // them, so this only ever bites once the army has been ground down to the
-  // elite count itself — which is the read we want: a shattered squad is a
-  // handful of gold veterans, not a random survivor.
-  if (world.elites > world.troops) world.elites = world.troops;
+  // them, so a loss only reaches the specials once the army has been ground down
+  // to the specials themselves — which is the read we want: a shattered squad is
+  // a handful of veterans and gunners, not a random survivor.
+  armCarriers();
   if (delta === 0) return;
   netPop.add(delta);
   if (delta > 0) growthFx.play(squad.center, squad.radius);
@@ -193,11 +193,44 @@ const RECRUIT_ELITES = 1;
  * trivialise the rest of a level. 1.3 is big enough to feel on the very next
  * barrel and small enough that one pickup is not the whole run.
  */
-const MINIGUN_RATE_STEP = 1.3;
-const ROCKET_DAMAGE_STEP = 1.3;
+/**
+ * A weapon pickup ARMS TROOPS. It does not raise a hidden multiplier.
+ *
+ * Mischa put the ask exactly: a rocket launcher with a 10 next to it should mean
+ * ten of your soldiers are carrying rocket launchers and firing rockets. So a
+ * pickup adds carriers, the squad draws the weapon on them, and their streams
+ * fire the matching projectile. `firepower` and `fireRate` are still the numbers
+ * the weapon model runs on — they are simply DERIVED from the head count now, in
+ * `armCarriers()` below, which is the only place either is written.
+ */
+const MINIGUN_CREW = 4;
+const ROCKET_CREW = 3;
+/** What one carrier is worth on its axis. Small, because the count grows. */
+const GUNNER_RATE = 0.045;
+const ROCKETEER_POWER = 0.06;
 /** Ceilings, so a long run cannot stack its way out of the difficulty curve. */
 const FIRE_RATE_MAX = 4;
 const FIREPOWER_MAX = 6;
+
+/**
+ * Re-derive the weapon multipliers from the carrier counts, and keep the counts
+ * inside the crowd.
+ *
+ * Called after anything that changes `troops`, `gunners` or `rocketeers`. The
+ * three specials are disjoint — one job per soldier — so they are trimmed in
+ * priority order rather than clamped independently: elites first (they are the
+ * investment that survives), then gunners, then rocketeers.
+ */
+function armCarriers(): void {
+  world.elites = Math.min(world.elites, world.troops);
+  world.gunners = Math.min(world.gunners, Math.max(0, world.troops - world.elites));
+  world.rocketeers = Math.min(
+    world.rocketeers,
+    Math.max(0, world.troops - world.elites - world.gunners),
+  );
+  world.fireRate = Math.min(FIRE_RATE_MAX, 1 + world.gunners * GUNNER_RATE);
+  world.firepower = Math.min(FIREPOWER_MAX, 1 + world.rocketeers * ROCKETEER_POWER);
+}
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
   payTroops(barrelPayout(maxHp));
@@ -212,10 +245,11 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
     // eat the recruit at low counts.
     world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES);
   } else if (kind === "minigun") {
-    world.fireRate = Math.min(FIRE_RATE_MAX, world.fireRate * MINIGUN_RATE_STEP);
+    world.gunners += MINIGUN_CREW;
   } else if (kind === "rocket") {
-    world.firepower = Math.min(FIREPOWER_MAX, world.firepower * ROCKET_DAMAGE_STEP);
+    world.rocketeers += ROCKET_CREW;
   }
+  armCarriers();
 });
 
 /**
@@ -540,9 +574,10 @@ function resetRun(): void {
   rowIndex = 0;
   pickups.clear();
   pickupCursor = 0;
-  world.firepower = 1;
-  world.fireRate = 1;
   world.elites = 0;
+  world.gunners = 0;
+  world.rocketeers = 0;
+  armCarriers();
   primeCorridor();
   zoom.reset(world.troops);
   world.zoom = zoom.distance;
@@ -555,6 +590,8 @@ function resetRun(): void {
  * construction rather than by a rate curve pretending to be density.
  */
 const shooters = Array.from({ length: MAX_STREAMS }, () => new THREE.Vector3());
+/** Parallel to `shooters`: what each of them is carrying. Allocated once. */
+const shooterKinds = new Uint8Array(MAX_STREAMS);
 
 /** Hoisted so the per-tick rider seating allocates nothing. */
 function seatRider(_id: number, tag: number, x: number, topY: number, z: number): void {
@@ -657,7 +694,11 @@ function tick(dt: number): void {
     );
     // setMuzzle still supplies the blob centre and width for aim; setShooters
     // is what gives each soldier its own stream origin.
-    bullets.setShooters(shooters, squad.sampleShooters(shooters, MAX_STREAMS));
+    const reported = squad.sampleShooters(shooters, MAX_STREAMS);
+    bullets.setShooters(shooters, reported);
+    // Immediately after, against the same buffers: which of those soldiers is
+    // carrying what, so a rocketeer's stream actually fires rockets.
+    bullets.setShooterKinds(shooterKinds, squad.sampleShooterKinds(shooterKinds, MAX_STREAMS));
     bullets.update(dt, world);
 
     // 3. Targets move, then get shot — so a hit lands where the barrel is now,
@@ -990,6 +1031,13 @@ if (import.meta.env.DEV) {
       },
       setElites(n: number): void {
         world.elites = clamp(Math.round(n), 0, world.troops);
+        armCarriers();
+      },
+      /** Arm N troops with each weapon. For posing the crowd in a screenshot. */
+      setCarriers(gunners: number, rocketeers: number): void {
+        world.gunners = clamp(Math.round(gunners), 0, world.troops);
+        world.rocketeers = clamp(Math.round(rocketeers), 0, world.troops);
+        armCarriers();
       },
       setLane(n: number): void {
         touch.lane = clamp(n, -1, 1);
@@ -998,6 +1046,8 @@ if (import.meta.env.DEV) {
       stats: () => ({
         troops: world.troops,
         elites: world.elites,
+        gunners: world.gunners,
+        rocketeers: world.rocketeers,
         firepower: Number(world.firepower.toFixed(2)),
         fireRate: Number(world.fireRate.toFixed(2)),
         tier: world.weaponTier,

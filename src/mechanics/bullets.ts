@@ -194,6 +194,22 @@ const BLOB_DEPTH_RATIO = 0.556;
 
 const STYLE_TRACER = 0;
 const STYLE_DART = 1;
+/**
+ * A ROCKET, fired by a stream whose soldier is carrying a launcher.
+ *
+ * It is a dart-shaped sprite with a warm tint, drawn fatter and flying slower —
+ * not a new batch, because sprite tint and size are already per-instance and a
+ * third SpriteBatch would be a draw call bought for nothing. What makes it read
+ * as a rocket at 40 px is that it is visibly bigger and slower than everything
+ * around it, and that it leaves a heavier impact.
+ */
+const STYLE_ROCKET = 2;
+/** A rocket flies at 45% of a dart's speed, hits for two rounds, and is drawn
+ *  2.4x the size. Slow and fat is the whole read — it has to be picked out of a
+ *  curtain of hundreds of ordinary rounds without a second texture. */
+const ROCKET_SPEED_SCALE = 0.45;
+const ROCKET_DAMAGE = 2;
+const ROCKET_SIZE = 2.4;
 
 // ---------------------------------------------------------------------------
 // Tunables. Flat numbers on purpose — lil-gui binds to these directly.
@@ -390,6 +406,9 @@ function defaultTuning(): BulletTuning {
  */
 const TINT_WARM = { r: 1, g: 1, b: 1 };
 const TINT_CYAN = { r: 1, g: 1, b: 1 };
+/** Rockets ride the dart sprite but hot orange, so they separate from a cyan
+ *  firehose without needing their own texture. */
+const TINT_ROCKET = { r: 1.4, g: 0.66, b: 0.3 };
 /**
  * Impact bursts are still ADDITIVE — a hit flash is a light source, it should
  * blow out, and it lasts 0.18 s so it never has to hold a hue. Kept just under
@@ -442,6 +461,15 @@ export interface BulletSystem extends System {
    * remaining streams are laid out across the blob from `setMuzzle`.
    */
   setShooters(points: readonly THREE.Vector3[], count: number): void;
+  /**
+   * What each reported shooter is carrying, in the same order `setShooters` was
+   * given. Call it immediately after, with the array `squad.sampleShooterKinds`
+   * filled — the two are strided identically, so index `k` is one soldier.
+   *
+   * Omit it and every stream fires a rifle, which is what happens when the squad
+   * system is not wired up at all.
+   */
+  setShooterKinds(kinds: Uint8Array, count: number): void;
   /** Squad system: front edge and half-width of the blob, once per tick. */
   setMuzzle(x: number, y: number, z: number, halfWidth: number): void;
   /** Manual volley from a muzzle line centred on (x, y, z). */
@@ -814,6 +842,11 @@ class Bullets implements BulletSystem, BulletView {
   /** The part of a stream's aim error that does NOT change per shot, in units
    *  of the tier's spread. This is what makes a stream a line. */
   readonly #streamAim = new Float32Array(MAX_STREAMS);
+  /** What each stream's soldier carries: 0 rifle, 1 minigun, 2 launcher. */
+  readonly #streamKind = new Uint8Array(MAX_STREAMS);
+  /** Which entry of the last report each stream was strided from, so the kinds
+   *  can be looked up with exactly the same stride the positions used. */
+  readonly #streamSource = new Int16Array(MAX_STREAMS);
   /** Unit-disc slot used to place streams with no reported soldier behind them.
    *  Vogel spiral, matching the squad's own layout. */
   readonly #slotCos = new Float32Array(MAX_STREAMS);
@@ -873,6 +906,16 @@ class Bullets implements BulletSystem, BulletView {
 
   // ------------------------------------------------------------------ public
 
+  setShooterKinds(kinds: Uint8Array, count: number): void {
+    // Reads through `#streamSource`, which `setShooters` filled with the report
+    // index each stream was taken from. Re-deriving the stride here instead
+    // would work right up until one of the two strides changed.
+    for (let s = 0; s < this.#reportedCount; s++) {
+      const i = this.#streamSource[s]!;
+      this.#streamKind[s] = i >= 0 && i < count && i < kinds.length ? kinds[i]! : 0;
+    }
+  }
+
   setShooters(points: readonly THREE.Vector3[], count: number): void {
     const n = Math.min(count, points.length);
     if (n <= 0) {
@@ -891,6 +934,7 @@ class Bullets implements BulletSystem, BulletView {
         this.#reportedCount = s;
         return;
       }
+      this.#streamSource[s] = i;
       this.#streamX[s] = p.x;
       this.#streamY[s] = p.y;
       this.#streamZ[s] = p.z;
@@ -1037,6 +1081,7 @@ class Bullets implements BulletSystem, BulletView {
           age < 0 ? 0 : age,
           this.#shotIndex % flashStride === 0 ? 1 : 0,
           axis,
+          this.#streamKind[s] === 2,
         );
       }
     }
@@ -1106,11 +1151,18 @@ class Bullets implements BulletSystem, BulletView {
       if (life < t.fadeTime) k *= life / t.fadeTime;
       if (age < t.hotTime) k *= 1 + t.hotBoost * (1 - age / t.hotTime);
 
-      const dart = this.#style[id] === STYLE_DART;
+      const style = this.#style[id];
+      const rocket = style === STYLE_ROCKET;
+      // A rocket draws with the WARM sprite, not the dart's. The dart texture is
+      // authored cyan, so tinting it orange multiplies to olive — the tint can
+      // only darken what the texture already has. Routing rockets through the
+      // tracer batch is what actually makes them orange, and it costs nothing
+      // because both batches were already being flushed.
+      const dart = style === STYLE_DART;
       const size = this.#size[id]!;
       const length = (dart ? t.dartLength : t.tracerLength) * size;
       const width = (dart ? t.dartWidth : t.tracerWidth) * size;
-      const tint = dart ? TINT_CYAN : TINT_WARM;
+      const tint = rocket ? TINT_ROCKET : dart ? TINT_CYAN : TINT_WARM;
 
       // Interpolate the nose, then push the sprite back by half its length so
       // the nose — not the sprite centre — sits on the collision point.
@@ -1319,13 +1371,14 @@ class Bullets implements BulletSystem, BulletView {
     age: number,
     flash: number,
     axisX: number,
+    rocket = false,
   ): void {
     if (this.#freeCount === 0) return;
     const t = this.tuning;
-    const dart = tier === 2;
+    const dart = tier === 2 || rocket;
 
-    const speed =
-      (dart ? t.dartSpeed : t.tracerSpeed) * (1 + (Math.random() - 0.5) * t.speedJitter);
+    const base = rocket ? t.dartSpeed * ROCKET_SPEED_SCALE : dart ? t.dartSpeed : t.tracerSpeed;
+    const speed = base * (1 + (Math.random() - 0.5) * t.speedJitter);
 
     // Seed the inward lean at spawn rather than waiting for the first tick of
     // `#advance`, so the sub-tick catch-up below places the round on the path it
@@ -1374,17 +1427,21 @@ class Bullets implements BulletSystem, BulletView {
     this.#life[id] = maxLife - age;
     this.#roll[id] = rollFor(vx, vy, vz);
     this.#axisX[id] = axisX;
-    this.#style[id] = dart ? STYLE_DART : STYLE_TRACER;
-    this.damage[id] = (dart ? t.dartDamage : t.tracerDamage) * this.#firepower;
+    this.#style[id] = rocket ? STYLE_ROCKET : dart ? STYLE_DART : STYLE_TRACER;
+    this.damage[id] =
+      (dart ? t.dartDamage : t.tracerDamage) * this.#firepower * (rocket ? ROCKET_DAMAGE : 1);
     // Length tracks speed so a faster round is a longer streak, and a little
-    // per-bullet variance stops the stream reading as clones.
-    const nominal = dart ? t.dartSpeed : t.tracerSpeed;
-    this.#size[id] = (speed / nominal) * (0.88 + Math.random() * 0.24);
+    // per-bullet variance stops the stream reading as clones. A rocket is scaled
+    // UP against that rule on purpose — it is slow, so speed alone would make it
+    // the smallest thing on screen when it needs to be the largest.
+    const nominal = rocket ? t.dartSpeed * ROCKET_SPEED_SCALE : dart ? t.dartSpeed : t.tracerSpeed;
+    this.#size[id] =
+      (speed / nominal) * (0.88 + Math.random() * 0.24) * (rocket ? ROCKET_SIZE : 1);
 
     // The caller decides — the flash stride is derived from the live shot rate
     // so one soldier flashes on every round and a thousand do not strobe.
     if (flash !== 0) {
-      const tint = dart ? FLAME_CYAN : FLAME_WARM;
+      const tint = rocket || !dart ? FLAME_WARM : FLAME_CYAN;
       this.#muzzles.spawn(
         ox,
         oy,

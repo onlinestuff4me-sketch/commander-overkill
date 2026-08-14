@@ -44,6 +44,21 @@ export interface WorldState {
   /** Squad health, 0..1. Owned by the game; drives the green bar. */
   health: number;
   /**
+   * How many troops are carrying a MINIGUN and a ROCKET LAUNCHER.
+   *
+   * Counts, not multipliers, and that is the point. `firepower` and `fireRate`
+   * below are still the numbers the weapon model runs on, but they are DERIVED
+   * from these now — because a multiplier is a thing you read in a chip and a
+   * count is a thing you can see. Ten rocketeers means ten soldiers in the crowd
+   * carrying tubes and ten streams firing rockets; that is what a pickup is
+   * supposed to buy.
+   *
+   * Owned by the game, never allowed to exceed `troops`, and disjoint from each
+   * other and from `elites` — the squad hands out one special job per soldier.
+   */
+  gunners: number;
+  rocketeers: number;
+  /**
    * Damage multiplier on every round, from collected weapon pickups. 1 at the
    * start of a run.
    *
@@ -113,6 +128,8 @@ export function createWorld(center: THREE.Vector3): WorldState {
     firepower: 1,
     fireRate: 1,
     elites: 0,
+    gunners: 0,
+    rocketeers: 0,
     zoom: 1,
   };
 }

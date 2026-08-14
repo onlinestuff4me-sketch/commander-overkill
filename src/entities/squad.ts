@@ -252,6 +252,29 @@ const DEATH_TINT_RAMP = 4;
 const ELITE_TINT = [1.22, 0.86, 0.3] as const;
 const ELITE_SCALE = 1.34;
 
+/**
+ * CARRIERS — troops wearing a minigun or a rocket launcher.
+ *
+ * A weapon pickup used to be a multiplier on a chip and nothing else, which
+ * Mischa put plainly: getting a rocket launcher with a 10 on it should mean ten
+ * soldiers are carrying rocket launchers and firing rockets. So the weapon is
+ * drawn, on those soldiers, as its own instanced mesh riding the carrier's
+ * shoulder — the body underneath is an ordinary soldier, which keeps it to one
+ * extra draw call per weapon kind instead of a second body geometry per type.
+ *
+ * The tints are multipliers on the baked vertex colours (see DEATH_TINT); they
+ * are subtler than the elite gold because the weapon on the shoulder is already
+ * doing the identifying, and three loud colours in one crowd is mush.
+ */
+const GUNNER_TINT = [0.86, 0.96, 1.18] as const;
+const ROCKETEER_TINT = [1.16, 0.9, 0.78] as const;
+/** Where a shouldered weapon sits, in unmodified unit space. Level with the
+ *  helmet so it breaks the crowd's outline from above, which is the only angle
+ *  this camera really has. */
+const KIT_X = -0.2;
+const KIT_Y = 1.16;
+const KIT_Z = 0.06;
+
 /** Run-in-place bob. abs(sin) doubles the rate, so ~2.7 footfalls/second. */
 const BOB_HEIGHT = 0.105;
 const BOB_RATE = 8.5;
@@ -362,6 +385,13 @@ const COLOR_SKIN = 0xe8b98c;
  *  against the road. Wood stock behind it for the reference's two-tone. */
 const COLOR_RIFLE_METAL = 0x6f7684;
 const COLOR_RIFLE_WOOD = 0x7a4f2c;
+
+/** Carried-weapon palette. Matched to the pickups that grant them so the object
+ *  you shot off a barrel is recognisably the object now on a soldier's back. */
+const KIT_GUNMETAL = 0x4a5568;
+const KIT_STEEL = 0x9aa6ba;
+const KIT_BRASS = 0xd8a13a;
+const KIT_WARHEAD = 0xd8452f;
 
 /** Baked-in forward lean. Costs nothing at runtime (it is part of the merged
  *  geometry) and does most of the work of selling "running" that a vertical bob
@@ -497,6 +527,17 @@ export interface SquadSystem extends System {
   sampleShooters(out: THREE.Vector3[], max: number): number;
 
   /**
+   * What each sampled shooter is CARRYING, written into `kinds` alongside the
+   * positions `sampleShooters` wrote: 0 rifle, 1 minigun, 2 rocket launcher.
+   *
+   * On the API because a rocketeer has to fire rockets, and the bullet system
+   * has no way to know which of its streams belongs to one. The index matches
+   * `sampleShooters` exactly — same `k`, same soldier — so the two calls can be
+   * made back to back against the same buffers.
+   */
+  sampleShooterKinds(kinds: Uint8Array, max: number): number;
+
+  /**
    * Positions of units that APPEARED since the last call, drained.
    *
    * So a `+1` can be drawn over the soldier it is counting rather than
@@ -542,10 +583,21 @@ class Squad implements SquadSystem {
   /** Slots that appeared / began dying this tick, drained by the orchestrator. */
   #spawnQueue: number[] = [];
   #deathQueue: number[] = [];
-  /** Live elite count, clamped to the troop count. Mirrors `world.elites`. */
+  /**
+   * Live counts of each special job, clamped so they fit the crowd.
+   *
+   * They share ONE strided sequence of slots — elites first, then gunners, then
+   * rocketeers — so no soldier is ever handed two jobs and the three groups stay
+   * mixed evenly through the crowd rather than clumping by type.
+   */
   #elites = 0;
-  /** Slots `0, stride, 2·stride, …` are the elites. See the note in update(). */
+  #gunners = 0;
+  #rocketeers = 0;
+  /** Slots `0, stride, 2·stride, …` hold the specials. See the note in update(). */
   #eliteStride = 1;
+  /** Weapon meshes, drawn at the carriers' shoulders. */
+  #gunnerKit: THREE.InstancedMesh;
+  #rocketKit: THREE.InstancedMesh;
 
   // --- centre steering ---
   #centerX = 0;
@@ -630,6 +682,18 @@ class Squad implements SquadSystem {
     for (let i = 0; i < MAX_TROOPS; i++) this.#body.setColorAt(i, white);
     this.#body.instanceColor!.setUsage(THREE.DynamicDrawUsage);
     scene.add(this.#body);
+
+    // One instanced mesh per weapon kind, drawn at its carriers' shoulders. Two
+    // draw calls for every carrier on screen, and only when there are any.
+    const kitMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.#gunnerKit = new THREE.InstancedMesh(buildMinigunKit(), kitMat, MAX_TROOPS);
+    this.#rocketKit = new THREE.InstancedMesh(buildRocketKit(), kitMat, MAX_TROOPS);
+    for (const kit of [this.#gunnerKit, this.#rocketKit]) {
+      kit.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      kit.frustumCulled = false;
+      kit.count = 0;
+      scene.add(kit);
+    }
 
     // --- drop shadows ---
     this.#shadowTexture = buildShadowTexture();
@@ -747,6 +811,31 @@ class Squad implements SquadSystem {
     return written;
   }
 
+  sampleShooterKinds(kinds: Uint8Array, max: number): number {
+    const limit = Math.min(max, kinds.length, this.#count);
+    if (limit <= 0) return 0;
+    // Identical index arithmetic to `sampleShooters`, deliberately duplicated
+    // rather than shared: the two are read together and a divergence between
+    // them would put a rocket in an ordinary soldier's hands, which is precisely
+    // the kind of bug that is invisible until someone films it.
+    const stride = this.#count / limit;
+    const specialStride = this.#eliteStride;
+    const elites = this.#elites;
+    const gunners = this.#gunners;
+    const rocketeers = this.#rocketeers;
+    for (let k = 0; k < limit; k++) {
+      const i = Math.min(this.#count - 1, Math.floor(k * stride));
+      let kind = 0;
+      if (i % specialStride === 0) {
+        const rank = i / specialStride;
+        if (rank >= elites && rank < elites + gunners) kind = 1;
+        else if (rank >= elites + gunners && rank < elites + gunners + rocketeers) kind = 2;
+      }
+      kinds[k] = kind;
+    }
+    return limit;
+  }
+
   takeSpawns(out: THREE.Vector3[], max: number): number {
     return this.#drain(this.#spawnQueue, out, max);
   }
@@ -781,13 +870,22 @@ class Squad implements SquadSystem {
     this.#reshape(world.zoom);
     // Clamped here rather than trusted: an elite is a slot index, and a slot
     // index past the live count would paint a body that is already falling.
-    this.#elites = Math.min(this.#count, Math.max(0, Math.floor(world.elites)));
+    // One job per soldier: each kind takes what is left after the ones before
+    // it, so the three can never overlap however the orchestrator clamps them.
+    const room = this.#count;
+    this.#elites = Math.min(room, Math.max(0, Math.floor(world.elites)));
+    this.#gunners = Math.min(room - this.#elites, Math.max(0, Math.floor(world.gunners)));
+    this.#rocketeers = Math.min(
+      room - this.#elites - this.#gunners,
+      Math.max(0, Math.floor(world.rocketeers)),
+    );
+    const specials = this.#elites + this.#gunners + this.#rocketeers;
     // SPREAD, NOT STACKED. Slot order is a Vogel spiral with r = sqrt(i/(n-1)),
     // so slots 0..E-1 are the innermost E units — six elites landed on top of
     // each other in the middle of the blob and read as one gold platform. Taking
     // every `stride`-th slot instead walks them from the centre out to the rim,
     // which is what makes them look like veterans mixed through a crowd.
-    this.#eliteStride = this.#elites > 0 ? Math.max(1, Math.floor(this.#count / this.#elites)) : 1;
+    this.#eliteStride = specials > 0 ? Math.max(1, Math.floor(this.#count / specials)) : 1;
 
     // The centre travels the whole road at every size. A crowd wider than the
     // road overhangs it, which is what the reference does and what keeps a big
@@ -956,7 +1054,11 @@ class Squad implements SquadSystem {
     quat.identity();
 
     const elites = this.#elites;
+    const gunners = this.#gunners;
+    const rocketeers = this.#rocketeers;
     const stride = this.#eliteStride;
+    let gunnerCount = 0;
+    let rocketCount = 0;
     const tint = this.#body.instanceColor!;
     const tints = tint.array as Float32Array;
     let tintDirty = false;
@@ -967,7 +1069,17 @@ class Squad implements SquadSystem {
       const z = lerp(this.#prevZ[i]!, this.#posZ[i]!, alpha);
       const y = lerp(this.#prevBob[i]!, this.#bob[i]!, alpha);
       const p = lerp(this.#prevPop[i]!, this.#pop[i]!, alpha);
-      const elite = i % stride === 0 && i / stride < elites;
+      // Which job, if any, this slot holds. One strided sequence, banded:
+      // elites take the first `elites` special slots, gunners the next, and
+      // rocketeers the rest. `job` is 0 none, 1 elite, 2 gunner, 3 rocketeer.
+      let job = 0;
+      if (i % stride === 0) {
+        const rank = i / stride;
+        if (rank < elites) job = 1;
+        else if (rank < elites + gunners) job = 2;
+        else if (rank < elites + gunners + rocketeers) job = 3;
+      }
+      const elite = job === 1;
       const s = p * UNIT_SCALE * (elite ? ELITE_SCALE : 1);
 
       // Dying beats elite: a gold soldier going down still has to flash red, or
@@ -980,10 +1092,11 @@ class Squad implements SquadSystem {
         cr = 1 + f * (DEATH_TINT[0] - 1);
         cg = 1 + f * (DEATH_TINT[1] - 1);
         cb = 1 + f * (DEATH_TINT[2] - 1);
-      } else if (elite) {
-        cr = ELITE_TINT[0];
-        cg = ELITE_TINT[1];
-        cb = ELITE_TINT[2];
+      } else if (job !== 0) {
+        const tint = job === 1 ? ELITE_TINT : job === 2 ? GUNNER_TINT : ROCKETEER_TINT;
+        cr = tint[0];
+        cg = tint[1];
+        cb = tint[2];
       }
       const o = i * 3;
       // Compared rather than written blind: the whole buffer re-uploads on any
@@ -1009,6 +1122,17 @@ class Squad implements SquadSystem {
       m.compose(pos, quat, scl);
       this.#body.setMatrixAt(i, m);
 
+      // The weapon rides the same transform as its carrier, offset to the
+      // shoulder in unit space so it inherits the bob, the pop and the topple
+      // for free.
+      if (job >= 2 && fall === 0) {
+        pos.set(x + KIT_X * s, y + KIT_Y * s, z + KIT_Z * s);
+        scl.set(s, s, s);
+        m.compose(pos, quat, scl);
+        if (job === 2) this.#gunnerKit.setMatrixAt(gunnerCount++, m);
+        else this.#rocketKit.setMatrixAt(rocketCount++, m);
+      }
+
       // The shadow stays welded to the ground and shrinks as the unit rises —
       // that gap is the only cue that tells the eye the bob is a jump and not
       // the whole road moving.
@@ -1025,6 +1149,10 @@ class Squad implements SquadSystem {
     this.#body.instanceMatrix.needsUpdate = true;
     this.#shadow.instanceMatrix.needsUpdate = true;
     if (tintDirty) tint.needsUpdate = true;
+    this.#gunnerKit.count = gunnerCount;
+    this.#rocketKit.count = rocketCount;
+    this.#gunnerKit.instanceMatrix.needsUpdate = true;
+    this.#rocketKit.instanceMatrix.needsUpdate = true;
 
     const showBar = this.#count >= HP_BAR_MIN_TROOPS;
     this.#barGroup.visible = showBar;
@@ -1041,7 +1169,12 @@ class Squad implements SquadSystem {
     if (this.#disposed) return;
     this.#disposed = true;
 
-    this.#scene.remove(this.#body, this.#shadow, this.#barGroup);
+    this.#scene.remove(this.#body, this.#shadow, this.#barGroup, this.#gunnerKit, this.#rocketKit);
+    for (const kit of [this.#gunnerKit, this.#rocketKit]) {
+      kit.geometry.dispose();
+      kit.dispose();
+    }
+    (this.#gunnerKit.material as THREE.Material).dispose();
     this.#body.geometry.dispose();
     (this.#body.material as THREE.Material).dispose();
     this.#body.dispose();
@@ -1261,6 +1394,64 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   const merged = mergeParts(parts);
   // Lean pivots about the feet so the soles stay on the shadow.
   merged.rotateX(-BODY_LEAN);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * A shouldered MINIGUN — a rotary barrel cluster on a blocky receiver.
+ *
+ * Deliberately the same silhouette language as the pickup that grants it
+ * (`entities/pickups.ts`), because the whole job of this mesh is to connect "the
+ * thing I shot off that barrel" to "that soldier is now carrying it". Six
+ * barrels rather than one: at 40 px the cluster is the only part that reads, and
+ * a single tube would just be the rifle every other soldier already has.
+ */
+function buildMinigunKit(): THREE.BufferGeometry {
+  const parts: Part[] = [];
+  const body = new THREE.BoxGeometry(0.17, 0.17, 0.26);
+  body.translate(0, 0, 0.06);
+  parts.push({ geo: body, color: COLOR_HELMET });
+  const drum = new THREE.CylinderGeometry(0.09, 0.09, 0.1, 8);
+  drum.rotateX(Math.PI / 2);
+  drum.translate(0, 0, -0.06);
+  parts.push({ geo: drum, color: KIT_BRASS });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const b = new THREE.CylinderGeometry(0.022, 0.022, 0.34, 4);
+    b.rotateX(Math.PI / 2);
+    b.translate(Math.cos(a) * 0.042, Math.sin(a) * 0.042, -0.26);
+    parts.push({ geo: b, color: KIT_STEEL });
+  }
+  const merged = mergeParts(parts);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * A shouldered ROCKET LAUNCHER — a long tube with a fat red warhead.
+ *
+ * The warhead is the read: it is the one saturated red on a friendly unit, and
+ * it is what tells you at a glance which of your soldiers is about to put a
+ * rocket downrange. Angled up so the tube breaks the crowd's outline the same
+ * way the rifle does.
+ */
+function buildRocketKit(): THREE.BufferGeometry {
+  const parts: Part[] = [];
+  const tube = new THREE.CylinderGeometry(0.06, 0.06, 0.56, 6);
+  tube.rotateX(Math.PI / 2);
+  parts.push({ geo: tube, color: KIT_GUNMETAL });
+  const head = new THREE.ConeGeometry(0.095, 0.22, 6);
+  head.rotateX(-Math.PI / 2);
+  head.translate(0, 0, -0.34);
+  parts.push({ geo: head, color: KIT_WARHEAD });
+  const grip = new THREE.BoxGeometry(0.06, 0.11, 0.08);
+  grip.translate(0, -0.09, 0.1);
+  parts.push({ geo: grip, color: KIT_GUNMETAL });
+  const merged = mergeParts(parts);
+  // Pitched up and swung out for the same reason the rifle is — see RIFLE_PITCH.
+  merged.rotateX(0.34);
+  merged.rotateY(-0.42);
   merged.computeBoundingSphere();
   return merged;
 }

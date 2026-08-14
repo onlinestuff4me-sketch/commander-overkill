@@ -89,6 +89,36 @@ const MAX_BARS = MAX_UNITS;
 const HIT_FLASH = 0.09;
 
 /**
+ * DEATH, in seconds and metres per second.
+ *
+ * A walker used to blink out of existence the instant the pack's health crossed
+ * its threshold, so a wave of eight died as eight things disappearing. The body
+ * is now thrown back along the round that killed it, tumbles, and shrinks out —
+ * which is what makes a kill something you watch rather than a counter ticking.
+ *
+ * Thrown toward +Z on purpose: the player shoots from down-corridor, so a body
+ * flung that way is going where the bullet was, and reads as impact rather than
+ * as a ragdoll deciding for itself.
+ */
+const DEATH_TIME = 0.62;
+const DEATH_LIFT = 5.2;
+const DEATH_KNOCK = 3.6;
+const DEATH_SPREAD = 2.2;
+const DEATH_SPIN = 11;
+const DEATH_GRAVITY = 15;
+/** Fraction of the death spent at full size before the body shrinks out. */
+const DEATH_HOLD = 0.45;
+
+/** Puffs alive at once. A pack is eight bodies and several packs can die in the
+ *  same second, so this is sized for the burst rather than the average. */
+const PUFF_CAPACITY = 48;
+const PUFF_TIME = 0.42;
+const PUFF_START = 0.5;
+const PUFF_GROW = 1.9;
+/** Metres/second a puff drifts upward as it expands. */
+const PUFF_RISE = 1.1;
+
+/**
  * Fake contact shadow. No shadow maps in this project by design, but the
  * reference seats every figure on the road with one and a crowd without them
  * hovers. Offset matches the scene's key light at (4, 10, 6).
@@ -217,6 +247,26 @@ interface Walker {
   ox: number;
   oz: number;
   phase: number;
+  /**
+   * Seconds left of this walker's death, or 0 when it is alive or truly free.
+   *
+   * A walker used to simply stop being drawn the instant the pack's health
+   * crossed its threshold, so a wave of eight died as eight things blinking out
+   * of existence. A body that is thrown, tumbles and shrinks costs one flag and
+   * six floats, and it is the difference between a counter going down and a kill
+   * you can watch.
+   */
+  die: number;
+  /** World position at the moment of death — a dying walker is detached from
+   *  its unit, which may itself already be gone. */
+  dx: number;
+  dy: number;
+  dz: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  spin: number;
+  roll: number;
 }
 
 const _m = new THREE.Matrix4();
@@ -342,7 +392,44 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   }
 
   const crowd: Walker[] = [];
-  for (let i = 0; i < MAX_WALKERS; i++) crowd.push({ unit: -1, ox: 0, oz: 0, phase: 0 });
+  for (let i = 0; i < MAX_WALKERS; i++) {
+    crowd.push({
+      unit: -1, ox: 0, oz: 0, phase: 0,
+      die: 0, dx: 0, dy: 0, dz: 0, vx: 0, vy: 0, vz: 0, spin: 0, roll: 0,
+    });
+  }
+
+  /* ---- death puffs ------------------------------------------------------ */
+  // One billboard quad per puff, normal-blended. NOT additive: our sky sits at
+  // 0.9 in blue, so an additive puff clips to white against it — the same trap
+  // documented in entities/pickups.ts and barrels.ts.
+  const puffTex = puffTexture();
+  const puffMat = new THREE.MeshBasicMaterial({
+    map: puffTex,
+    transparent: true,
+    depthWrite: false,
+    fog: false,
+  });
+  const puffs = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), puffMat, PUFF_CAPACITY);
+  puffs.frustumCulled = false;
+  puffs.count = PUFF_CAPACITY;
+  puffs.renderOrder = 4;
+  object.add(puffs);
+  const puffLife = new Float32Array(PUFF_CAPACITY);
+  const puffX = new Float32Array(PUFF_CAPACITY);
+  const puffY = new Float32Array(PUFF_CAPACITY);
+  const puffZ = new Float32Array(PUFF_CAPACITY);
+  let puffCursor = 0;
+
+  /** Kick a death puff. Oldest slot wins when the pool is full — a puff that is
+   *  half-faded is the cheapest thing on screen to lose. */
+  function puff(x: number, y: number, z: number): void {
+    const i = puffCursor++ % PUFF_CAPACITY;
+    puffLife[i] = PUFF_TIME;
+    puffX[i] = x;
+    puffY[i] = y;
+    puffZ[i] = z;
+  }
 
   /** Elite instance slot per unit id, so a unit keeps its instance while alive. */
   const eliteSlotOf = new Int16Array(MAX_UNITS).fill(-1);
@@ -388,7 +475,14 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
     return -1;
   }
 
-  function releaseWalkers(unitId: number, keep: number): void {
+  /**
+   * Thin a pack to `keep` walkers, KILLING the difference rather than deleting
+   * it: each one is detached from its unit at its current world position, thrown
+   * away from the shot, and left to tumble for `DEATH_TIME` before its slot is
+   * reused. `silent` skips that for a pack being cleared wholesale.
+   */
+  function releaseWalkers(unitId: number, keep: number, silent = false): void {
+    const u = units[unitId];
     // Walk backwards so the pack sheds its stragglers first — the crowd shrinks
     // from the edges inward, which reads as casualties rather than a resize.
     let found = 0;
@@ -396,7 +490,24 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       const w = crowd[i];
       if (!w || w.unit !== unitId) continue;
       found++;
-      if (found > keep) w.unit = -1;
+      if (found <= keep) continue;
+      w.unit = -1;
+      if (silent || !u) {
+        w.die = 0;
+        continue;
+      }
+      w.die = DEATH_TIME;
+      w.dx = u.x + w.ox;
+      w.dy = u.y;
+      w.dz = u.z + w.oz;
+      // Thrown back and up — the player is shooting from -Z, so the body goes
+      // with the round rather than in an arbitrary direction.
+      w.vx = (Math.random() - 0.5) * DEATH_SPREAD;
+      w.vy = DEATH_LIFT * (0.7 + Math.random() * 0.6);
+      w.vz = DEATH_KNOCK * (0.6 + Math.random() * 0.8);
+      w.spin = (Math.random() - 0.5) * DEATH_SPIN;
+      w.roll = 0;
+      puff(w.dx, w.dy + 0.5, w.dz);
     }
   }
 
@@ -405,7 +516,9 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
     u.bar = -1;
     live--;
     if (u.kind === "pack") {
-      releaseWalkers(id, 0);
+      // A unit that was KILLED sheds bodies; one recycled off the end of the
+      // corridor or wiped by a reset just goes.
+      releaseWalkers(id, 0, !killed);
       u.crowdAlive = 0;
     } else {
       const slot = eliteSlotOf[id] ?? -1;
@@ -434,6 +547,7 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
         const w = crowd[i];
         if (!w || w.unit >= 0) continue;
         w.unit = id;
+      w.die = 0;
         // Ellipse wider than deep, matching the reference's loose road-blocking
         // clusters. Squared radius keeps the middle denser than the rim.
         const a = Math.random() * Math.PI * 2;
@@ -612,6 +726,35 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
 
     update(dt, world) {
       clock += dt;
+
+      // Dying bodies belong to the WORLD, not to their unit — the unit may be
+      // gone. They ride the corridor scroll on top of their own throw, or a
+      // corpse hangs in space while the road slides out from under it.
+      for (let i = 0; i < MAX_WALKERS; i++) {
+        const w = crowd[i];
+        if (!w || w.die <= 0) continue;
+        w.die -= dt;
+        w.vy -= DEATH_GRAVITY * dt;
+        w.dx += w.vx * dt;
+        w.dy += w.vy * dt;
+        w.dz += (w.vz + world.scrollSpeed) * dt;
+        w.roll += w.spin * dt;
+        if (w.dy < 0.05) {
+          w.dy = 0.05;
+          w.vy = -w.vy * 0.28;
+          w.vx *= 0.5;
+          w.vz *= 0.5;
+          w.spin *= 0.35;
+        }
+        if (w.die <= 0) w.die = 0;
+      }
+
+      for (let i = 0; i < PUFF_CAPACITY; i++) {
+        if (puffLife[i]! <= 0) continue;
+        puffLife[i] = Math.max(0, puffLife[i]! - dt);
+        puffZ[i] = puffZ[i]! + world.scrollSpeed * dt;
+        puffY[i] = puffY[i]! + PUFF_RISE * dt;
+      }
       const breachZ = world.squadCenter.z - 0.7;
 
       for (let i = 0; i < MAX_UNITS; i++) {
@@ -653,6 +796,22 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       for (let i = 0; i < MAX_WALKERS; i++) {
         const w = crowd[i];
         const u = w && w.unit >= 0 ? units[w.unit] : undefined;
+        if (w && w.die > 0) {
+          // Tumbling body. Held at full size for most of the throw so it is
+          // legible falling, then shrunk out rather than popped.
+          const t = 1 - w.die / DEATH_TIME;
+          const s = t < DEATH_HOLD ? 1 : 1 - (t - DEATH_HOLD) / (1 - DEATH_HOLD);
+          _pos.set(w.dx, w.dy, w.dz);
+          _e.set(w.roll, w.roll * 0.4, w.roll * 0.7);
+          _q.setFromEuler(_e);
+          _scl.setScalar(Math.max(0, s));
+          _m.compose(_pos, _q, _scl);
+          walkers.setMatrixAt(i, _m);
+          walkers.setColorAt(i, _col.setRGB(1, 1, 1));
+          _m.compose(_ZERO, _q.identity(), _NOSCALE);
+          shadows.setMatrixAt(i, _m);
+          continue;
+        }
         if (!w || !u || !u.alive) {
           _m.compose(_ZERO, _q.identity(), _NOSCALE);
           walkers.setMatrixAt(i, _m);
@@ -762,6 +921,28 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       barBacks.instanceMatrix.needsUpdate = true;
       barFills.instanceMatrix.needsUpdate = true;
       shadows.instanceMatrix.needsUpdate = true;
+
+      for (let i = 0; i < PUFF_CAPACITY; i++) {
+        const life = puffLife[i]!;
+        if (life <= 0) {
+          _m.compose(_ZERO, _q.identity(), _NOSCALE);
+          puffs.setMatrixAt(i, _m);
+          continue;
+        }
+        // Expands and fades. Alpha rides the instance colour rather than the
+        // material, so one draw call covers every puff at its own age.
+        const t = 1 - life / PUFF_TIME;
+        const size = PUFF_START + PUFF_GROW * t;
+        _pos.set(puffX[i]!, puffY[i]!, puffZ[i]!);
+        _scl.set(size, size, 1);
+        _m.compose(_pos, BILLBOARD, _scl);
+        puffs.setMatrixAt(i, _m);
+        // Hot at the start, ashen at the end.
+        const k = 1 - t;
+        puffs.setColorAt(i, _col.setRGB(1, 0.42 + k * 0.35, 0.22 + k * 0.2));
+      }
+      puffs.instanceMatrix.needsUpdate = true;
+      if (puffs.instanceColor) puffs.instanceColor.needsUpdate = true;
     },
 
     dispose() {
@@ -777,6 +958,10 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       barFillGeo.dispose();
       shadowGeo.dispose();
       shadowMat.dispose();
+      puffs.geometry.dispose();
+      puffMat.dispose();
+      puffTex.dispose();
+      puffs.dispose();
       shadowTex.dispose();
       shadows.dispose();
       walkerMat.dispose();
@@ -892,6 +1077,28 @@ function place(geo: THREE.BufferGeometry, x: number, y: number, z: number): THRE
  * slightly, because "it is not one of mine" is the first thing the shape has to
  * answer and the second is "how many".
  */
+/**
+ * Soft round puff, brightest just off centre so it reads as a burst rather than
+ * a dot. Authored in sRGB like every other canvas texture here.
+ */
+function puffTexture(): THREE.CanvasTexture {
+  const s = 64;
+  const c = document.createElement("canvas");
+  c.width = s;
+  c.height = s;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, "rgba(255,255,255,0.95)");
+  g.addColorStop(0.32, "rgba(255,236,190,0.8)");
+  g.addColorStop(0.66, "rgba(210,150,110,0.34)");
+  g.addColorStop(1, "rgba(180,140,120,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 function buildWalker(): THREE.BufferGeometry {
   const h = WALKER_HEIGHT;
   return mergeParts([

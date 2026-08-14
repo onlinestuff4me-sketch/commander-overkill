@@ -182,7 +182,7 @@ const JACKPOT_MULTIPLE = 2.8;
  * the commitment the strategic rule is for; splitting between two blues fills
  * neither.
  */
-const REWARD_COMMIT_SHARE = 0.62;
+const REWARD_COMMIT_SHARE = 0.78;
 /**
  * The same share, for a squad under `MERCY_TROOPS`.
  *
@@ -197,7 +197,7 @@ const REWARD_COMMIT_SHARE = 0.62;
  * the "obvious lost opportunities, rarely fatal" the brief asks of levels 1–2.
  * The share snaps back to the real one the moment the squad can absorb a miss.
  */
-const MERCY_COMMIT_SHARE = 0.28;
+const MERCY_COMMIT_SHARE = 0.36;
 
 /**
  * Where a row of `count` segments sits on the road, and how wide it is.
