@@ -635,6 +635,20 @@ class Squad implements SquadSystem {
     this.#centerX += (targetX - this.#centerX) * Math.min(1, CENTER_FOLLOW * dt);
     this.center.set(this.#centerX, 0, SQUAD_Z);
     world.squadCenter.copy(this.center);
+    // NOT `radiusX`. That is the ellipse the crowd is LAID OUT in, and at small
+    // counts it is deliberately inflated by SMALL_SQUAD_FLARE so three men read
+    // as a rank rather than a huddle. A gate asks a different question — how
+    // much road do these bodies actually cover — and answering it with the
+    // layout radius made a single soldier 2.2 m wide, so he straddled a segment
+    // boundary and paid half of a reward AND half of a penalty at once.
+    //
+    // n bodies packed at roughly one body-width apart cover 0.3·sqrt(n) either
+    // side, so that is the honest extent, capped by the layout radius once the
+    // crowd is big enough for the road to be the binding constraint.
+    world.squadHalfWidth = Math.min(
+      this.#radiusX,
+      UNIT_HALF_WIDTH * UNIT_SCALE * Math.sqrt(Math.max(1, this.#count)),
+    );
 
     const count = this.#count;
     const n = Math.max(count, this.#high);

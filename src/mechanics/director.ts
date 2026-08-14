@@ -37,42 +37,79 @@
  * orchestrator executes it. That is what keeps the corridor's pacing — the part
  * a playtest complaint actually lands on — checkable in plain Node.
  *
- * It is also deliberately still a fixed cycle. Beats (rest, build, surge) are
- * the next step and they replace `CYCLE`, not this scheduler.
+ * The scheduler is separate from the RHYTHM. It guarantees spacing; `BEATS`
+ * decides what phrase comes next. Changing the feel of a run means editing the
+ * beat table, not this loop.
  */
 
 /** What the director can ask the orchestrator to put on the road. */
 export type Placement = "gate" | "barrels" | "walkers";
 
 /**
- * The repeating pattern, one entry per placement.
+ * BEATS — the corridor's rhythm, as data.
  *
- * Ratios matter more than the literal order: 5 gates to 2 barrel rows to 1
- * walker pack. Gates are the game — they get the majority of the slots and
- * never sit more than two non-gates apart, so the corridor always has a
- * decision on it.
+ * A fixed cycle of placements got the spacing right and the SHAPE wrong: content
+ * arrived at a constant rate forever, so there was nothing to feel relief from
+ * and nothing to brace for. A beat is a short authored phrase of placements plus
+ * the road that follows it, and stringing beats together is what gives a run a
+ * pulse instead of a metronome.
  *
- * One cycle runs 98 m (six gaps at `SPACING`, two at `GATE_TO_GATE_SPACING`),
- * so gates land every ~19.6 m on average against the 16 m the gate module used
- * to run at alone. Slightly sparser, and the road is no longer shared with a
- * barrel row landing on the same plane.
- *
- * Note the wrap: the last two entries and the first are all gates, so a cycle
- * boundary produces a run of three decisions at the wider gate spacing. That
- * reads as a deliberate cluster rather than a fault, but it is a side effect of
- * the ordering rather than something chosen — worth authoring properly when
- * beats replace this.
+ * `rest` is the one that does the most work and is the easiest to cut. Empty
+ * road feels like nothing is happening, which is exactly the point — a surge
+ * only lands as a surge if something quieter came before it.
  */
-const CYCLE: readonly Placement[] = [
-  "gate",
-  "barrels",
-  "gate",
-  "walkers",
-  "gate",
-  "barrels",
-  "gate",
-  "gate",
+export interface Beat {
+  readonly name: string;
+  /** What this beat puts on the road, in order. */
+  readonly places: readonly Placement[];
+  /** Extra metres of clear road AFTER the beat, on top of the normal spacing. */
+  readonly trail: number;
+  /** Relative likelihood of being picked. Not a probability — normalised. */
+  readonly weight: number;
+}
+
+export const BEATS: readonly Beat[] = [
+  // The choice is the whole game, so it gets to happen on clear road with
+  // nothing competing for the eye. The most common beat, deliberately.
+  { name: "decision", places: ["gate"], trail: 0, weight: 4 },
+
+  // Somewhere for the guns to matter, with no decision on top of it.
+  { name: "combat", places: ["barrels", "walkers"], trail: 4, weight: 2 },
+
+  // The two mechanics interacting: shoot through the cover, then immediately
+  // choose. This is the beat a fixed cycle could only produce by accident.
+  { name: "gauntlet", places: ["barrels", "gate"], trail: 2, weight: 2 },
+
+  // A run of decisions with no combat between them — pure steering.
+  { name: "fork", places: ["gate", "gate"], trail: 3, weight: 2 },
+
+  // Nothing at all. Cheap to build, and it is what makes the rest read.
+  { name: "rest", places: [], trail: 16, weight: 1 },
+
+  // Loud on purpose: cover, a wave, and a decision in quick succession.
+  { name: "surge", places: ["walkers", "barrels", "gate"], trail: 6, weight: 1 },
 ];
+
+/**
+ * Beats that may not follow themselves, by name.
+ *
+ * Two rests in a row is fifty metres of empty road, and two surges is a wall.
+ * Everything else is allowed to repeat — a run of decisions is a legitimate
+ * phrase, and forbidding all repeats makes the sequence feel shuffled rather
+ * than composed.
+ */
+const NO_REPEAT: ReadonlySet<string> = new Set(["rest", "surge"]);
+
+/**
+ * Most placements the corridor may run without a gate before the next beat is
+ * forced to contain one.
+ *
+ * `surge` alone puts two non-gates down before its decision, and two combat
+ * beats back to back put four. Without this the mix can legitimately roll six
+ * or seven placements of scenery, which is a long time to hold a thumb still in
+ * a game whose entire input is choosing a lane.
+ */
+const DRY_LIMIT = 3;
 
 /**
  * Metres of road between one placement and the next.
@@ -148,41 +185,105 @@ export function createRng(seed: number): () => number {
 
 export function createDirector(seed = 0x5eed): DirectorState {
   const rng = createRng(seed);
-  let index = 0;
+  const totalWeight = BEATS.reduce((a, b) => a + b.weight, 0);
+
+  let beat: Beat = BEATS[0]!;
+  let step = 0;
+  let lastName = "";
   let count = 0;
   let pending = 0;
+  let gap = 0;
+  /** Trail owed by beats already finished, folded into the next gap. */
+  let trail = 0;
+  /** Placements since the last gate. Gates are the game; see DRY_LIMIT. */
+  let sinceGate = 0;
 
   /**
-   * Distance from the placement just made to the one after it, jittered.
-   * Depends on both, because separating two decisions matters more than
-   * separating a decision from scenery.
+   * Weighted pick, with two structural refusals.
+   *
+   * `rest` and `surge` may not repeat — two rests is fifty metres of nothing and
+   * two surges is a wall. And once the corridor has gone DRY_LIMIT placements
+   * without a decision, only beats containing a gate are eligible: the mix is
+   * allowed to wander, but never so far that the player is just watching.
+   */
+  function pickBeat(): Beat {
+    const neededGate = sinceGate >= DRY_LIMIT;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      let roll = rng() * totalWeight;
+      for (const b of BEATS) {
+        roll -= b.weight;
+        if (roll > 0) continue;
+        if (b.name === lastName && NO_REPEAT.has(b.name)) break;
+        // Leads with a gate, not merely contains one: `surge` puts two
+        // placements down before its decision, so accepting it here would let
+        // the dry streak run two past the limit it is supposed to enforce.
+        if (neededGate && b.places[0] !== "gate") break;
+        return b;
+      }
+    }
+    // Fall back to the plainest beat that satisfies the constraint rather than
+    // to BEATS[0] blindly, so the guarantee holds even on an unlucky streak.
+    return neededGate ? (BEATS.find((b) => b.places[0] === "gate") ?? BEATS[0]!) : BEATS[0]!;
+  }
+
+  /**
+   * Make `beat.places[step]` a real placement, walking past any beat with
+   * nothing left in it and banking its trail. This is how `rest` works: it
+   * places nothing and contributes only empty road.
+   */
+  function ensureReady(): void {
+    for (let guard = 0; guard < 16 && step >= beat.places.length; guard++) {
+      trail += beat.trail;
+      lastName = beat.name;
+      beat = pickBeat();
+      step = 0;
+    }
+  }
+
+  /**
+   * Distance from the placement just made to the one after it. Depends on both,
+   * because separating two decisions matters more than separating a decision
+   * from scenery — and `to` is resolved ACROSS the beat boundary, or a beat
+   * ending on a gate followed by one starting on a gate would get the narrow
+   * gap and put two decisions 8 m apart.
    */
   function nextGap(from: Placement, to: Placement): number {
     const base = from === "gate" && to === "gate" ? GATE_TO_GATE_SPACING : SPACING;
-    return Math.max(SPACING / 3, base + (rng() * 2 - 1) * SPACING_JITTER);
+    const jitter = (rng() * 2 - 1) * SPACING_JITTER;
+    const owed = trail;
+    trail = 0;
+    return Math.max(SPACING / 3, base + jitter) + owed;
   }
-
-  // The first placement is due immediately, so the run never opens on empty
-  // road while the cursor walks up to its first gap.
-  let gap = 0;
 
   return {
     advance(metres) {
       pending += metres;
       if (pending < gap) return null;
       pending -= gap;
-      const placement = CYCLE[index % CYCLE.length]!;
-      index++;
+
+      ensureReady();
+      const placement = beat.places[step];
+      if (!placement) return null;
+      step++;
       count++;
-      gap = nextGap(placement, CYCLE[index % CYCLE.length]!);
+      sinceGate = placement === "gate" ? 0 : sinceGate + 1;
+
+      // Resolve the FOLLOWING placement before measuring the gap, so the
+      // spacing rule sees across the beat boundary.
+      ensureReady();
+      gap = nextGap(placement, beat.places[step] ?? "barrels");
       return placement;
     },
 
     reset() {
-      index = 0;
+      beat = BEATS[0]!;
+      step = 0;
+      lastName = "";
       count = 0;
       pending = 0;
       gap = 0;
+      trail = 0;
+      sinceGate = 0;
     },
 
     get count() {
@@ -199,4 +300,4 @@ export function createDirector(seed = 0x5eed): DirectorState {
 export const DIRECTOR_SPACING = SPACING;
 export const DIRECTOR_GATE_SPACING = GATE_TO_GATE_SPACING;
 export const DIRECTOR_SPACING_JITTER = SPACING_JITTER;
-export const DIRECTOR_CYCLE = CYCLE;
+

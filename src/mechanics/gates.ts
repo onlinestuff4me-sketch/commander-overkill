@@ -170,6 +170,14 @@ export interface GateSegmentSpec {
 export interface GateHit {
   /** The integer that was ON SCREEN when the squad crossed. Never the raw float. */
   value: number;
+  /**
+   * Troops this segment actually moved, already scaled by how much of the crowd
+   * went through it and rounded to whole soldiers. THIS is what to pay — `value`
+   * is the number painted on the panel, which a wide army only partly collects.
+   */
+  troops: number;
+  /** Fraction of the crowd that passed through this segment, 0..1. */
+  share: number;
   /** True for a blue segment. Equivalent to `value > 0`, kept explicit for clarity. */
   reward: boolean;
   /** Index within the row, left to right. */
@@ -184,6 +192,15 @@ export interface GateSystem extends System {
   setAutoSpawn(enabled: boolean): void;
   spawnRow(segments: readonly (number | GateSegmentSpec)[], z?: number): boolean;
   onResolve(handler: (hit: GateHit) => void): () => void;
+  /**
+   * Lane [-1, 1] of the highest-value segment in the nearest unresolved row, or
+   * NaN when the corridor holds no decision.
+   *
+   * For the dev autopilot: measuring a failure rate or a growth curve needs a
+   * player, and "steer at the best number" is the simplest one that is not
+   * obviously worse than a human. It is not AI and is not shipped behaviour.
+   */
+  bestLane(): number;
   readonly activeRows: number;
   nextGateZ(): number;
   reset(): void;
@@ -360,7 +377,17 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
   for (let i = 0; i < MAX_ROWS; i++) rows.push(buildRow());
 
   const handlers = new Set<(hit: GateHit) => void>();
-  const hit: GateHit = { value: 0, reward: false, segmentIndex: 0, x: 0, z: 0 };
+  const hit: GateHit = {
+    value: 0,
+    troops: 0,
+    share: 0,
+    reward: false,
+    segmentIndex: 0,
+    x: 0,
+    z: 0,
+  };
+  /** Per-segment overlap with the crowd, reused so resolving never allocates. */
+  const overlap = new Float64Array(MAX_SEGMENTS);
   const dummy = new THREE.Object3D();
   const tint = new THREE.Color();
 
@@ -593,30 +620,89 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     row.posts.instanceMatrix.needsUpdate = true;
   }
 
-  function resolve(row: Row, crossX: number): void {
-    let index = 0;
-    for (let i = 0; i < row.count; i++) {
-      const seg = row.segments[i];
-      if (!seg) continue;
-      // Clamped containment: the barrier spans the whole road, so a squad that
-      // has drifted onto the kerb still commits to the nearest segment rather
-      // than slipping through the gap and paying nothing.
-      if (crossX <= seg.centerX + seg.halfWidth) {
-        index = i;
-        break;
-      }
-      index = i;
-    }
-
-    const chosen = row.segments[index];
+  /**
+   * Resolve a row against the crowd that just drove through it.
+   *
+   * EVERY SEGMENT THE CROWD OVERLAPS PAYS, in proportion to how much of the army
+   * went through it. This used to pick the single segment under the squad's
+   * CENTRE, which was defensible when a squad was ~1.6 m wide and a segment was
+   * 2.3 m — the centre was the crowd. It stopped being true when the crowd grew
+   * to span the road: at 5 m wide it straddles two or three segments of a 6.8 m
+   * barrier, so most of what the player drove through was being discarded. A red
+   * segment that three-quarters of the army walked into charged nothing at all
+   * as long as the middle man was over the blue.
+   *
+   * Full value per touched segment was the other option and it is worse: a wide
+   * army overlaps everything, so it would collect every reward and every penalty
+   * in every row and the choice would evaporate. Weighting by overlap keeps the
+   * decision — steering changes the MIX, and a narrow squad still takes one
+   * segment whole.
+   */
+  function resolve(row: Row, crossX: number, halfWidth: number): void {
     row.resolved = true;
     row.burst = 0;
 
-    if (chosen) {
-      hit.value = Math.floor(chosen.value);
-      hit.reward = chosen.reward;
-      hit.segmentIndex = index;
-      hit.x = chosen.centerX;
+    // A squad narrower than this is treated as a point, so a 1-troop opening
+    // still takes exactly one segment at full value rather than smearing across
+    // a boundary it is only technically touching.
+    const half = Math.max(0.15, halfWidth);
+    const left = crossX - half;
+    const right = crossX + half;
+    const span = right - left;
+
+    let covered = 0;
+    // The segment the crowd committed to most — it gets the loudest exit pop.
+    let dominant = 0;
+    let dominantOverlap = -1;
+    for (let i = 0; i < row.count; i++) {
+      const seg = row.segments[i];
+      if (!seg) continue;
+      const lo = Math.max(left, seg.centerX - seg.halfWidth);
+      const hi = Math.min(right, seg.centerX + seg.halfWidth);
+      overlap[i] = Math.max(0, hi - lo);
+      covered += overlap[i]!;
+      if (overlap[i]! > dominantOverlap) {
+        dominantOverlap = overlap[i]!;
+        dominant = i;
+      }
+    }
+
+    // The barrier spans the whole road, but a squad steered onto the kerb hangs
+    // off the end of it. Anything outside the outermost segments is folded into
+    // the nearest one, so overhanging the road never lets troops through free.
+    if (covered <= 1e-4) {
+      let nearest = 0;
+      let best = Infinity;
+      for (let i = 0; i < row.count; i++) {
+        const seg = row.segments[i];
+        if (!seg) continue;
+        const d = Math.abs(seg.centerX - crossX);
+        if (d < best) {
+          best = d;
+          nearest = i;
+        }
+      }
+      for (let i = 0; i < row.count; i++) overlap[i] = i === nearest ? span : 0;
+      covered = span;
+      dominant = nearest;
+    }
+
+    for (let i = 0; i < row.count; i++) {
+      const seg = row.segments[i];
+      if (!seg || !overlap[i]) continue;
+      const share = overlap[i]! / covered;
+      const value = Math.floor(seg.value);
+      // Rounded per segment, because "how many of your troops went through
+      // here" is a whole number of soldiers and it is what the floaters draw.
+      const troops = value < 0 ? -Math.round(-value * share) : Math.round(value * share);
+      if (troops === 0) continue;
+
+      hit.value = value;
+      hit.troops = troops;
+      hit.share = share;
+      hit.reward = seg.reward;
+      hit.segmentIndex = i;
+      hit.x = seg.centerX;
       hit.z = row.z;
       // Copy before iterating: a handler is allowed to unsubscribe itself.
       for (const handler of [...handlers]) handler(hit);
@@ -634,9 +720,9 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       seg.wx = (rng() - 0.5) * BURST_SPIN;
       seg.wy = (rng() - 0.5) * BURST_SPIN * 0.6;
       seg.wz = (rng() - 0.5) * BURST_SPIN;
-      // The segment you actually took gets the loudest exit — that pop is half
-      // the reason the choice feels like it landed.
-      if (i === index) seg.pop = 1.6;
+      // The segment MOST of the crowd went through gets the loudest exit — that
+      // pop is half the reason the choice feels like it landed.
+      if (i === dominant) seg.pop = 1.6;
     }
     for (let i = 0; i < row.postCount; i++) {
       const post = row.postState[i];
@@ -706,7 +792,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
               }
             }
           }
-          if (row.z >= crossZ) resolve(row, crossX);
+          if (row.z >= crossZ) resolve(row, crossX, world.squadHalfWidth);
         } else {
           row.burst += dt;
           for (let i = 0; i < row.count; i++) {
@@ -779,6 +865,30 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       return () => {
         handlers.delete(handler);
       };
+    },
+
+    bestLane() {
+      let bestZ = -Infinity;
+      let target = NaN;
+      for (const row of rows) {
+        if (!row.active || row.resolved) continue;
+        // Rows travel toward the camera, so the nearest pending decision is the
+        // one with the largest z.
+        if (row.z <= bestZ) continue;
+        let bestValue = -Infinity;
+        let bestX = 0;
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (!seg) continue;
+          if (seg.value > bestValue) {
+            bestValue = seg.value;
+            bestX = seg.centerX;
+          }
+        }
+        bestZ = row.z;
+        target = bestX / CORRIDOR_HALF_WIDTH;
+      }
+      return target;
     },
 
     get activeRows() {

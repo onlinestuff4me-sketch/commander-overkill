@@ -26,6 +26,15 @@ export interface WorldState {
   squadLane: number;
   /** World-space centre of the squad blob. Owned by the squad system. */
   squadCenter: THREE.Vector3;
+  /**
+   * Half-width of the squad blob in world units. Owned by the squad system.
+   *
+   * On the contract because a gate row has to know how much of the road the
+   * crowd actually covers: a 5 m wide army straddles two or three segments of a
+   * 6.8 m barrier, and resolving only the one under its centre was silently
+   * throwing away most of what the player just drove through.
+   */
+  squadHalfWidth: number;
   /** Metres/second the world slides toward the camera. Owned by the game. */
   scrollSpeed: number;
   /** Seconds since the run began. Owned by the game. */
@@ -61,6 +70,7 @@ export function createWorld(center: THREE.Vector3): WorldState {
     troops: 1,
     squadLane: 0,
     squadCenter: center,
+    squadHalfWidth: 0,
     // 9 m/s put barrels and gates past the player before there was time to
     // shoot them, so rewards went unearned — the decision arrived and left
     // before you could act on it. 6 stretches the approach from ~7s to ~11s.

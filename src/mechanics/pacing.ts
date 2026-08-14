@@ -127,6 +127,43 @@ export function laneCoverage(streamHalfWidth: number): number {
 }
 
 /**
+ * Share of one approach's damage a single enemy is worth soaking.
+ *
+ * Enemies had FIXED hit points — 30 for an elite, 4 for a walker — chosen when
+ * a big army did ~140 damage per pass. A 120-troop army now delivers thousands,
+ * so every enemy died the instant it entered the 22 m bullet range, ~20 m from
+ * the player. They never arrived, never threatened anything, and the whole
+ * combat beat read as scenery dissolving at a distance.
+ *
+ * Scaling them off the same weapon model as barrels fixes that at every army
+ * size at once. The shares look large next to `BARREL_PASS_SHARE` only because a
+ * pack is eight bodies sharing one curtain: at 0.1 each, a full pack is 80% of
+ * an approach's damage and therefore takes most of the approach to clear, which
+ * is what lets a wave close the distance instead of evaporating at 20 m.
+ */
+export const WALKER_PASS_SHARE = 0.1;
+export const ELITE_PASS_SHARE = 0.3;
+
+/**
+ * Hit points for one enemy, derived from what the army can actually deliver.
+ *
+ * Floored at 1 so a single soldier can still kill something, and floored again
+ * at the old fixed values so early enemies never become weaker than they were —
+ * this is meant to stop enemies evaporating, not to make the opening trivial.
+ */
+export function enemyHp(
+  troops: number,
+  tier: WeaponTier,
+  tuning: BulletTuning,
+  streamHalfWidth: number,
+  share: number,
+  floor: number,
+): number {
+  const perPass = damagePerPass(tier, troops, tuning) * laneCoverage(streamHalfWidth);
+  return Math.max(floor, Math.round(perPass * share));
+}
+
+/**
  * Troops paid out for destroying a barrel worth `maxHp`.
  *
  * A barrel's numeral is its hit points, not its payout — paying it back 1:1
