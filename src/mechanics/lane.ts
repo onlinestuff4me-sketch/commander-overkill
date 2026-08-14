@@ -66,21 +66,14 @@ const TOWER_INSET = 1.3;
 /** Spacing and the first tower's distance. 38 m is ~6 s at the default scroll —
  *  often enough to mark progress, rare enough that a tower arriving is an event. */
 const TOWER_GAP = 40;
-/**
- * Distance from the corridor's NEAR end to the first tower.
- *
- * 30, not 14. Towers are static while the road scrolls under them, so a tower
- * placed close to the near end is not a landmark you drive past — it is a red
- * crossbeam permanently parked over the top of the frame. Pushed back until the
- * nearest one sits in the middle distance, where it frames the road instead of
- * blocking it.
- */
+/** Where the first tower starts, measured back from the corridor's near end.
+ *  Only sets the opening phase now that towers scroll and recycle. */
 const TOWER_NEAR = 30;
-const TOWER_COUNT = Math.ceil(CORRIDOR_LENGTH / TOWER_GAP) + 1;
+const TOWER_COUNT = Math.ceil(CORRIDOR_LENGTH / TOWER_GAP) + 2;
+/** Once a tower is this far behind the camera it wraps to the back of the set.
+ *  The camera sits at z ≈ 9.5, so this is comfortably out of frame. */
+const TOWER_RECYCLE_Z = 26;
 
-/** Where a tower's shadow falls, in metres. Down-screen-right, because the key
- *  light sits up-screen-left — see the note in core/renderer.ts. Every fake
- *  shadow in the project uses the same sign convention. */
 /** Gap between the vertical hangers dropping from the main cable. Close enough
  *  to read as a run of them at speed, far enough apart not to become a wall. */
 const HANGER_GAP = 7.5;
@@ -89,6 +82,9 @@ const HANGER_GAP = 7.5;
  *  metres turned both kerbs into a picket fence and shut the view down. */
 const HANGER_SPAN = 0.55;
 
+/** Where a tower's shadow falls, in metres. Down-screen-right, because the key
+ *  light sits up-screen-left — see the note in core/renderer.ts. Every fake
+ *  shadow in the project uses the same sign convention. */
 const SHADOW_OFF_X = 0.9;
 const SHADOW_OFF_Z = 1.4;
 
@@ -119,7 +115,13 @@ export function laneToX(lane: number): number {
  * right for a light that never moves, and it is the single strongest depth cue
  * in the reference footage.
  */
-export function createCorridor(): THREE.Group {
+export interface CorridorSystem {
+  readonly object: THREE.Group;
+  /** Scroll the towers toward the camera and recycle them. Call once per tick. */
+  update(dt: number, scrollSpeed: number): void;
+}
+
+export function createCorridor(): CorridorSystem {
   const group = new THREE.Group();
 
   const road = new THREE.Mesh(
@@ -161,9 +163,27 @@ export function createCorridor(): THREE.Group {
   group.add(deck);
 
   addRailings(group, road.position.z);
-  addTowers(group, road.position.z);
+  const towers = addTowers(group, road.position.z);
 
-  return group;
+  return {
+    object: group,
+    update(dt, scrollSpeed) {
+      // TOWERS MOVE. They used to be nailed to fixed Z, which is defensible —
+      // the world is what scrolls, not the bridge — and completely wrong to look
+      // at: you never passed one, so the only large object in the scene never
+      // changed, and its shadow lay across the deck like paint. Playtest read
+      // exactly that: "the shadows do not move realistically".
+      //
+      // Scrolling them costs one group translation each and buys the single best
+      // moment in the environment — driving under a tower while its shadow
+      // sweeps back over the crowd.
+      const step = scrollSpeed * dt;
+      for (const t of towers) {
+        t.position.z += step;
+        if (t.position.z > TOWER_RECYCLE_Z) t.position.z -= TOWER_GAP * towers.length;
+      }
+    },
+  };
 }
 
 /**
@@ -210,7 +230,8 @@ function addRailings(group: THREE.Group, roadZ: number): void {
  * driving along — and because the road texture scrolls underneath them, nothing
  * about that reads as wrong.
  */
-function addTowers(group: THREE.Group, roadZ: number): void {
+function addTowers(group: THREE.Group, roadZ: number): THREE.Group[] {
+  const towers: THREE.Group[] = [];
   const towerMat = new THREE.MeshLambertMaterial({ color: TOWER_COLOR });
   const cableMat = new THREE.MeshLambertMaterial({ color: CABLE_COLOR });
   // Fake shadows: unlit, translucent, no fog. Fog would tint them toward the
@@ -225,7 +246,13 @@ function addTowers(group: THREE.Group, roadZ: number): void {
   });
 
   for (let i = 0; i < TOWER_COUNT; i++) {
-    const z = roadZ + CORRIDOR_LENGTH / 2 - TOWER_NEAR - i * TOWER_GAP;
+    // Each tower is its own group so the whole assembly — legs, beams and the
+    // shadow it throws — scrolls as one thing and cannot come apart.
+    const tower = new THREE.Group();
+    tower.position.z = roadZ + CORRIDOR_LENGTH / 2 - TOWER_NEAR - i * TOWER_GAP;
+    group.add(tower);
+    towers.push(tower);
+    const z = 0;
 
     for (const side of [-1, 1]) {
       const x = side * (CORRIDOR_HALF_WIDTH + TOWER_INSET);
@@ -234,7 +261,7 @@ function addTowers(group: THREE.Group, roadZ: number): void {
         towerMat,
       );
       leg.position.set(x, TOWER_HEIGHT / 2 - DECK_THICKNESS, z);
-      group.add(leg);
+      tower.add(leg);
     }
 
     // Two crossbeams. The upper one is what turns two uprights into a gateway
@@ -245,7 +272,7 @@ function addTowers(group: THREE.Group, roadZ: number): void {
         towerMat,
       );
       beam.position.set(0, y, z);
-      group.add(beam);
+      tower.add(beam);
     }
 
     // The tower's shadow, lying across the deck. Offset down-screen-right to
@@ -257,7 +284,7 @@ function addTowers(group: THREE.Group, roadZ: number): void {
     );
     shade.rotation.x = -Math.PI / 2;
     shade.position.set(SHADOW_OFF_X, 0.014, z + SHADOW_OFF_Z);
-    group.add(shade);
+    tower.add(shade);
   }
 
   // Main cables: one long box per side, sagging is not modelled — at this
@@ -294,6 +321,8 @@ function addTowers(group: THREE.Group, roadZ: number): void {
     }
     group.add(hanger);
   }
+
+  return towers;
 }
 
 function roadTexture(): THREE.CanvasTexture {
