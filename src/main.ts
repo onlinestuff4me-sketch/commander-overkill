@@ -600,6 +600,27 @@ function seatRider(_id: number, tag: number, x: number, topY: number, z: number)
 
 // ── Collision ──────────────────────────────────────────────────────────────
 
+/**
+ * A ROCKET EXPLODES.
+ *
+ * The chain Mischa asked for, end to end: shoot a barrel carrying a launcher →
+ * some of your soldiers visibly carry launchers → their streams fire visible
+ * rockets → the rockets BLOW UP where they land and take out whatever was
+ * standing next to the thing they hit. Each link is something you can see, and
+ * the last one is the payoff — a single rocket clearing three barrels at once is
+ * the sort of thing you did not plan and want to show someone.
+ *
+ * Splash is applied by re-running the same hit tests at a wide pad. Each call
+ * finds the nearest remaining target, so `SPLASH_TARGETS` passes reach that many
+ * separate things; it is a cheap stand-in for a real radius query and it is
+ * exactly as accurate at this scale.
+ */
+const SPLASH_RADIUS = 2.6;
+const SPLASH_DAMAGE = 0.55;
+const SPLASH_TARGETS = 4;
+/** How big the blast draws, as a multiple of an ordinary impact. */
+const SPLASH_FLASH = 3.4;
+
 const BARREL_PAD = 0.2;
 /** Gates span the road, so lateral tolerance matters less than depth; this is
  *  just enough that a round grazing a segment edge still counts. */
@@ -613,6 +634,26 @@ const ENEMY_PAD = 0.32;
  * ITERATES BACKWARDS because `consume` swap-removes from `ids` — forwards would
  * skip whichever bullet got swapped into the freed slot.
  */
+/**
+ * A rocket's blast, after the round it came from has already been spent on the
+ * thing it directly hit.
+ *
+ * Deliberately NOT recursive and deliberately not applied to gates: a blast that
+ * filled reward segments would let a rocketeer fill two blues at once, which is
+ * the exact commitment the strategic rule exists to charge for.
+ */
+function detonate(x: number, y: number, z: number, dmg: number): void {
+  bullets.spawnImpact(x, y, z, SPLASH_FLASH);
+  const splash = dmg * SPLASH_DAMAGE;
+  for (let i = 0; i < SPLASH_TARGETS; i++) {
+    // Each pass takes the nearest remaining target; once both stop reporting a
+    // hit there is nothing else in the blast and the rest of the passes are free.
+    const hitBarrel = barrels.damageAt(x, z, SPLASH_RADIUS, splash) >= 0;
+    const hitEnemy = enemies.damageAt(x, z, SPLASH_RADIUS, splash) >= 0;
+    if (!hitBarrel && !hitEnemy) break;
+  }
+}
+
 function resolveHits(): void {
   const view = bullets.bullets;
   for (let i = view.count - 1; i >= 0; i--) {
@@ -626,17 +667,22 @@ function resolveHits(): void {
     // stream ends at the nearest standing one and only reaches what is behind
     // once that has come apart. A blue grows as it soaks fire and breaks itself
     // at its ceiling, which is what opens the lane.
+    const rocket = bullets.isRocket(id);
+
     if (gates.shootAt(x, z, GATE_PAD, dmg)) {
       bullets.consume(id, x, y, z);
+      if (rocket) detonate(x, y, z, dmg);
       continue;
     }
 
     if (barrels.damageAt(x, z, BARREL_PAD, dmg) >= 0) {
       bullets.consume(id, x, y, z);
+      if (rocket) detonate(x, y, z, dmg);
       continue;
     }
     if (enemies.damageAt(x, z, ENEMY_PAD, dmg) >= 0) {
       bullets.consume(id, x, y, z);
+      if (rocket) detonate(x, y, z, dmg);
     }
   }
 }

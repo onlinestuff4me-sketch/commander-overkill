@@ -478,6 +478,15 @@ export interface BulletSystem extends System {
   readonly bullets: BulletView;
   /** Despawn a bullet at its hit point and pop the impact burst. */
   consume(id: number, x: number, y: number, z: number): void;
+  /**
+   * Was this round a ROCKET? The orchestrator asks before consuming, so it can
+   * turn one hit into a blast that damages whatever else is standing nearby.
+   *
+   * On the API because splash is the orchestrator's business: bullets knows what
+   * it fired, and only main.ts knows there are barrels, enemies and gate panels
+   * for a blast to reach.
+   */
+  isRocket(id: number): boolean;
   /** Impact burst with no bullet behind it — debris hits, barrel chip-off. */
   spawnImpact(x: number, y: number, z: number, scale?: number): void;
   /** Stop/start automatic fire (cutscenes, death, gate resolution). */
@@ -970,6 +979,10 @@ class Bullets implements BulletSystem, BulletView {
   setEnabled(on: boolean): void {
     this.#enabled = on;
     if (!on) this.#fireClock = 0;
+  }
+
+  isRocket(id: number): boolean {
+    return this.#style[id] === STYLE_ROCKET;
   }
 
   consume(id: number, x: number, y: number, z: number): void {

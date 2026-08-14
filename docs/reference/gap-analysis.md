@@ -168,7 +168,80 @@ These are features, not polish, and each is its own milestone.
 
 ---
 
+---
+
+## THE DESIGN LENS (Mischa, 2026-08-14)
+
+Primitives only, indefinitely. The pitch is **Roblox, not realism**: the fun
+comes from dynamism, physics, consequence, and "I didn't think that would
+happen" — the moments people clip and share. Fidelity is not the axis we
+compete on and chasing it would cost us the axis we do.
+
+Three rules fall out of that, and they should be applied to everything below.
+
+**1. Every prize needs a visible chain.** Prize → how the troops use it → what it
+does to the world. A rocket pickup is the worked example and it is now complete
+end to end: gold launcher on a barrel → soldiers visibly carrying tubes → orange
+rockets in the stream → a blast that clears whatever was standing next to what it
+hit. Each link is something you can point at. A pickup whose chain stops at "a
+number went up" is not finished.
+
+**2. If the picture is ambiguous, label it.** Boxes and spheres have a ceiling on
+how much they can say. We do not fight that — we pick effects that translate to
+primitives, and where the shape cannot carry the meaning we put words on it. A
+clear label beats a clever silhouette nobody reads.
+
+**3. Judge every idea by "would someone clip this?"** Not "is it balanced" or "is
+it readable" — those are floors, not the goal. The question is whether it
+produces a moment worth showing someone.
+
+### Prize chains worth building next
+
+Each is a pickup, a visible carrier, and a world effect. Ranked by clip potential.
+
+| Prize | Carried as | What it does to the world |
+|---|---|---|
+| **Flamethrower** | Fat tank on the back, short nozzle | A cone of fire that LINGERS on the road; enemies walking into it keep burning after the stream has moved on |
+| **Mortar crew** | Two soldiers carrying a tube | Lobs shells that arc OVER the nearest barrier and land on whatever is behind it — the one weapon that ignores our blocking rule, and that is exactly why it is worth having |
+| **Shield bearer** | Riot shield out front | Absorbs a red gate's penalty entirely, once, then shatters. Turns a bad row into a decision you can survive on purpose |
+| **Drone** | Small unit orbiting above the crowd | Fires independently at whatever the crowd is not shooting — visibly disobeys the curtain |
+| **Magnet** | A spinning coil held aloft | Drags nearby pickups and blue segments TOWARD the crowd, so a near miss becomes a hit |
+
+The mortar and the magnet are the two that most reliably produce "wait, you can
+do that?" — both break a rule the player has already learned.
+
+### Enemies and bosses
+
+Currently one enemy type is placed (walker packs). `spawnElite()` and the
+motorcycle variant are built and never called, which remains the cheapest win in
+this document.
+
+Bosses should be **ridiculous and legible**: primitives at absurd scale, with the
+attack named on screen. Concretely buildable:
+
+- **The Roller** — a giant spiked cylinder that rolls down the corridor. It does
+  not shoot; it flattens whatever lane it is in and you must not be in that lane.
+  One cylinder, one rotation, enormous.
+- **The Spitter** — a squat boss that lobs arcing globs which leave slow-zones on
+  the deck. Punishes a crowd that has committed to one side.
+- **The Wall** — advances slowly across the full road with a huge hit-point
+  number on its face, and the ONLY way past is to out-damage it. A pure check on
+  whether you invested in firepower.
+- **The Swarm Queen** — spawns flying enemies continuously until killed. Makes
+  the flying enemy worth building first.
+
+Each wants a **name plate and an attack label** floating above it, per rule 2 —
+"CHARGING" or "SPITTING" in the same heavy outlined type the gates use. That is
+also how we make an attack readable one second before it lands, which is what
+turns a boss from unfair into a thing you dodge on purpose.
+
+---
+
 ## The one thing that needs Mischa
+
+**ANSWERED, 2026-08-14: primitives only, indefinitely.** See the design lens
+above. The original question is kept below because the reasoning is still the
+reasoning.
 
 **Do we stay procedural, or do we start bringing in real art?**
 
