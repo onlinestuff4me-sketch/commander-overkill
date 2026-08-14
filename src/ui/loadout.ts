@@ -30,10 +30,6 @@ const STYLE_ID = "cok-loadout-style";
  *  count's pulse so a barrel that pays both reads as one event. */
 const PULSE_TIME = 0.5;
 
-/** Below this a multiplier is "1×" and its chip stays hidden. Guards against a
- *  float that is 1.0000001 after a clamp. */
-const EPSILON = 1e-3;
-
 type Axis = "elites" | "rate" | "power";
 
 interface Chip {
@@ -100,8 +96,15 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
     update(dt, world) {
       const elites = Math.max(0, Math.floor(world.elites));
       set(chips.elites, String(elites), elites > 0);
-      set(chips.rate, `${world.fireRate.toFixed(1)}×`, world.fireRate > 1 + EPSILON);
-      set(chips.power, `${world.firepower.toFixed(1)}×`, world.firepower > 1 + EPSILON);
+      // COUNTS, NOT MULTIPLIERS. "1.7×" is a number you have to be told; "12" is
+      // twelve soldiers you can find in the crowd carrying miniguns, which is
+      // what the pickup actually bought. The multipliers still exist — they are
+      // derived from these in main.ts — but they are not what the player is
+      // being asked to reason about.
+      const gunners = Math.max(0, Math.floor(world.gunners));
+      const rocketeers = Math.max(0, Math.floor(world.rocketeers));
+      set(chips.rate, String(gunners), gunners > 0);
+      set(chips.power, String(rocketeers), rocketeers > 0);
 
       for (const axis of ["elites", "rate", "power"] as const) {
         const chip = chips[axis];

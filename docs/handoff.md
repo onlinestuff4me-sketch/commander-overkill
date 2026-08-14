@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3 (fourth pass)._
+_Last updated: 2026-08-14, session 3 (fifth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -15,8 +15,7 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
 **The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`:
-median **588 troops** against a 300–500 target, and **0 of 32 wiped**. A 50 s
-sample medians 99.
+median **508 troops** against a 300–500 target, and **0 of 32 wiped**.
 
 **These medians carry roughly ±25% run-to-run noise at n=16.** The distribution
 has a long tail (a good run reaches the 1200 cap, a bad one never gets going), so
@@ -147,10 +146,10 @@ the squad paints `world.elites` of them spread through the crowd, and they are
 worth `ELITE_SHOOTER_WEIGHT` (4) rifles each. That is also why they are the last
 thing you lose — ordinary losses shrink the crowd around them.
 
-What is still missing on this axis: elites only multiply the rate, so a hundred
-of them look and behave like a stronger version of the same soldier rather than a
-different unit. Unit types with their own geometry are the next real step, and
-they want a second `InstancedMesh` rather than more tint.
+Gunners and rocketeers now have their own visible kit and their own projectile.
+Elites still do not — they are a tint and a scale, so a hundred of them look like
+a stronger version of the same soldier. Giving them a distinct body is the next
+step on this axis, and the carrier meshes are the pattern to copy.
 
 ### 5. Nothing else from the RPG layer exists yet
 
@@ -369,6 +368,31 @@ per unit, so a whole eight-strong pack cost one troop — which made shooting th
 pointless and made "or fight through them", one half of every blockade, free. The
 autopilot measured it exactly: with dodging available and a flat breach cost, the
 median run went to 660 troops with zero wipes.
+
+**A WEAPON PICKUP ARMS TROOPS; IT DOES NOT RAISE A HIDDEN NUMBER.** Mischa's
+ask, verbatim: a rocket launcher with a 10 next to it should mean ten soldiers
+are carrying rocket launchers and firing rockets. So `world.gunners` and
+`world.rocketeers` are COUNTS on the contract, the squad draws the weapon on
+those soldiers (one extra instanced mesh per kind, riding the carrier's shoulder
+so it inherits the bob, the pop and the topple for free), their streams fire the
+matching projectile, and the loadout chips show the head count.
+
+`firepower` and `fireRate` still exist and are still what the weapon model runs
+on — they are DERIVED from the counts in `armCarriers()`, which is the only place
+either is written. Elites, gunners and rocketeers are disjoint: the squad hands
+out one job per soldier from a single strided sequence, and `armCarriers()` trims
+them in priority order so they can never overlap.
+
+**A rocket draws with the WARM sprite, not the dart's.** The dart texture is
+authored cyan and a tint can only darken what is already there, so tinting it
+orange multiplies to olive. Routing rockets through the tracer batch is what
+makes them orange, and it costs nothing — both batches were already flushing.
+
+**Enemies die instead of disappearing.** A walker used to blink out the instant
+the pack's health crossed its threshold. It is now detached from its unit at its
+world position, thrown back along the round that killed it, tumbled and shrunk
+out over `DEATH_TIME`, with a puff. Dying bodies ride the corridor scroll on
+their own — their unit may already be gone.
 
 **THE CLIMB COMES FROM YOUR BULLETS AND FROM NOTHING ELSE.** A slow per-second
 baseline used to run in `update()` for every unbroken blue whether or not a round
