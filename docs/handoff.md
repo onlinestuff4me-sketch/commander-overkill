@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3 (fifth pass)._
+_Last updated: 2026-08-14, session 3 (eighth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -15,7 +15,15 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
 **The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`:
-median **508 troops** against a 300–500 target, and **0 of 32 wiped**.
+median **230 troops** against a 300–500 target, and **5 of 32 wiped**.
+
+**That median is BELOW target and was left there deliberately.** It fell from 508
+when a missed blue started costing you the number you had reached (see the
+decisions), which is a real cost the old economy never charged. The tempting fix
+is to raise reward spans until the median comes back, and that would only hide
+the new mechanic — the honest read is that the punishing reward needs the LEVEL
+system to place it deliberately rather than at the same rate all run. Measure
+before touching `REWARD_SPAN_BASE`; the number is real, not noise.
 
 **These medians carry roughly ±25% run-to-run noise at n=16.** The distribution
 has a long tail (a good run reaches the 1200 cap, a bad one never gets going), so
@@ -29,13 +37,14 @@ misses its first few blues stays too small to fill the next. Nothing ever reache
 zero troops, so `wiped` stays 0 while the run is over in every way that matters.
 Count stalls alongside wipes when the level system lands.
 
-**Zero wipes is the honest bad news and should not be tuned away.** Since a row
-can be walked around, a player who reads the board correctly cannot be killed —
-every option is upside against less upside. Fixing that properly means **levels**
-(see #1): late levels need content that is unavoidable by construction, which
-`ROW_WIDTHS` has the hooks for and nothing yet drives. Inflating penalties now
-would only make the mid-game miserable without putting the difficulty anywhere in
-particular.
+**The game can now kill you, and that is new.** For most of this project the
+wipe rate was a flat zero: since a row can be walked around, a player who read
+the board correctly could not be killed, and every option was upside against less
+upside. The punishing reward changed that — walking into a blue you have not
+filled TAKES the number instead of giving it, so a bad commitment is now a loss
+rather than a missed gain. 5 of 32 is close to the brief's mid-game band by
+accident, not by design; it still needs **levels** (see #1) to put the difficulty
+somewhere in particular rather than at a constant rate all run.
 
 `sample()` takes a reaction time because a bot re-deciding sixty times a second
 measures the game played perfectly; 0.3 s is the setting the brief's per-level
@@ -51,10 +60,12 @@ clip it. Do not reopen the art question.
 
 **Where the LOOK still falls short:**
 [`docs/reference/gap-analysis.md`](reference/gap-analysis.md) audits our build
-against the reference game screen by screen and ranks what to build. Short
-version: the mechanics are close, the WORLD is the gap — the reference is a
-suspension bridge over water and ours is a grey strip on a green field, and that
-one difference does more work than everything else on the list combined.
+against the reference game screen by screen and ranks what to build. Its headline
+finding — that the WORLD was the gap, a suspension bridge over water against our
+grey strip on a green field — **is now built** (`mechanics/lane.ts`: water deck,
+railings, scrolling towers, hangers). What is still open on that list is
+**bosses**, the rest of the prize chains (flamethrower, mortar, shield bearer,
+drone, magnet), and the chibi soldier proportions.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -166,6 +177,16 @@ Elites still do not — they are a tint and a scale, so a hundred of them look l
 a stronger version of the same soldier. Giving them a distinct body is the next
 step on this axis, and the carrier meshes are the pattern to copy.
 
+### 4b. Bosses are the biggest missing SPECTACLE, and the bar is already there
+
+`ui/bossbar.ts` is a working health bar driven by nothing but enemy kills, and
+`docs/reference/gap-analysis.md` specs four bosses (Roller, Spitter, Wall, Swarm
+Queen) with name plates and labelled attacks. This is the item most likely to
+produce what Mischa is actually asking the game for — a moment somebody would
+clip — and it is also the natural end-of-level boundary that item #1 needs. Build
+it after levels, not before: a boss with nowhere to sit is a set piece that
+interrupts a run at random.
+
 ### 5. Nothing else from the RPG layer exists yet
 
 The brief's actual differentiator is untouched: commander skills on cooldowns,
@@ -182,8 +203,8 @@ against the `WorldState`/`System` contract without a single interface change.
 
 | Module | State |
 |---|---|
-| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. Per-instance tint: crimson death flash, gold elites at 1.34× scale. |
-| `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, three weapon tiers, pooled at 768. Fires a **parallel curtain** — convergence is off. Exports the derived damage model. |
+| `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. Per-instance tint: crimson death flash, gold elites at 1.5× scale. Carries the minigun and launcher kits on the shoulder at `KIT_SCALE`. |
+| `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, three weapon tiers, pooled at 768. Fires a **parallel curtain** — convergence is off. Rockets are real geometry on their own instanced mesh, fired at a third the rate for six times the damage. Exports the derived damage model. |
 | `mechanics/gates.ts` | Segmented red/blue barriers, heavy outlined numerals, the climbing blue reward, burst on pass or on hitting its ceiling. Blocks fire per segment. Row composition and the reward span are pure exported functions. |
 | `mechanics/director.ts` | The conductor. One cursor owns every placement in the corridor, in weighted beats with pair-dependent spacing, and now with a lateral SIDE per placement — which is what lets a beat put a guard in front of a prize or two prizes on opposite kerbs. Pure, seeded, tested. |
 | `ui/troopcount.ts`, `ui/netpop.ts`, `ui/loadout.ts` | Army size top-left, the net `+14`/`−12` over the crowd, and what you are carrying. All DOM, all silent until they have something to say. |
@@ -192,7 +213,8 @@ against the `WorldState`/`System` contract without a single interface change.
 | `entities/enemies.ts` | Instanced walkers, gold rim-lit elites, motorcycle variant, HP bars. **Its `elite` is an ENEMY kind** and has nothing to do with `world.elites`, which is the player's gold veterans. Unfortunate collision; rename the enemy one if it ever causes a bug. |
 | `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
-| `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. Four draw calls. |
+| `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
+| `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
 
@@ -398,10 +420,35 @@ either is written. Elites, gunners and rocketeers are disjoint: the squad hands
 out one job per soldier from a single strided sequence, and `armCarriers()` trims
 them in priority order so they can never overlap.
 
-**A rocket draws with the WARM sprite, not the dart's.** The dart texture is
-authored cyan and a tint can only darken what is already there, so tinting it
-orange multiplies to olive. Routing rockets through the tracer batch is what
-makes them orange, and it costs nothing — both batches were already flushing.
+**A ROCKET IS GEOMETRY, AND "BIGGER AND MORE OBVIOUS" HAS TWO CEILINGS.**
+Mischa's standing instruction on upgrades is to err on the side of bigger and
+more obvious: a rocket should look like a rocket, a minigun like a minigun. A
+camera-facing quad can only say "bigger and warmer than the rounds beside it", so
+rockets are now an `InstancedMesh` (`rocketGeometry()` in `mechanics/bullets.ts`)
+— red cone, grey body, three fins, a stub of flame — rotated onto its own
+velocity, so one banking across the road banks with it. One draw call that stays
+empty until a launcher is earned. The carried kits went up the same way:
+`buildMinigunKit()` is a brass drum behind six long barrels bound at a muzzle
+ring, `buildRocketKit()` has a warhead and a blast cone so it has a front and a
+back at forty pixels.
+
+Both ceilings were found by screenshot, and both matter more than the sizes:
+
+1. **Occlusion.** At `ROCKET_MESH_SCALE = 0.55` and `KIT_SCALE = 1.9` the rockets
+   filled the corridor and hid the barriers behind them, and a crowd of launchers
+   was a thicket of tubes with no visible men under it. Past obvious is not being
+   able to see the game, which costs the player the decision it is all about.
+   They are 0.19 and 1.2.
+2. **Density, which compounds with size.** Rockets fly at 45% of a dart's speed,
+   so they live 2.2× as long and the same fire rate leaves twice as many on
+   screen. Shrinking them treated the symptom. `ROCKET_SHOT_STRIDE = 3` skips two
+   shots in three and `ROCKET_DAMAGE = 6` carries the difference, so a
+   rocketeer's total output is IDENTICAL and only the object count falls. Change
+   one of that pair and you have silently retuned the weapon.
+
+The dart sprite is still authored cyan, and a tint can only darken what is
+already there — that is why tinting it orange gave olive, and why the warm
+tracer batch exists. Keep that in mind for the next weapon.
 
 **Enemies die instead of disappearing.** A walker used to blink out the instant
 the pack's health crossed its threshold. It is now detached from its unit at its
@@ -426,8 +473,8 @@ identically at one troop and at five hundred, and the old `CLIMB_PER_DAMAGE`
 constant is gone — it tied fill speed to the absolute damage scale, so every
 weapon change silently retuned how hard rewards were to earn.
 
-The share is `MERCY_COMMIT_SHARE` (0.28) under `MERCY_TROOPS` and
-`REWARD_COMMIT_SHARE` (0.62) above it. The mercy branch is not decoration: at the
+The share is `MERCY_COMMIT_SHARE` (0.36) under `MERCY_TROOPS` and
+`REWARD_COMMIT_SHARE` (0.78) above it. The mercy branch is not decoration: at the
 full share a one-troop squad that misses its first blue is still a one-troop
 squad, so it misses the next one too, and the run stalls at the bottom forever.
 That measured as a median of 565 with a minimum of 1.
@@ -454,12 +501,21 @@ enforced rather than hoped for:
    snaps red and oversized. A reward that quietly does not arrive reads as a bug,
    and was reported as one.
 
-**BACKLOG, Mischa's idea and worth building:** a reward variant that is
-attractive but PUNISHES a miss — walk through it unfilled and you lose the number
-that was showing instead of gaining it. The hooks are all here: `seg.failed` is
-already computed in `breakSegment`, and paying `-Math.floor(seg.value)` on it is
-a one-line change plus a distinct panel colour so the player can tell the two
-kinds apart before committing.
+**A MISSED BLUE NOW TAKES THE NUMBER YOU REACHED.** This started as Mischa's
+backlog idea and he promoted it to the default: walk through a blue you have not
+filled and you lose the number that was showing instead of gaining it, in red.
+`breakSegment` computes `seg.failed` and pays `-Math.floor(seg.value)`.
+
+It is the single biggest change to the economy this project has made, and it is
+why the measured median fell from 508 to 230 and the wipe rate rose off zero. Two
+things follow from it that are easy to undo by accident:
+
+- **The autopilot has to price it, or every number it reports is wrong.**
+  `bestLane()` initially scored blues at face value, so the bot walked into
+  unfillable rewards and 16 of 32 runs wiped — a measurement artefact that looks
+  exactly like a broken economy. It now discounts a blue by `LIKELY_FILL` (0.5)
+  and only commits inside `COMMIT_Z` (−22 m). That took it to 5 of 32.
+- **Do not buy the median back by inflating rewards.** See the note at the top.
 
 **A row's penalties are capped as a whole, not per segment**
 (`ROW_PENALTY_CAP = 0.42` in `gates.ts`). A per-segment cap was correct while the
@@ -490,7 +546,7 @@ and the per-segment version is better anyway — one blue can break while its
 neighbours still stand and still block.
 
 **Additive blending needs a dark scene, and ours is not one.** Our sky is
-`0x7cc4e8`, already at 0.9 in blue, so any additive sprite over it clips to
+`0x6fbde4`, already at 0.9 in blue, so any additive sprite over it clips to
 white. The pickup rim glow was additive AND fogged (three mixes toward the fog
 colour, which additive then adds at full strength), which is why playtesting
 reported objects "encased in a white cloud". It is now a normal-blended hollow
@@ -533,6 +589,35 @@ legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
 
+**THE GAME IS ON A BRIDGE NOW, AND THE SCENERY IS WHAT MAKES IT MOVE.** The road
+sits on a deck over water with railings, and `addTowers()` (`mechanics/lane.ts`)
+scrolls suspension towers past and recycles them at `TOWER_RECYCLE_Z`. This is
+worth more than it looks: a flat road with nothing beside it gives the eye
+nothing to measure speed against, so the game read as slower than it is. The
+towers are OFF the deck on purpose — anything tall on the road itself competes
+with the barriers for attention.
+
+**Shadows move because the light does not.** Every module draws its own flat
+shadow quad at a fixed `SHADOW_OFF_X`/`SHADOW_OFF_Z`, which is the offset the
+single key light would throw. Playtesting reported shadows that "don't move
+realistically", and the fix was to make the offsets consistent across modules and
+to make the tower shadows scroll with their towers rather than sit under the
+camera. If the key light in `core/renderer.ts` ever moves, every one of those
+offsets has to move with it — they are not independent art decisions.
+
+**A PRIZE SAYS ITS OWN NAME.** Playtesting could not tell what the objects riding
+the barrels were. Primitives at forty pixels cannot distinguish a minigun from a
+recruit, so `labelTexture()` in `entities/pickups.ts` puts TROOPS / MINIGUN /
+ROCKET on a plate above each one. This is the general rule Mischa set for the
+whole project: **if a primitive cannot say it, use a text label** — do not spend
+geometry trying to make the shape self-explanatory.
+
+**No two consecutive rows may be all red.** Mischa's call, and it is a pacing
+rule rather than a fairness one: back-to-back walls with nothing to earn read as
+a corridor with no decisions in it. `rowHasReward()` reports whether a row
+carried a blue, `main.ts` remembers it in `lastRowWasDry`, and the next row is
+composed with `forceReward`.
+
 **The camera pans laterally, and it is still a pure translation.** `core/zoom.ts`
 moves the camera AND its look-at point by the same vector, so every billboard
 basis baked at module load stays correct — the same rule the dolly obeys. Sliding
@@ -568,7 +653,8 @@ ships, pinned by postcss. Revisit when postcss bumps.
    `entities/commander.ts` exists and is deliberately **not mounted**.
 4. **Do troops persist between runs**, or reset with only upgrades carrying over?
 5. **Is the corridor always a bridge**, or does the environment vary by stage?
-   Current environment is placeholder grass and sky, not the reference's bridge.
+   It is a bridge over water now; nothing varies it, and levels are the natural
+   place to hang a second environment if he wants one.
 
 ---
 
@@ -578,10 +664,11 @@ ships, pinned by postcss. Revisit when postcss bumps.
 - **The boss bar is a display with nothing behind it.** No boss entity exists;
   it is currently driven by enemy kills. It is also the obvious place to hang an
   end-of-level boundary once levels exist.
-- **Enemies and mines are thin.** Walkers exist, read as enemies, and now cost a
-  share of the army per body that reaches you. There are still no mines, enemies
-  do not shoot back, and a pack is the only enemy the director ever places —
-  `spawnElite` and the biker variant are built and unused.
+- **Enemies and mines are thin.** Walkers, gold elites and bikers all exist, read
+  as enemies, cost a share of the army per body that reaches you, and are all
+  placed by the director now (`heavies` and `charge` beats). There are still no
+  mines, enemies do not shoot back, and there is **no boss** — the gap analysis
+  specs four (Roller, Spitter, Wall, Swarm Queen) and none is built.
 - **The autopilot does not aim.** It positions the crowd but never chooses a
   segment to concentrate fire on, so it under-collects under the fill-to-earn
   rule and every economy median here is a floor. Teaching it to hold a lane until
@@ -603,7 +690,8 @@ ships, pinned by postcss. Revisit when postcss bumps.
 - **The perf overlay (`?perf`) never populates in an offscreen pane**, because
   it is driven by frame stats and rAF is throttled to zero. It works in a real
   browser.
-- **Environment art is placeholder.** Grass and blue sky, not a bridge over water.
+- **The environment does not vary.** It is one bridge over water for the whole
+  run; there is no per-stage environment and nothing changes as a level ramps.
 - **No favicon**, so every page load logs a 404 in the console. Harmless, but it
   is the one console error a verification pass will see.
 - **The reference media is 25 MB in the repo** (`reference-media/`), a 20 MB
