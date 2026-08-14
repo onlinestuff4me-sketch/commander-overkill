@@ -135,19 +135,36 @@ pacing curve is built against; treat them as decisions of record.
 | Army size at the end of a strong run | **300–500 troops** |
 | How often should a run end in failure? | **Scales by level** — see below |
 
-**Failure rate is per level, and it ramps:**
+**Failure rate is per level, and it plateaus in bands** — each ratio holds for
+longer as the levels climb:
 
 | Level | Runs that end in failure |
 |---|---|
 | 1–2 | **1 in 8** — forgiving, power fantasy |
-| 3–4 | **1 in 5** — losses start to bite |
-| 5+ | not yet decided |
+| 3 | *not specified — assumed 1 in 7, see below* |
+| 4–6 | **1 in 6** |
+| 7–10 | **1 in 5** |
+| 11–15 | **1 in 4** |
+| 16–21 | **1 in 3** |
+
+> **Gap to confirm:** level 3 was not given a band (the answer jumped from
+> "levels 1–2" to "levels 4–6"). Assumed **1 in 7** as the interpolation, which
+> keeps the early-game promise intact. Cheap to change.
+
+This also implies **~21+ levels**, which is the first time the game has had a
+stated length beyond one run.
+
+**On failure, the player chooses: retry the level, or start over.** Meta
+progression is explicitly a later revisit — but it should be kept in mind while
+building the level structure, because "what carries between attempts" is the
+hook it will hang on.
 
 Mischa's framing for the early levels, which matters as much as the number:
-risk in levels 1–2 should be about **obvious lost opportunity and small but
-meaningful troop losses**, not death. The player should clearly see what a poor
-choice cost them — both the troops it took *and* the growth it forfeited — while
-almost never being wiped out by it.
+risk in levels 1–2 should be about **lost opportunity and small but meaningful
+troop losses**, not death. The player should feel what a poor choice cost them —
+both the troops it took *and* the growth it forfeited — while almost never being
+wiped out by it. **Felt, not read**: see "Teaching consequence without asking
+anyone to read" below.
 
 What each one pins down:
 
@@ -216,18 +233,87 @@ Two floors keep the bottom of the curve sane: a penalty is never less than 1,
 and the existing mercy rule (`MERCY_TROOPS`) still guarantees a blue segment
 while the squad is tiny.
 
-### Making the lost opportunity visible
+### Teaching consequence without asking anyone to read
 
-"The player should see the consequences of not taking enough risks" is a
-feature, not a tuning value. Right now the segments you *didn't* take simply
-burst and vanish, so a missed `+9` and a missed `+1` look identical.
+An earlier draft proposed ghosting the value of the segment you did not take.
+**Rejected, and rightly** — it teaches by making the player read a number at the
+exact moment they should be watching their army. The lesson should be felt in
+the game state, not annotated on top of it.
 
-Proposal: as a row resolves, the **best segment you did not take briefly shows
-what it would have paid**, ghosted, next to what you actually got. That is the
-whole "obvious lost opportunity" ask in one mechanic, and it is what makes an
-early level teach without killing.
+Mischa's framing is about strategy across a run, not regret about one gate:
 
----
+- committing to a reward that takes longer to earn beats jumping between them
+  and arriving with nothing,
+- investing in growth early is what makes you strong enough for later waves,
+- spreading rewards across types gives balanced power, where over-investing in
+  one leaves a hole.
+
+Three mechanics, in increasing order of cost. None of them displays text.
+
+#### 1. Commitment is what makes the number climb
+
+The blue value already climbs as a gate approaches. Today it climbs **on its own
+schedule regardless of what the player does**, so there is no reward for
+committing and no cost to flitting.
+
+Change it so the climb tracks **the segment the squad is actually lined up
+with**. Stay on it and it keeps climbing; swing away and it stalls and slides
+back while the one you switched to starts low.
+
+Now lane-jumping is punished by something the player watches happen: the big
+number they abandoned visibly falls. Holding a line pays, and it pays *visibly
+more* the longer you hold. That is lesson one, with no text and no new art —
+it is a change to a value that is already on screen.
+
+*Cost:* small. `gates.ts` already owns the climb; it needs to know which segment
+the squad is aligned with, which `world.squadCenter` already provides.
+
+#### 2. Being under-powered should be felt as a wall
+
+Right now it cannot be. `barrelHp()` deliberately caps every barrel at 55% of
+what the current army can destroy in one approach — I built that so a weak squad
+would never meet an unkillable barrel. It also means **the player can never be
+too weak for anything**, which makes "you under-invested and now you are
+under-powered" impossible to express.
+
+From some level onward, lift the cap: a barrel that outlives your fire survives,
+reaches the crowd, and costs troops on impact. Nothing is announced. You simply
+watch the number on the barrel fail to reach zero in time, and then it hits you.
+
+This is the most direct "show, don't tell" available, and it is the natural home
+for the escalating failure rate — an under-invested army fails on contact rather
+than on a dice roll.
+
+*Cost:* small in code, and it is a difficulty dial rather than new content. Needs
+care: the cap is what currently guarantees the opening is winnable, so it must
+stay in force for the early levels.
+
+#### 3. Two kinds of power, so the player can be lopsided
+
+This is the one that unlocks "diversify your rewards", and it does not exist yet.
+
+`tierFor(troops)` in `main.ts` derives weapon tier **purely from troop count** —
+under 4 is tier 0, under 40 tier 1, above that tier 2. So quantity and quality
+are the same axis. **You cannot currently be a big weak army or a small elite
+one**, which means there is nothing to balance and no way to be lopsided.
+
+Split them. Troops stay the crowd; weapon tier becomes its own earnable reward
+that some gates pay instead of troops. Then the shapes the player can end up in
+become visible on their own:
+
+| What you over-invested in | What you see |
+|---|---|
+| Troops only | A huge crowd whose fire cannot break a late barrel before it arrives |
+| Weapons only | A small squad that shreds anything but gets swamped by a wave |
+| Balanced | Wide enough to cover the road, strong enough to clear it |
+
+No readout is needed: the crowd's size and the barrel's numeral falling (or not)
+say it. It also gives the reward economy a second currency, which is what makes a
+gate choice a *strategy* rather than a bigger-number check.
+
+*Cost:* medium, and it touches the weapon tier contract. Worth flagging that it
+is the first real piece of the RPG layer in `PLAN.md` Phase 2, so it is a good
+place for that work to start rather than a detour from pacing.
 
 ## What this needs that does not exist yet
 
@@ -249,8 +335,12 @@ concept has to exist**, and the penalty model has to become proportional, before
 3. Autopilot measurement (step 4) — **moved earlier on purpose**, because the
    whole difficulty ask is stated as failure rates, and a failure rate is not
    something you can eyeball. Without this we would be guessing at 1-in-8.
-4. Levels + proportional penalties + the lost-opportunity display
-5. A real boss entity — its own milestone, after the ramp is felt
+4. Levels + proportional penalties + the commitment climb (mechanic 1)
+5. Lifting the barrel cap in later levels (mechanic 2) — needs the autopilot
+   first, since it is the main dial on the failure rate
+6. Splitting troops from weapon tier (mechanic 3) — the biggest of the three,
+   and the natural start of the RPG layer rather than a pacing detour
+7. A real boss entity — its own milestone, after the ramp is felt
 
-Two things still open: the failure rate beyond level 4, and what happens when a
-run fails (replay the level, or lose the campaign).
+Open: level 3's failure band (assumed 1 in 7), and what meta progression carries
+between attempts — which only needs answering once levels exist.

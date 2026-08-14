@@ -37,7 +37,9 @@ This is the largest remaining piece of decision-free work, and there is a
 written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Nothing
 in it is blocked: Mischa has answered the three questions it asked. A run is
 **90 s to 2 min**, a strong run ends at **300–500 troops**, and the failure rate
-**scales by level** — 1 in 8 on levels 1–2, 1 in 5 on levels 3–4.
+**scales by level in plateauing bands** — 1 in 8 (levels 1–2) easing out to
+1 in 3 by level 16–21, which implies a ~21-level game. On failure the player
+picks retry-the-level or start-over; meta progression is a later revisit.
 
 That last one is not a tuning value. Penalties are absolute numbers while the
 army grows exponentially, so a `-5` is 62% of an 8-troop squad and 1.2% of a
