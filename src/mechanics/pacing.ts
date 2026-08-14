@@ -142,6 +142,8 @@ export function laneCoverage(streamHalfWidth: number): number {
  * is what lets a wave close the distance instead of evaporating at 20 m.
  */
 export const WALKER_PASS_SHARE = 0.1;
+/** Kept for the elites that still spawn as free-standing enemies. Barrel riders
+ *  are pickups now (entities/pickups.ts) and never use this. */
 export const ELITE_PASS_SHARE = 0.3;
 
 /**

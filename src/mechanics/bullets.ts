@@ -822,6 +822,9 @@ class Bullets implements BulletSystem, BulletView {
   readonly #slotRadius = new Float32Array(MAX_STREAMS);
   /** Streams filled from `setShooters` this tick; the rest are synthesised. */
   #reportedCount = 0;
+  /** Damage multiplier from weapon pickups, refreshed each tick from the world
+   *  so `#shootFrom` does not need the world threaded through it. */
+  #firepower = 1;
 
   constructor(scene: THREE.Scene) {
     this.#scene = scene;
@@ -959,6 +962,7 @@ class Bullets implements BulletSystem, BulletView {
     this.#reportedCount = 0;
     this.#muzzleReported = false;
 
+    this.#firepower = Math.max(0, world.firepower);
     if (!this.#enabled) return;
 
     // If the squad system is not wired up yet, infer the blob so the module is
@@ -970,7 +974,9 @@ class Bullets implements BulletSystem, BulletView {
     const streams = this.#layOutStreams(world.troops, reported);
     if (streams === 0) return;
 
-    const total = totalShotsPerSecond(tier, world.troops, t);
+    // Pickups multiply the rate; the governor still clamps the result, so a
+    // stack of miniguns can never overrun the pool.
+    const total = totalShotsPerSecond(tier, world.troops, t) * Math.max(0, world.fireRate);
     if (total <= 0) return;
 
     // Every stream fires at the same rate; the crowd's volume is the sum, which
@@ -1367,7 +1373,7 @@ class Bullets implements BulletSystem, BulletView {
     this.#roll[id] = rollFor(vx, vy, vz);
     this.#axisX[id] = axisX;
     this.#style[id] = dart ? STYLE_DART : STYLE_TRACER;
-    this.damage[id] = dart ? t.dartDamage : t.tracerDamage;
+    this.damage[id] = (dart ? t.dartDamage : t.tracerDamage) * this.#firepower;
     // Length tracks speed so a faster round is a longer streak, and a little
     // per-bullet variance stops the stream reading as clones.
     const nominal = dart ? t.dartSpeed : t.tracerSpeed;

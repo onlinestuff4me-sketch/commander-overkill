@@ -91,7 +91,21 @@ Worth saying plainly: the stepped camera zoom may have made this unnecessary.
 461 troops now fit on screen as one crowd. Do not build the split until
 something actually fails without it.
 
-### 4. Nothing from the RPG layer exists yet
+### 4. The RPG layer has its first piece — the rest is untouched
+
+`world.firepower` and `world.fireRate` are the QUALITY axis, raised only by
+weapon pickups off barrels, and deliberately kept out of the barrel and enemy
+hit-point models so an upgrade is a real advantage rather than something the
+difficulty curve immediately eats. Crowd size is the quantity axis. Those being
+separate is what makes "a big weak army" and "a small elite one" expressible at
+all — `tierFor(troops)` previously made quality a pure function of quantity.
+
+What is still missing: there is no readout for either multiplier, so the player
+can feel a minigun but cannot see what they have. And a recruit currently pays
+plain troops rather than joining as a genuinely stronger unit; making it one
+needs a per-unit strength in the squad, which the crowd does not model.
+
+### 5. Nothing else from the RPG layer exists yet
 
 The brief's actual differentiator is untouched: commander skills on cooldowns,
 tactical airstrikes, unit evolution trees, formations, the progression shop, and
@@ -115,6 +129,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `entities/enemies.ts` | Instanced walkers, gold rim-lit elites, motorcycle variant, HP bars. |
 | `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
+| `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. Four draw calls. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis. Scales the squad depth cap and the fog with it. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
 
