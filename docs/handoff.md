@@ -41,6 +41,14 @@ particular.
 measures the game played perfectly; 0.3 s is the setting the brief's per-level
 failure bands should be read against.
 
+**THE DESIGN DIRECTION IS SETTLED: primitives only, indefinitely.** Mischa's
+call — the pitch is Roblox rather than realism, and the fun comes from dynamism,
+consequence and "I did not think that would happen". Three rules fall out of it
+and they are written up in the gap analysis: every prize needs a visible chain
+(prize → how troops use it → what it does to the world), anything a primitive
+cannot say gets a text label, and every idea is judged by whether someone would
+clip it. Do not reopen the art question.
+
 **Where the LOOK still falls short:**
 [`docs/reference/gap-analysis.md`](reference/gap-analysis.md) audits our build
 against the reference game screen by screen and ranks what to build. Short

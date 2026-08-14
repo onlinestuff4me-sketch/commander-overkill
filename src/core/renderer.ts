@@ -22,13 +22,23 @@ export interface Stage {
   resize: () => void;
 }
 
+/**
+ * Sky and haze, one colour.
+ *
+ * They MUST match: the fog fades distant geometry toward this, so any difference
+ * shows up as a hard line where the corridor ends. Deepened slightly from the
+ * original `0x7cc4e8` now that the world below it is a dark blue channel rather
+ * than green grass — the old sky read as washed out against the water.
+ */
+const SKY_COLOR = 0x6fbde4;
+
 export function createStage(canvas: HTMLCanvasElement): Stage {
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
     powerPreference: "high-performance",
   });
-  renderer.setClearColor(0x7cc4e8);
+  renderer.setClearColor(SKY_COLOR);
 
   const scene = new THREE.Scene();
   // Fog hides the corridor's far end so we never have to draw geometry that is
@@ -39,7 +49,7 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   // and gates were fully hazed before the player ever saw them — you cannot
   // plan a route through a decision you cannot read. The reference keeps
   // distant barrels crisp and hazes only the horizon.
-  scene.fog = new THREE.Fog(0x7cc4e8, 62, 105);
+  scene.fog = new THREE.Fog(SKY_COLOR, 62, 105);
 
   const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 100);
   camera.position.copy(CAMERA_POS);
