@@ -24,16 +24,19 @@ guardrails, the architecture invariants, and how to verify work.
 Ranked. Nothing here is blocked on Mischa except items 3 and 4, which are
 product calls rather than engineering ones.
 
-### 1. Author the content pacing — the last obviously-unfinished thing
+### 1. Author the content pacing — step 1 of 4 is done
 
-`spawnRow()` in `main.ts` still fires a barrel row every 4.2 s and a walker pack
-every other row, forever, at three fixed lanes. Everything those rows contain is
-now authored — hit points derive from the weapon model, gate rows are shaped,
-the camera steps back to hold it all — but **when they arrive is not**. At high
-troop counts barrel rows and gate rows overlap in depth, which is legible but
-plainly unauthored.
+**The conductor has landed** (`mechanics/director.ts`): one cursor owns the
+corridor, gates no longer pace themselves, and nothing can share a plane. What
+remains is steps 2–4 of the plan — beats instead of a fixed cycle, levels with
+proportional penalties, and the autopilot that makes a failure rate measurable.
 
-This is the largest remaining piece of decision-free work, and there is a
+Read the module header before changing the cycle: the old three-timer schedule
+was over-subscribed by ~50% against any legible gap, so content density had to
+drop, and the gap between two placements depends on the PAIR (16 m gate-to-gate,
+11 m otherwise) because what needs separating is decisions, not objects.
+
+This is still the largest remaining piece of decision-free work, and there is a
 written plan for it: [`docs/pacing-proposal.md`](pacing-proposal.md). Nothing
 in it is blocked: Mischa has answered the three questions it asked. A run is
 **90 s to 2 min**, a strong run ends at **300–500 troops**, and the failure rate

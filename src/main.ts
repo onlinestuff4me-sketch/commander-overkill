@@ -24,7 +24,9 @@ import { createCorridor } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
 import { barrelHp, barrelPayout } from "./mechanics/pacing";
-import { createGates } from "./mechanics/gates";
+import { createDirector, createRng } from "./mechanics/director";
+import type { Placement } from "./mechanics/director";
+import { composeAutoRow, createGates } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
 import { createFloaters } from "./ui/floaters";
@@ -50,7 +52,9 @@ stage.scene.add(corridor);
 // has that question open; it is simply not mounted.
 const squad = createSquad(stage.scene);
 const bullets = createBullets(stage.scene);
-const gates = createGates(stage.scene);
+// autoSpawn OFF: the director owns the corridor now. Leaving the gate module
+// pacing itself is precisely the second metronome that caused the overlap.
+const gates = createGates(stage.scene, { autoSpawn: false });
 const barrels = createBarrels(stage.scene);
 const enemies = createEnemies(stage.scene);
 const floaters = createFloaters(stage.scene);
@@ -105,41 +109,83 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
 bossBar.reset(80);
 enemies.onKilled(() => bossBar.damage(1));
 
-// ── Placeholder content pacing ─────────────────────────────────────────────
+// ── Content pacing ─────────────────────────────────────────────────────────
 
 const ROW_LANES = [-0.62, 0, 0.62] as const;
-/**
- * Spacing is authored in TIME but experienced as DISTANCE, so this has to move
- * with scrollSpeed or the corridor silently gets denser every time the world
- * slows down. At 6 m/s, 4.2s ≈ 25m between rows — close enough that the next
- * decision is visible while the current one resolves, which is the stacking the
- * reference uses.
- */
-const SPAWN_EVERY = 4.2;
 const SPAWN_Z = -58;
-let spawnTimer = SPAWN_EVERY;
 let rowIndex = 0;
-/** Suspends barrel/enemy pacing. Only the dev calibration harness touches this —
- *  a probe needs an empty corridor or the traffic eats the rounds it is counting. */
+/** Suspends the director. Only the dev calibration harness touches this — a
+ *  probe needs an empty corridor or the traffic eats the rounds it is counting. */
 let contentSpawning = true;
 
-function spawnRow(): void {
-  rowIndex++;
-  const hp = barrelHp(
-    rowIndex,
-    world.troops,
-    tierFor(world.troops),
-    bullets.tuning,
-    squad.radiusX,
-  );
-  for (const lane of ROW_LANES) {
-    // Every third row rides a motorcycle elite, so the variant actually shows up.
-    const mounted = rowIndex % 3 === 0 && lane === 0;
-    const rider = enemies.spawnElite(lane, SPAWN_Z, 30, mounted);
-    barrels.spawn(lane, SPAWN_Z, hp, rider);
+/**
+ * THE CONDUCTOR. One cursor decides everything that enters the corridor, so two
+ * things can no longer land on the same plane — see mechanics/director.ts for
+ * what this replaced and why three independent timers could not be made to fit.
+ */
+const director = createDirector();
+/** Reused every gate placement so the corridor never allocates inside tick(). */
+const gateBuffer: number[] = [0, 0, 0, 0];
+/** The director's own stream, kept apart from the gate module's so that tuning
+ *  gate variety cannot silently reshuffle the corridor's pacing. */
+const rowRng = createRng(0xc0ffee);
+
+function place(what: Placement, z: number): void {
+  switch (what) {
+    case "gate":
+      composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer);
+      gates.spawnRow(gateBuffer, z);
+      return;
+
+    case "barrels": {
+      rowIndex++;
+      const hp = barrelHp(
+        rowIndex,
+        world.troops,
+        tierFor(world.troops),
+        bullets.tuning,
+        squad.radiusX,
+      );
+      for (const lane of ROW_LANES) {
+        // Every third row rides a motorcycle elite, so the variant shows up.
+        const mounted = rowIndex % 3 === 0 && lane === 0;
+        const rider = enemies.spawnElite(lane, z, 30, mounted);
+        barrels.spawn(lane, z, hp, rider);
+      }
+      return;
+    }
+
+    case "walkers":
+      enemies.spawnPack(0, z, 8, 4);
+      return;
   }
-  if (rowIndex % 2 === 0) {
-    enemies.spawnPack(0, SPAWN_Z + 10, 8, 4);
+}
+
+/**
+ * Metres of road the corridor is pre-filled with at the start of a run.
+ *
+ * The gate module used to prime three rows itself so the run never opened on an
+ * empty road (`frame_000` has two rows already stacked). That went with its
+ * auto-spawn, so the director has to do it — and doing it by REPLAYING the
+ * director means the opening layout obeys exactly the same spacing rule as
+ * every metre after it, rather than being a hand-placed special case that can
+ * drift away from the real thing.
+ *
+ * 40 m leaves the nearest placement ~18 m out, about three seconds at the
+ * default speed: enough to read the first decision before having to make it.
+ */
+const PRIME_SPAN = 40;
+
+/**
+ * Fill the visible corridor as if the run had already been going for
+ * PRIME_SPAN metres. An item placed `d` metres into that replay has had
+ * `PRIME_SPAN - d` metres to travel, which is exactly where it is put.
+ */
+function primeCorridor(): void {
+  const step = 0.5;
+  for (let d = 0; d < PRIME_SPAN; d += step) {
+    const due = director.advance(step);
+    if (due) place(due, SPAWN_Z + (PRIME_SPAN - d));
   }
 }
 
@@ -165,8 +211,9 @@ function resetRun(): void {
   enemies.clear();
   gates.reset();
   bossBar.reset(80);
-  spawnTimer = SPAWN_EVERY;
+  director.reset();
   rowIndex = 0;
+  primeCorridor();
   zoom.reset(world.troops);
   world.zoom = zoom.distance;
 }
@@ -241,11 +288,10 @@ function tick(dt: number): void {
     world.weaponTier = tierFor(world.troops);
 
     if (contentSpawning) {
-      spawnTimer += dt;
-      if (spawnTimer >= SPAWN_EVERY) {
-        spawnTimer -= SPAWN_EVERY;
-        spawnRow();
-      }
+      // Distance, not time. Spacing is authored in metres of road, so it holds
+      // even if the world speeds up or slows down.
+      const due = director.advance(world.scrollSpeed * dt);
+      if (due) place(due, SPAWN_Z);
     }
 
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
@@ -309,6 +355,9 @@ mountPerfOverlay(ui, stage.renderer);
 state.transition("briefing");
 state.transition("running");
 world.troops = START_TROOPS;
+// The corridor has to be stocked before the first frame, or the run opens on an
+// empty road and the player waits three seconds for anything to happen.
+primeCorridor();
 loop.start();
 
 // A backgrounded run should not drain a phone battery, and stopping also means
