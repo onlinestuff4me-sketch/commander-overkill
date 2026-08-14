@@ -23,15 +23,22 @@ import { TouchDriver, clamp } from "./input/touch";
 import { createCorridor } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
-import { barrelHp, barrelPayout } from "./mechanics/pacing";
+import {
+  barrelHp,
+  barrelPayout,
+  enemyHp,
+  ELITE_PASS_SHARE,
+  WALKER_PASS_SHARE,
+} from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
 import type { Placement } from "./mechanics/director";
-import { composeAutoRow, createGates } from "./mechanics/gates";
+import { composeAutoRow, createGates, MERCY_TROOPS } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
 import { createFloaters } from "./ui/floaters";
 import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
+import { createTroopCount } from "./ui/troopcount";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
 
@@ -60,6 +67,9 @@ const enemies = createEnemies(stage.scene);
 const floaters = createFloaters(stage.scene);
 const growthFx = createGrowthFx(stage.scene);
 const bossBar = createBossBar(ui);
+// The only number on screen used to be the boss bar's, which counts DOWN.
+// Players read it as their army. Now the army has its own readout.
+const troopCount = createTroopCount(ui);
 
 const renderables: System[] = [
   squad,
@@ -70,6 +80,7 @@ const renderables: System[] = [
   floaters,
   growthFx,
   bossBar,
+  troopCount,
 ];
 
 // ── Rewards ────────────────────────────────────────────────────────────────
@@ -97,11 +108,51 @@ function payTroops(amount: number): void {
   floaters.drop(squad.center, -delta, squad.radiusX);
 }
 
-gates.onResolve((hit) => payTroops(hit.value));
+// `troops`, not `value`: the panel's number is what a WHOLE army walking through
+// that one segment would collect, and a wide crowd only ever sends part of
+// itself through any given segment. See resolve() in mechanics/gates.ts.
+/** Dev-only record of what each segment paid. Empty and untouched in production. */
+const payoutLog: { troops: number; value: number; share: number; reward: boolean }[] = [];
+
+gates.onResolve((hit) => {
+  if (import.meta.env.DEV) {
+    payoutLog.push({
+      troops: hit.troops,
+      value: hit.value,
+      share: Number(hit.share.toFixed(3)),
+      reward: hit.reward,
+    });
+  }
+  payTroops(hit.troops);
+});
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
   payTroops(barrelPayout(maxHp));
   if (tag >= 0) enemies.unpin(tag);
+});
+
+/**
+ * AN ENEMY THAT REACHES YOU COSTS TROOPS.
+ *
+ * `enemies.ts` has fired `onBreached` since it was written and nothing was
+ * listening, so walking into the crowd did literally nothing — enemies were
+ * decoration you shot at for a boss bar that is itself a placeholder. Combat had
+ * no stake in either direction.
+ *
+ * The cost is deliberately small. It routes through `payTroops`, so a breach
+ * rains the same red `-1`s a red gate does and reads as the same kind of event,
+ * and it is the thing that makes enemy hit points worth scaling at all: a wave
+ * that survives long enough to arrive now has a consequence when it does.
+ */
+const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3 };
+enemies.onBreached((_id, kind) => {
+  // FREE while the squad is tiny, on the same threshold the gate mercy rule
+  // uses. A pack is eight bodies and a two-troop army cannot kill any of them,
+  // so charging for every breach turns the opening into a death spiral: too
+  // weak to kill, so you lose troops, so you are weaker. Combat starts costing
+  // once the army is established enough to do something about it.
+  if (world.troops < MERCY_TROOPS) return;
+  payTroops(-(BREACH_COST[kind] ?? 1));
 });
 
 // Placeholder boss pacing: the bar is a pure display, so something has to drive
@@ -130,6 +181,15 @@ const gateBuffer: number[] = [0, 0, 0, 0];
  *  gate variety cannot silently reshuffle the corridor's pacing. */
 const rowRng = createRng(0xc0ffee);
 
+/** Enemy toughness tracks the army, for the reason in mechanics/pacing.ts. The
+ *  floors are the old fixed values, so the opening is unchanged. */
+function walkerHp(): number {
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
+}
+function eliteHp(): number {
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
+}
+
 function place(what: Placement, z: number): void {
   switch (what) {
     case "gate":
@@ -149,14 +209,14 @@ function place(what: Placement, z: number): void {
       for (const lane of ROW_LANES) {
         // Every third row rides a motorcycle elite, so the variant shows up.
         const mounted = rowIndex % 3 === 0 && lane === 0;
-        const rider = enemies.spawnElite(lane, z, 30, mounted);
+        const rider = enemies.spawnElite(lane, z, eliteHp(), mounted);
         barrels.spawn(lane, z, hp, rider);
       }
       return;
     }
 
     case "walkers":
-      enemies.spawnPack(0, z, 8, 4);
+      enemies.spawnPack(0, z, 8, walkerHp());
       return;
   }
 }
@@ -324,6 +384,8 @@ function tick(dt: number): void {
     floaters.update(dt, world);
     growthFx.update(dt, world);
     bossBar.update(dt, world);
+    // Last of the readouts, so it reports the count this tick actually ended on.
+    troopCount.update(dt, world);
 
     scrolled += world.scrollSpeed * dt;
 
@@ -483,6 +545,41 @@ if (import.meta.env.DEV) {
       },
       setSpawning(on: boolean): void {
         contentSpawning = on;
+      },
+      /**
+       * Run `seconds` of play with a simple autopilot steering at the best
+       * segment of the nearest gate, and report the troop curve. This is how a
+       * growth target or a failure rate gets measured instead of guessed.
+       */
+      autopilot(seconds = 120, sampleEvery = 5) {
+        const dt = 1 / 60;
+        const ticks = Math.round(seconds / dt);
+        const samples: { t: number; troops: number }[] = [];
+        let deaths = 0;
+        let prev = world.troops;
+        for (let i = 0; i < ticks; i++) {
+          const want = gates.bestLane();
+          if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
+          tick(dt);
+          if (world.troops > prev + 50 && prev <= 1) deaths++; // reset snapped it back up
+          if (world.troops <= 1 && prev > 1) deaths++;
+          prev = world.troops;
+          if (i % Math.round(sampleEvery / dt) === 0) {
+            samples.push({ t: Number((i * dt).toFixed(1)), troops: world.troops });
+          }
+        }
+        return { samples, deaths, final: world.troops };
+      },
+      /** Place an exact gate row, for testing how a wide crowd resolves it. */
+      spawnGate(values: number[], z = SPAWN_Z): void {
+        gates.spawnRow(values, z);
+      },
+      /** Every payout since the last clear, as [troops, wasReward] pairs. */
+      payouts(): { troops: number; value: number; share: number; reward: boolean }[] {
+        return payoutLog.slice();
+      },
+      clearPayouts(): void {
+        payoutLog.length = 0;
       },
       /** Live round population and its extent — the number to hold against a
        *  reference frame when asking whether our fire is too dense. */

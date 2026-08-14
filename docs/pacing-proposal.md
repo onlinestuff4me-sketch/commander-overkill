@@ -71,7 +71,7 @@ it rather than being a hand-placed special case that can drift.
 *Verified:* 15 tests over spacing, mix, determinism and reset; driven in a
 browser from the opening frame to 42 s.
 
-### Step 2 — Beats, not a metronome
+### Step 2 — Beats, not a metronome — ✅ DONE
 
 The director stops thinking in "rows every N seconds" and starts thinking in
 **named beats** it strings together:
@@ -84,14 +84,27 @@ The director stops thinking in "rows every N seconds" and starts thinking in
 | **Breather** | empty road, a few seconds | makes the next surge land |
 | **Surge** | dense, overlapping, deliberately loud | the payoff moment |
 
-A run becomes a sequence like *decision → combat → breather → decision → gauntlet
-→ surge*. The mix and the ordering rules are data, so they can be tuned without
-touching code.
+Shipped as `BEATS` in `mechanics/director.ts` — a weighted table of named
+phrases, each with the extra road that follows it. The scheduler guarantees
+spacing; the table decides the rhythm, so changing how a run feels is editing
+data rather than logic.
 
-*What you would see:* the run stops feeling like a treadmill and starts having
-a shape. This is the step that will read as "it got better" most obviously.
+Two rules keep it from wandering: `rest` and `surge` may not repeat (two rests
+is fifty metres of nothing, two surges is a wall), and after three placements
+without a gate the next beat must LEAD with one — measured worst-case dry streak
+is 4 placements over 20 km of corridor.
 
-*Cost:* medium. The beat types mostly reuse what already exists.
+Building it turned up a spacing bug the fixed cycle had hidden: the gap was
+computed from the next placement *within the same beat*, so a beat ending on a
+gate followed by one starting on a gate got the narrow 11 m gap instead of 16 m.
+The gap now resolves across the beat boundary.
+
+### Step 4 — partially done
+
+`__overkill.autopilot(seconds)` plays a run steering at the best segment of the
+nearest gate and reports the troop curve. First measurement, 120 s: **1 → 173
+troops, zero wipeouts**. Under the 300–500 target, so the reward economy needs
+tuning — but it is now a number rather than an opinion.
 
 ### Step 3 — Levels, and an arc with an end
 
