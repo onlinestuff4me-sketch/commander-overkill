@@ -250,7 +250,7 @@ const DEATH_TINT_RAMP = 4;
  * still has form in it.
  */
 const ELITE_TINT = [1.22, 0.86, 0.3] as const;
-const ELITE_SCALE = 1.34;
+const ELITE_SCALE = 1.5;
 
 /**
  * CARRIERS — troops wearing a minigun or a rocket launcher.
@@ -271,9 +271,25 @@ const ROCKETEER_TINT = [1.16, 0.9, 0.78] as const;
 /** Where a shouldered weapon sits, in unmodified unit space. Level with the
  *  helmet so it breaks the crowd's outline from above, which is the only angle
  *  this camera really has. */
-const KIT_X = -0.2;
-const KIT_Y = 1.16;
-const KIT_Z = 0.06;
+const KIT_X = -0.26;
+const KIT_Y = 1.3;
+const KIT_Z = 0.02;
+/**
+ * Whole-kit size multiplier, and the standing instruction is to err big.
+ *
+ * The first pass sized the weapons realistically against a 1.4 m soldier, which
+ * is correct and useless: at forty pixels a realistically-sized minigun is a
+ * grey pixel on a shoulder, and playtest could not tell one carrier from
+ * another. These are cartoon weapons on cartoon soldiers — the silhouette is the
+ * whole message, so the weapon is allowed to be absurd next to the man holding
+ * it.
+ *
+ * There is still a ceiling. At 1.9 the launchers were wider than the soldiers
+ * carrying them and a crowd of them was a thicket of tubes with no visible men
+ * underneath — past "obvious" and into "cannot see the game". 1.2 is comfortably
+ * larger than realistic and still leaves the crowd readable.
+ */
+const KIT_SCALE = 1.2;
 
 /** Run-in-place bob. abs(sin) doubles the rate, so ~2.7 footfalls/second. */
 const BOB_HEIGHT = 0.105;
@@ -1127,7 +1143,8 @@ class Squad implements SquadSystem {
       // for free.
       if (job >= 2 && fall === 0) {
         pos.set(x + KIT_X * s, y + KIT_Y * s, z + KIT_Z * s);
-        scl.set(s, s, s);
+        const ks = s * KIT_SCALE;
+        scl.set(ks, ks, ks);
         m.compose(pos, quat, scl);
         if (job === 2) this.#gunnerKit.setMatrixAt(gunnerCount++, m);
         else this.#rocketKit.setMatrixAt(rocketCount++, m);
@@ -1409,20 +1426,38 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
  */
 function buildMinigunKit(): THREE.BufferGeometry {
   const parts: Part[] = [];
-  const body = new THREE.BoxGeometry(0.17, 0.17, 0.26);
-  body.translate(0, 0, 0.06);
+
+  // Blue receiver — the pickup's own colour, so the object on the barrel and the
+  // object on the shoulder are recognisably the same thing.
+  const body = new THREE.BoxGeometry(0.24, 0.24, 0.34);
+  body.translate(0, 0, 0.1);
   parts.push({ geo: body, color: COLOR_HELMET });
-  const drum = new THREE.CylinderGeometry(0.09, 0.09, 0.1, 8);
+
+  // Brass drum, fat enough to read as the ammunition it is.
+  const drum = new THREE.CylinderGeometry(0.15, 0.15, 0.18, 10);
   drum.rotateX(Math.PI / 2);
-  drum.translate(0, 0, -0.06);
+  drum.translate(0, 0, 0.02);
   parts.push({ geo: drum, color: KIT_BRASS });
+
+  // SIX BARRELS IN A RING, and long. The rotary cluster is the entire read —
+  // one tube is the rifle every other soldier already carries, and a short one
+  // is a stub. This is what a playtester meant by "make the machine guns look
+  // like machine guns".
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * Math.PI * 2;
-    const b = new THREE.CylinderGeometry(0.022, 0.022, 0.34, 4);
+    const b = new THREE.CylinderGeometry(0.035, 0.035, 0.62, 5);
     b.rotateX(Math.PI / 2);
-    b.translate(Math.cos(a) * 0.042, Math.sin(a) * 0.042, -0.26);
+    b.translate(Math.cos(a) * 0.07, Math.sin(a) * 0.07, -0.42);
     parts.push({ geo: b, color: KIT_STEEL });
   }
+
+  // Muzzle ring binding the barrels at the front — the detail that turns six
+  // separate tubes into one gun.
+  const ring = new THREE.CylinderGeometry(0.12, 0.12, 0.07, 10);
+  ring.rotateX(Math.PI / 2);
+  ring.translate(0, 0, -0.7);
+  parts.push({ geo: ring, color: KIT_GUNMETAL });
+
   const merged = mergeParts(parts);
   merged.computeBoundingSphere();
   return merged;
@@ -1438,15 +1473,29 @@ function buildMinigunKit(): THREE.BufferGeometry {
  */
 function buildRocketKit(): THREE.BufferGeometry {
   const parts: Part[] = [];
-  const tube = new THREE.CylinderGeometry(0.06, 0.06, 0.56, 6);
+  const tube = new THREE.CylinderGeometry(0.1, 0.1, 0.86, 7);
   tube.rotateX(Math.PI / 2);
   parts.push({ geo: tube, color: KIT_GUNMETAL });
-  const head = new THREE.ConeGeometry(0.095, 0.22, 6);
+
+  // The warhead is the read: the only saturated red on a friendly unit, and
+  // deliberately oversized against the tube it sits on.
+  const head = new THREE.ConeGeometry(0.16, 0.34, 8);
   head.rotateX(-Math.PI / 2);
-  head.translate(0, 0, -0.34);
+  head.translate(0, 0, -0.54);
   parts.push({ geo: head, color: KIT_WARHEAD });
-  const grip = new THREE.BoxGeometry(0.06, 0.11, 0.08);
-  grip.translate(0, -0.09, 0.1);
+
+  // Blast cone at the back, so the tube has a front and a back at a glance.
+  const cone = new THREE.CylinderGeometry(0.15, 0.09, 0.2, 7);
+  cone.rotateX(Math.PI / 2);
+  cone.translate(0, 0, 0.5);
+  parts.push({ geo: cone, color: KIT_GUNMETAL });
+
+  const sight = new THREE.BoxGeometry(0.05, 0.11, 0.14);
+  sight.translate(0, 0.14, -0.06);
+  parts.push({ geo: sight, color: KIT_STEEL });
+
+  const grip = new THREE.BoxGeometry(0.08, 0.16, 0.1);
+  grip.translate(0, -0.14, 0.12);
   parts.push({ geo: grip, color: KIT_GUNMETAL });
   const merged = mergeParts(parts);
   // Pitched up and swung out for the same reason the rifle is — see RIFLE_PITCH.

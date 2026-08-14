@@ -204,12 +204,97 @@ const STYLE_DART = 1;
  * around it, and that it leaves a heavier impact.
  */
 const STYLE_ROCKET = 2;
-/** A rocket flies at 45% of a dart's speed, hits for two rounds, and is drawn
+/** A rocket flies at 45% of a dart's speed, hits for six rounds, and is drawn
  *  2.4x the size. Slow and fat is the whole read — it has to be picked out of a
  *  curtain of hundreds of ordinary rounds without a second texture. */
 const ROCKET_SPEED_SCALE = 0.45;
-const ROCKET_DAMAGE = 2;
+const ROCKET_DAMAGE = 6;
+/** One shot in three from a launcher stream actually leaves the tube; the rest
+ *  are skipped. `ROCKET_DAMAGE` carries the difference, so a rocketeer's total
+ *  output is unchanged and only the number of objects on screen falls. */
+const ROCKET_SHOT_STRIDE = 3;
 const ROCKET_SIZE = 2.4;
+/** Rockets alive at once. A fraction of the bullet pool, because only launcher
+ *  streams fire them. */
+const ROCKET_CAPACITY = 128;
+/** Metres per unit of `#size`. Deliberately large: the standing instruction is
+ *  to err toward bigger and more obvious, and a rocket that does not stand out
+ *  of a curtain of hundreds of rounds may as well be one of them. */
+const ROCKET_MESH_SCALE = 0.19;
+/** The axis the rocket geometry is built along. Bullets fly toward -Z. */
+const ROCKET_FORWARD = new THREE.Vector3(0, 0, -1);
+
+const _rocketDir = new THREE.Vector3();
+const _rocketPos = new THREE.Vector3();
+const _rocketScl = new THREE.Vector3();
+const _rocketQuat = new THREE.Quaternion();
+const _rocketMat = new THREE.Matrix4();
+
+/**
+ * One rocket: a red cone nose on a grey body with three fins, built along -Z.
+ *
+ * Hand-merged with a colour attribute rather than pulled from an addon, for the
+ * same reason `entities/pickups.ts` does it — three's merge helper lives in the
+ * examples bundle and the asset policy keeps the dependency surface at three
+ * core plus lil-gui.
+ */
+function rocketGeometry(): THREE.BufferGeometry {
+  const parts: { geo: THREE.BufferGeometry; color: number }[] = [];
+
+  const body = new THREE.CylinderGeometry(0.26, 0.26, 1.1, 7);
+  body.rotateX(-Math.PI / 2);
+  parts.push({ geo: body, color: 0xbfc7d4 });
+
+  const nose = new THREE.ConeGeometry(0.3, 0.6, 7);
+  nose.rotateX(-Math.PI / 2);
+  nose.translate(0, 0, -0.82);
+  parts.push({ geo: nose, color: 0xe0402c });
+
+  // Three fins at the tail. They are what stops it reading as a pill.
+  for (let i = 0; i < 3; i++) {
+    const fin = new THREE.BoxGeometry(0.06, 0.42, 0.34);
+    fin.translate(0, 0.3, 0.42);
+    fin.rotateZ((i / 3) * Math.PI * 2);
+    parts.push({ geo: fin, color: 0xe0402c });
+  }
+
+  // A stub of flame behind, so the thing is visibly under power.
+  const flame = new THREE.ConeGeometry(0.24, 0.7, 6);
+  flame.rotateX(Math.PI / 2);
+  flame.translate(0, 0, 0.9);
+  parts.push({ geo: flame, color: 0xffb02e });
+
+  let verts = 0;
+  for (const p of parts) verts += p.geo.toNonIndexed().attributes.position!.count;
+  const position = new Float32Array(verts * 3);
+  const normal = new Float32Array(verts * 3);
+  const color = new Float32Array(verts * 3);
+  const c = new THREE.Color();
+  let at = 0;
+  for (const p of parts) {
+    const g = p.geo.toNonIndexed();
+    const pos = g.attributes.position!;
+    const nrm = g.attributes.normal!;
+    position.set(pos.array as Float32Array, at * 3);
+    normal.set(nrm.array as Float32Array, at * 3);
+    c.setHex(p.color);
+    for (let i = 0; i < pos.count; i++) {
+      color[(at + i) * 3] = c.r;
+      color[(at + i) * 3 + 1] = c.g;
+      color[(at + i) * 3 + 2] = c.b;
+    }
+    at += pos.count;
+    g.dispose();
+    p.geo.dispose();
+  }
+
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  out.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  out.setAttribute("color", new THREE.BufferAttribute(color, 3));
+  out.computeBoundingSphere();
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Tunables. Flat numbers on purpose — lil-gui binds to these directly.
@@ -814,6 +899,21 @@ class Bullets implements BulletSystem, BulletView {
   readonly #dartMat: THREE.MeshBasicMaterial;
   readonly #flameMat: THREE.MeshBasicMaterial;
   readonly #burstMat: THREE.MeshBasicMaterial;
+  /**
+   * ROCKETS ARE GEOMETRY, NOT A SPRITE.
+   *
+   * They started as a fat orange tracer, which is exactly as much as a
+   * camera-facing quad can say: bigger and warmer than the rounds beside it, and
+   * nothing else. Playtest asked for rockets that look like rockets, and the
+   * only way a primitive says "rocket" is to BE one — a red cone on a grey tube
+   * with fins, pointed the way it is flying.
+   *
+   * Cheap because rockets are rare: only the streams whose soldier carries a
+   * launcher fire them, so the pool is a fraction of the bullet pool and this is
+   * one extra draw call that is empty until the player earns it.
+   */
+  readonly #rocketMesh: THREE.InstancedMesh;
+  #rocketCount = 0;
   readonly #tracerBatch: SpriteBatch;
   readonly #dartBatch: SpriteBatch;
   readonly #muzzleBatch: SpriteBatch;
@@ -902,6 +1002,16 @@ class Bullets implements BulletSystem, BulletView {
 
     // Muzzle flames share the needle texture with tracers — the reference's
     // muzzle flash is just a short fat version of the same flame lick.
+    this.#rocketMesh = new THREE.InstancedMesh(
+      rocketGeometry(),
+      new THREE.MeshLambertMaterial({ vertexColors: true }),
+      ROCKET_CAPACITY,
+    );
+    this.#rocketMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.#rocketMesh.frustumCulled = false;
+    this.#rocketMesh.count = 0;
+    scene.add(this.#rocketMesh);
+
     this.#tracerBatch = new SpriteBatch(this.#needleMat, TRACER_CAPACITY, 10);
     this.#dartBatch = new SpriteBatch(this.#dartMat, BULLET_POOL, 10);
     this.#muzzleBatch = new SpriteBatch(this.#flameMat, MUZZLE_POOL, 11);
@@ -1073,6 +1183,7 @@ class Bullets implements BulletSystem, BulletView {
       if (shots > budget) shots = budget;
       budget -= shots;
 
+      const heavy = this.#streamKind[s] === 2;
       const ox = this.#streamX[s]!;
       const oy = this.#streamY[s]!;
       const oz = this.#streamZ[s]!;
@@ -1085,6 +1196,14 @@ class Bullets implements BulletSystem, BulletView {
         const cross = from + 1 + k;
         const age = (1 - (cross - prev - phase) / advance) * dt;
         this.#shotIndex++;
+        // A LAUNCHER DOES NOT FIRE LIKE A RIFLE. A rocketeer's stream skips
+        // most of its shots and puts the whole stream's damage into the ones it
+        // does fire. Without this, a tenth of the crowd carrying launchers put
+        // enough rockets in the air to hide the barriers behind them — and they
+        // fly at 45% of a dart's speed, so they linger twice as long and the
+        // density compounds. Same output, a third of the objects, each one big
+        // enough to be worth looking at.
+        if (heavy && this.#shotIndex % ROCKET_SHOT_STRIDE !== 0) continue;
         this.#shootFrom(
           ox,
           oy,
@@ -1094,7 +1213,7 @@ class Bullets implements BulletSystem, BulletView {
           age < 0 ? 0 : age,
           this.#shotIndex % flashStride === 0 ? 1 : 0,
           axis,
-          this.#streamKind[s] === 2,
+          heavy,
         );
       }
     }
@@ -1146,6 +1265,7 @@ class Bullets implements BulletSystem, BulletView {
     const t = this.tuning;
     this.#tracerBatch.reset();
     this.#dartBatch.reset();
+    this.#rocketCount = 0;
     this.#muzzleBatch.reset();
     this.#impactBatch.reset();
 
@@ -1166,6 +1286,25 @@ class Bullets implements BulletSystem, BulletView {
 
       const style = this.#style[id];
       const rocket = style === STYLE_ROCKET;
+      if (rocket) {
+        // Pointed along its own velocity, so a rocket banking across the road
+        // banks with it. Scaled by the same per-bullet size the sprites use.
+        if (this.#rocketCount < ROCKET_CAPACITY) {
+          const nx2 = this.px[id]! + (this.x[id]! - this.px[id]!) * alpha;
+          const ny2 = this.py[id]! + (this.y[id]! - this.py[id]!) * alpha;
+          const nz2 = this.pz[id]! + (this.z[id]! - this.pz[id]!) * alpha;
+          _rocketDir.set(this.#vx[id]!, this.#vy[id]!, this.#vz[id]!).normalize();
+          _rocketQuat.setFromUnitVectors(ROCKET_FORWARD, _rocketDir);
+          _rocketPos.set(nx2, ny2, nz2);
+          const rs = this.#size[id]! * ROCKET_MESH_SCALE;
+          _rocketScl.set(rs, rs, rs);
+          _rocketMat.compose(_rocketPos, _rocketQuat, _rocketScl);
+          this.#rocketMesh.setMatrixAt(this.#rocketCount++, _rocketMat);
+        }
+        // A rocket is drawn as a body; it does not also want a streak sprite
+        // laid over the top of itself.
+        continue;
+      }
       // A rocket draws with the WARM sprite, not the dart's. The dart texture is
       // authored cyan, so tinting it orange multiplies to olive — the tint can
       // only darken what the texture already has. Routing rockets through the
@@ -1218,6 +1357,8 @@ class Bullets implements BulletSystem, BulletView {
 
     this.#tracerBatch.flush();
     this.#dartBatch.flush();
+    this.#rocketMesh.count = this.#rocketCount;
+    this.#rocketMesh.instanceMatrix.needsUpdate = true;
     this.#muzzleBatch.flush();
     this.#impactBatch.flush();
   }
