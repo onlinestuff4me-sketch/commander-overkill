@@ -95,14 +95,35 @@ const PRIME_ROWS = 3;
 const RECYCLE_Z = 15;
 
 /**
- * THE CLIMB. Reference: the same gate reads +2 at 3.75s and +9 at 5.33s — seven
- * troops over 1.58 seconds. Rate is expressed per-second (not per-metre) so it
- * matches that footage directly, and the window is bounded by Z so a row three
- * decisions back is not already sitting at its ceiling when it comes into view.
- * At the default 9 m/s, -15 gives exactly the reference's 1.6s of climb.
+ * THE CLIMB IS DRIVEN BY YOUR FIRE.
+ *
+ * Reference: the same gate reads +2 at 3.75 s and +9 at 5.33 s. That was first
+ * built as a pure timer gated on Z, which produced a gate sitting frozen for
+ * seven seconds while the player's bullets visibly poured over it, and then
+ * suddenly climbing once it was 15 m out. Playtest read that as broken, and
+ * fairly — a number that ignores the thing obviously hitting it is a number that
+ * looks disconnected from the game.
+ *
+ * So a blue segment climbs when it is SHOT, starting the instant rounds can
+ * reach it. That also makes the climb a decision: fire is a curtain the width of
+ * the crowd (mechanics/bullets.ts), so the segment you steer under is the one
+ * that grows fastest, and jumping between rewards splits your fire between them.
+ *
+ * A slow baseline remains so a one-soldier squad still sees a gate grow.
  */
-const CLIMB_START_Z = -15;
-const REWARD_CLIMB_RATE = 4.4;
+const CLIMB_START_Z = -58;
+const REWARD_CLIMB_RATE = 0.9;
+
+/**
+ * Troops added per point of bullet damage landed on a blue segment.
+ *
+ * Calibrated against the reference beat rather than taste: a mid-size army puts
+ * ~250 damage/second into one segment, and the reference climbs +7 in ~1.6 s, so
+ * ~400 damage should buy the whole span. 1/55 lands a full span in ~1.5 s for a
+ * ~20-troop squad and faster for a bigger one, which is the intended reward for
+ * having grown.
+ */
+const CLIMB_PER_DAMAGE = 1 / 55;
 /** Ceiling, as headroom above the start value. +2 tops out at +9, as observed. */
 const REWARD_CLIMB_SPAN = 7;
 
@@ -140,6 +161,23 @@ const REWARD_ROW_CHANCE = 0.72;
  * moment the squad is big enough to eat a bad row.
  */
 export const MERCY_TROOPS = 10;
+/**
+ * How much of a segment the crowd must cover to count as having smashed it.
+ *
+ * A THIRD, not a touch and not all of it. Clipping the corner of a barrier at
+ * the edge of the crowd should not cost its full value, and requiring full
+ * coverage would mean a wide army never pays anything. At a third, a crowd
+ * steered to the road edge takes one segment, and a crowd sitting in the middle
+ * of a three-segment row takes all three — which is the real cost of being wide
+ * and the real reason to commit to a side.
+ */
+const CROSS_FRACTION = 1 / 3;
+
+/** Half-depth of a gate's bullet-collision slab. The panel is flat, so this is
+ *  a tolerance rather than a thickness — wide enough that a round travelling
+ *  44 m/s cannot step over the plane between two ticks. */
+const GATE_HIT_DEPTH = 0.9;
+
 /** Penalties escalate every 25s of run time. Index = difficulty tier. */
 const PENALTY_POOLS: readonly (readonly number[])[] = [
   [-1, -1, -2, -3, -4, -5],
@@ -171,12 +209,13 @@ export interface GateHit {
   /** The integer that was ON SCREEN when the squad crossed. Never the raw float. */
   value: number;
   /**
-   * Troops this segment actually moved, already scaled by how much of the crowd
-   * went through it and rounded to whole soldiers. THIS is what to pay — `value`
-   * is the number painted on the panel, which a wide army only partly collects.
+   * Troops to pay. Identical to `value` — a segment you smash through costs
+   * exactly the number painted on it. Kept as a separate field because the
+   * orchestrator should not have to know that, and because a future powerup that
+   * halves penalties has an obvious place to live.
    */
   troops: number;
-  /** Fraction of the crowd that passed through this segment, 0..1. */
+  /** Always 1. Retained so the payload shape is stable for callers. */
   share: number;
   /** True for a blue segment. Equivalent to `value > 0`, kept explicit for clarity. */
   reward: boolean;
@@ -193,6 +232,15 @@ export interface GateSystem extends System {
   spawnRow(segments: readonly (number | GateSegmentSpec)[], z?: number): boolean;
   onResolve(handler: (hit: GateHit) => void): () => void;
   /**
+   * Register a bullet hit against any BLUE segment overlapping (x, z), raising
+   * its value. Returns true if a segment took it.
+   *
+   * Rounds are NOT consumed by a gate: the reference plainly shows fire passing
+   * over a barrier to reach what is behind it, and a barrier that ate the stream
+   * would make every gate a wall the army has to chew through.
+   */
+  shootAt(x: number, z: number, pad: number, amount: number): boolean;
+  /**
    * Lane [-1, 1] of the highest-value segment in the nearest unresolved row, or
    * NaN when the corridor holds no decision.
    *
@@ -201,6 +249,8 @@ export interface GateSystem extends System {
    * obviously worse than a human. It is not AI and is not shipped behaviour.
    */
   bestLane(): number;
+  /** Face values of every live unresolved segment. Diagnostics only. */
+  debugValues(): number[];
   readonly activeRows: number;
   nextGateZ(): number;
   reset(): void;
@@ -269,6 +319,9 @@ interface Segment {
   sparkle: THREE.Mesh;
   numeralMat: THREE.MeshBasicMaterial;
   reward: boolean;
+  /** Set when the crowd smashed through this segment. Only crossed segments
+   *  burst, and only crossed segments charge — see `resolve`. */
+  crossed: boolean;
   /** Float. Rewards climb; the displayed value is `Math.floor` of this. */
   value: number;
   /** Integer currently baked into the numeral texture. -Infinity = none yet. */
@@ -386,8 +439,6 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     x: 0,
     z: 0,
   };
-  /** Per-segment overlap with the crowd, reused so resolving never allocates. */
-  const overlap = new Float64Array(MAX_SEGMENTS);
   const dummy = new THREE.Object3D();
   const tint = new THREE.Color();
 
@@ -435,6 +486,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         sparkle,
         numeralMat,
         reward: false,
+        crossed: false,
         value: 0,
         shown: Number.NEGATIVE_INFINITY,
         climbRate: 0,
@@ -510,6 +562,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       const reward = value > 0;
 
       seg.reward = reward;
+      seg.crossed = false;
       seg.value = value;
       seg.shown = Number.NEGATIVE_INFINITY;
       seg.pop = 0;
@@ -642,16 +695,11 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     row.resolved = true;
     row.burst = 0;
 
-    // A squad narrower than this is treated as a point, so a 1-troop opening
-    // still takes exactly one segment at full value rather than smearing across
-    // a boundary it is only technically touching.
     const half = Math.max(0.15, halfWidth);
     const left = crossX - half;
     const right = crossX + half;
-    const span = right - left;
 
-    let covered = 0;
-    // The segment the crowd committed to most — it gets the loudest exit pop.
+    let anyCrossed = false;
     let dominant = 0;
     let dominantOverlap = -1;
     for (let i = 0; i < row.count; i++) {
@@ -659,47 +707,34 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       if (!seg) continue;
       const lo = Math.max(left, seg.centerX - seg.halfWidth);
       const hi = Math.min(right, seg.centerX + seg.halfWidth);
-      overlap[i] = Math.max(0, hi - lo);
-      covered += overlap[i]!;
-      if (overlap[i]! > dominantOverlap) {
-        dominantOverlap = overlap[i]!;
+      const over = Math.max(0, hi - lo);
+      // CROSSED IS BINARY. A segment is either smashed through or it is not,
+      // and what it costs is the number painted on it — see the note above.
+      seg.crossed = over >= seg.halfWidth * 2 * CROSS_FRACTION;
+      if (seg.crossed) anyCrossed = true;
+      if (over > dominantOverlap) {
+        dominantOverlap = over;
         dominant = i;
       }
     }
 
-    // The barrier spans the whole road, but a squad steered onto the kerb hangs
-    // off the end of it. Anything outside the outermost segments is folded into
-    // the nearest one, so overhanging the road never lets troops through free.
-    if (covered <= 1e-4) {
-      let nearest = 0;
-      let best = Infinity;
-      for (let i = 0; i < row.count; i++) {
-        const seg = row.segments[i];
-        if (!seg) continue;
-        const d = Math.abs(seg.centerX - crossX);
-        if (d < best) {
-          best = d;
-          nearest = i;
-        }
-      }
-      for (let i = 0; i < row.count; i++) overlap[i] = i === nearest ? span : 0;
-      covered = span;
-      dominant = nearest;
+    // Steered off the end of the barrier, or threading a gap too small to count
+    // anywhere: the nearest segment is taken, so overhanging the road never lets
+    // the crowd through for free.
+    if (!anyCrossed) {
+      const seg = row.segments[dominant];
+      if (seg) seg.crossed = true;
     }
 
     for (let i = 0; i < row.count; i++) {
       const seg = row.segments[i];
-      if (!seg || !overlap[i]) continue;
-      const share = overlap[i]! / covered;
+      if (!seg || !seg.crossed) continue;
       const value = Math.floor(seg.value);
-      // Rounded per segment, because "how many of your troops went through
-      // here" is a whole number of soldiers and it is what the floaters draw.
-      const troops = value < 0 ? -Math.round(-value * share) : Math.round(value * share);
-      if (troops === 0) continue;
+      if (value === 0) continue;
 
       hit.value = value;
-      hit.troops = troops;
-      hit.share = share;
+      hit.troops = value;
+      hit.share = 1;
       hit.reward = seg.reward;
       hit.segmentIndex = i;
       hit.x = seg.centerX;
@@ -711,7 +746,10 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // Kick every piece outward from where the squad punched through.
     for (let i = 0; i < row.count; i++) {
       const seg = row.segments[i];
-      if (!seg) continue;
+      // A segment the crowd did not smash through stays standing and sails
+      // past intact. THIS IS THE WHOLE POINT: what breaks is exactly what you
+      // paid for, so the wreckage is an honest receipt.
+      if (!seg || !seg.crossed) continue;
       const dir = seg.centerX >= crossX ? 1 : -1;
       const away = Math.abs(seg.centerX - crossX) * 0.35;
       seg.vx = dir * (BURST_OUT + away + rng() * 1.2);
@@ -865,6 +903,38 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       return () => {
         handlers.delete(handler);
       };
+    },
+
+    shootAt(x, z, pad, amount) {
+      let any = false;
+      for (const row of rows) {
+        if (!row.active || row.resolved) continue;
+        const dz = z - row.z;
+        if (dz > pad + GATE_HIT_DEPTH || dz < -pad - GATE_HIT_DEPTH) continue;
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (!seg || !seg.reward) continue;
+          if (x < seg.centerX - seg.halfWidth - pad) continue;
+          if (x > seg.centerX + seg.halfWidth + pad) continue;
+          if (seg.value >= seg.climbMax) continue;
+          seg.value = Math.min(seg.climbMax, seg.value + amount * CLIMB_PER_DAMAGE);
+          applyValue(seg, false);
+          any = true;
+        }
+      }
+      return any;
+    },
+
+    debugValues() {
+      const out: number[] = [];
+      for (const row of rows) {
+        if (!row.active || row.resolved) continue;
+        for (let i = 0; i < row.count; i++) {
+          const seg = row.segments[i];
+          if (seg) out.push(Math.floor(seg.value));
+        }
+      }
+      return out;
     },
 
     bestLane() {
