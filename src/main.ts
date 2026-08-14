@@ -20,14 +20,13 @@ import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
 import type { System, WeaponTier } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
-import { createCorridor } from "./mechanics/lane";
+import { createCorridor, laneToX } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
 import {
   barrelHp,
   barrelPayout,
   enemyHp,
-  ELITE_PASS_SHARE,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
@@ -35,6 +34,8 @@ import type { Placement } from "./mechanics/director";
 import { composeAutoRow, createGates, MERCY_TROOPS } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
+import { createPickups } from "./entities/pickups";
+import type { PickupKind } from "./entities/pickups";
 import { createFloaters } from "./ui/floaters";
 import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
@@ -65,6 +66,8 @@ const bullets = createBullets(stage.scene);
 const gates = createGates(stage.scene, { autoSpawn: false });
 const barrels = createBarrels(stage.scene);
 const enemies = createEnemies(stage.scene);
+// What rides a barrel. Not an enemy — see the note in entities/pickups.ts.
+const pickups = createPickups(stage.scene);
 const floaters = createFloaters(stage.scene);
 const growthFx = createGrowthFx(stage.scene);
 const bossBar = createBossBar(ui);
@@ -81,6 +84,7 @@ const renderables: System[] = [
   gates,
   barrels,
   enemies,
+  pickups,
   floaters,
   growthFx,
   bossBar,
@@ -165,12 +169,32 @@ gates.onResolve((hit) => {
  * proposal, and it is the natural first piece of it.
  */
 const RECRUIT_BONUS = 3;
+/**
+ * What a weapon pickup is worth, as a multiplier on the axis it upgrades.
+ *
+ * Multiplicative and uncapped-looking, but the rate is clamped by the bullet
+ * governor and the damage by `FIREPOWER_MAX`, so a lucky run of barrels cannot
+ * trivialise the rest of a level. 1.3 is big enough to feel on the very next
+ * barrel and small enough that one pickup is not the whole run.
+ */
+const MINIGUN_RATE_STEP = 1.3;
+const ROCKET_DAMAGE_STEP = 1.3;
+/** Ceilings, so a long run cannot stack its way out of the difficulty curve. */
+const FIRE_RATE_MAX = 4;
+const FIREPOWER_MAX = 6;
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
   payTroops(barrelPayout(maxHp));
-  if (tag >= 0) {
-    enemies.remove(tag);
+  if (tag < 0) return;
+
+  const kind = pickups.kindOf(tag);
+  pickups.collect(tag);
+  if (kind === "recruit") {
     payTroops(RECRUIT_BONUS);
+  } else if (kind === "minigun") {
+    world.fireRate = Math.min(FIRE_RATE_MAX, world.fireRate * MINIGUN_RATE_STEP);
+  } else if (kind === "rocket") {
+    world.firepower = Math.min(FIREPOWER_MAX, world.firepower * ROCKET_DAMAGE_STEP);
   }
 });
 
@@ -224,13 +248,37 @@ const gateBuffer: number[] = [0, 0, 0, 0];
  *  gate variety cannot silently reshuffle the corridor's pacing. */
 const rowRng = createRng(0xc0ffee);
 
-/** Enemy toughness tracks the army, for the reason in mechanics/pacing.ts. The
- *  floors are the old fixed values, so the opening is unchanged. */
+/**
+ * What the next barrel carries.
+ *
+ * Recruits are the common case, because crowd size is the run's main currency
+ * and a weapon on every barrel would make firepower the only thing that
+ * mattered. Weapons are the treat: rarer, and worth steering for.
+ */
+const PICKUP_ODDS: readonly PickupKind[] = [
+  "recruit",
+  "recruit",
+  "recruit",
+  "minigun",
+  "recruit",
+  "recruit",
+  "rocket",
+];
+let pickupCursor = 0;
+
+function pickForRow(): PickupKind {
+  // Walked rather than rolled, so a run cannot go two minutes without a weapon
+  // on a bad streak of luck — the same reason gate rows are authored.
+  const kind = PICKUP_ODDS[pickupCursor % PICKUP_ODDS.length]!;
+  pickupCursor++;
+  return kind;
+}
+
+/** Walker toughness tracks the army, for the reason in mechanics/pacing.ts. The
+ *  floor is the old fixed value, so the opening is unchanged. Barrels no longer
+ *  carry elites at all — they carry pickups — so only walkers need this. */
 function walkerHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
-}
-function eliteHp(): number {
-  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
 }
 
 function place(what: Placement, z: number): void {
@@ -250,9 +298,7 @@ function place(what: Placement, z: number): void {
         squad.radiusX,
       );
       for (const lane of ROW_LANES) {
-        // Every third row rides a motorcycle elite, so the variant shows up.
-        const mounted = rowIndex % 3 === 0 && lane === 0;
-        const rider = enemies.spawnElite(lane, z, eliteHp(), mounted);
+        const rider = pickups.spawn(pickForRow(), laneToX(lane), barrels.riderY, z);
         barrels.spawn(lane, z, hp, rider);
       }
       return;
@@ -316,6 +362,10 @@ function resetRun(): void {
   bossBar.reset(80);
   director.reset();
   rowIndex = 0;
+  pickups.clear();
+  pickupCursor = 0;
+  world.firepower = 1;
+  world.fireRate = 1;
   primeCorridor();
   zoom.reset(world.troops);
   world.zoom = zoom.distance;
@@ -331,7 +381,7 @@ const shooters = Array.from({ length: MAX_STREAMS }, () => new THREE.Vector3());
 
 /** Hoisted so the per-tick rider seating allocates nothing. */
 function seatRider(_id: number, tag: number, x: number, topY: number, z: number): void {
-  if (tag >= 0) enemies.pin(tag, x, topY, z);
+  if (tag >= 0) pickups.pin(tag, x, topY, z);
 }
 
 // ── Collision ──────────────────────────────────────────────────────────────

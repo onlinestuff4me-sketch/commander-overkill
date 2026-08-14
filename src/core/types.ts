@@ -44,6 +44,24 @@ export interface WorldState {
   /** Squad health, 0..1. Owned by the game; drives the green bar. */
   health: number;
   /**
+   * Damage multiplier on every round, from collected weapon pickups. 1 at the
+   * start of a run.
+   *
+   * THE QUALITY AXIS. Crowd size is quantity and this is quality, and they are
+   * separate on purpose: `tierFor(troops)` makes the weapon's LOOK a function of
+   * how many troops you have, which meant there was no such thing as a big weak
+   * army or a small elite one, and therefore nothing to balance. A rocket
+   * pickup raises this; it is the only thing that does.
+   *
+   * Deliberately NOT fed into the barrel and enemy hit-point models. Those
+   * derive from base damage, so an upgrade is a real advantage rather than
+   * something the difficulty curve immediately eats.
+   */
+  firepower: number;
+  /** Fire-rate multiplier from minigun pickups. Separate from `firepower`
+   *  because more bullets and harder bullets should not look the same. */
+  fireRate: number;
+  /**
    * How far back the camera has stepped, as a multiple of its resting distance.
    * 1 at every troop count the crowd still fits on screen at. Owned by the game
    * (see core/zoom.ts); the squad reads it because the extra room the camera
@@ -78,6 +96,8 @@ export function createWorld(center: THREE.Vector3): WorldState {
     elapsed: 0,
     weaponTier: 0,
     health: 1,
+    firepower: 1,
+    fireRate: 1,
     zoom: 1,
   };
 }
