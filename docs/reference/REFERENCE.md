@@ -170,8 +170,16 @@ camera and reads as a stubby dot. The reference is clearly billboarding too.
   `100`).
 - The number is **hit points and it counts down** under fire: `50 → 45`,
   `100 → 98`.
-- **Enemy soldiers stand on top of barrels** — gold rim-lit elites, tan
-  uniforms. Destroying the barrel drops them.
+- **ALLIES stand on top of barrels, not enemies.** Blue helmet, pale uniform,
+  gold rim-light — the PLAYER's colour scheme with an "upgraded" glow on it.
+  Destroying the barrel recruits them into your crowd as a stronger unit.
+
+  > **This line used to say "enemy soldiers... gold rim-lit elites".** That was a
+  > misread and it propagated into the code, which spawns them as hostiles.
+  > `reference-media/clip1a` settles it: the barrel riders wear the same blue
+  > helmet as the player's troops, while the actual enemies in frame are green
+  > zombies and brown walkers. The gold rim is an upgrade treatment, not a
+  > faction marker.
 - On death: **orange flash, wooden plank debris flying outward, grey smoke
   puff** (`frame_018`). Debris is chunky and readable, not a particle mist.
 

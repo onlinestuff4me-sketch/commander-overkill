@@ -189,6 +189,24 @@ const JOSTLE_RATE = 1.3;
  *  settle from behind and can tick a little past their target on arrival. */
 const SPRING_SLACK = 0.06;
 
+/** Seconds a dying soldier takes to topple and sink out of sight. Long enough
+ *  to read as a body falling, short enough that a big loss does not leave the
+ *  road littered while the next decision arrives. */
+const FALL_TIME = 0.55;
+/** Fraction of the fall spent at full size before the unit starts shrinking. */
+const FALL_HOLD = 0.55;
+/** Radians the body rotates as it goes down. Slightly past flat, so it lands
+ *  rather than balancing on its face. */
+const FALL_ANGLE = Math.PI * 0.62;
+/** Metres it sinks, which is what removes it once it is flat. */
+const FALL_SINK = 1.1;
+/** Topple about world X — away from the camera, so the fall is legible at this
+ *  shallow angle instead of happening edge-on. */
+const FALL_AXIS = new THREE.Vector3(1, 0, 0);
+/** Ceiling on queued spawn/death reports between drains. Matches the floater
+ *  burst cap: past this the eye cannot follow individual units anyway. */
+const MAX_QUEUE = 64;
+
 /** Run-in-place bob. abs(sin) doubles the rate, so ~2.7 footfalls/second. */
 const BOB_HEIGHT = 0.105;
 const BOB_RATE = 8.5;
@@ -396,6 +414,19 @@ export interface SquadSystem extends System {
    * `k` as a persistent stream identity.
    */
   sampleShooters(out: THREE.Vector3[], max: number): number;
+
+  /**
+   * Positions of units that APPEARED since the last call, drained.
+   *
+   * So a `+1` can be drawn over the soldier it is counting rather than
+   * scattered somewhere plausible. The two were unrelated before, which made
+   * the payout read as a particle effect that happened to coincide with the
+   * crowd getting bigger — the point of one floater per unit is that you can
+   * follow each one to a body.
+   */
+  takeSpawns(out: THREE.Vector3[], max: number): number;
+  /** Positions of units that STARTED DYING since the last call, drained. */
+  takeDeaths(out: THREE.Vector3[], max: number): number;
 }
 
 export function createSquad(scene: THREE.Scene): SquadSystem {
@@ -425,6 +456,11 @@ class Squad implements SquadSystem {
   #radiusZ = 0;
   #shapedFor = -1;
   #shapedAtZoom = 1;
+  /** 0 alive, ramping to 1 as a dying unit topples. Drives the fall in render. */
+  #fall = new Float32Array(MAX_TROOPS);
+  /** Slots that appeared / began dying this tick, drained by the orchestrator. */
+  #spawnQueue: number[] = [];
+  #deathQueue: number[] = [];
 
   // --- centre steering ---
   #centerX = 0;
@@ -616,6 +652,30 @@ class Squad implements SquadSystem {
     return written;
   }
 
+  takeSpawns(out: THREE.Vector3[], max: number): number {
+    return this.#drain(this.#spawnQueue, out, max);
+  }
+
+  takeDeaths(out: THREE.Vector3[], max: number): number {
+    return this.#drain(this.#deathQueue, out, max);
+  }
+
+  /** Empties `queue` into `out` as world positions. Always drains fully, even
+   *  past `max`, or a burst bigger than the caller's buffer would leak stale
+   *  slots into the next beat. */
+  #drain(queue: number[], out: THREE.Vector3[], max: number): number {
+    let written = 0;
+    for (const slot of queue) {
+      if (written >= max || written >= out.length) break;
+      const v = out[written];
+      if (!v) break;
+      v.set(this.#posX[slot]!, MUZZLE_Y * UNIT_SCALE, this.#posZ[slot]!);
+      written++;
+    }
+    queue.length = 0;
+    return written;
+  }
+
   // -------------------------------------------------------------------------
   // System
   // -------------------------------------------------------------------------
@@ -684,6 +744,8 @@ class Squad implements SquadSystem {
         // Pop in slightly outside the rim, then let the spring pull it in. The
         // growth team's +1 floater fires over the top of this.
         this.#live[i] = 1;
+        this.#fall[i] = 0;
+        if (this.#spawnQueue.length < MAX_QUEUE) this.#spawnQueue.push(i);
         // Clamped like any other position, against the same overhang backstop —
         // the 1.18 overshoot is the one place a unit is deliberately placed
         // OUTSIDE the blob's own reach, so it is the one place that could throw
@@ -730,8 +792,23 @@ class Squad implements SquadSystem {
         this.#velX[i] = vx;
       }
 
+      // --- death topple ---
+      // A unit that dies FALLS OVER and drops through the road rather than
+      // shrinking where it stood. Shrinking reads as "removed from a count";
+      // toppling reads as "that soldier died", which is the whole difference
+      // between a number going down and a loss the player feels.
+      if (!alive && this.#live[i] === 1 && this.#fall[i] === 0) {
+        this.#fall[i] = 1e-4;
+        if (this.#deathQueue.length < MAX_QUEUE) this.#deathQueue.push(i);
+      }
+      if (this.#fall[i]! > 0) {
+        this.#fall[i] = Math.min(1, this.#fall[i]! + dt / FALL_TIME);
+      }
+
       // --- pop scale ---
-      const goal = alive ? 1 : 0;
+      // Dying units hold their size until the topple is most of the way done,
+      // so the body is visible falling instead of vanishing as it tips.
+      const goal = alive ? 1 : this.#fall[i]! < FALL_HOLD ? 1 : 0;
       const pv = this.#popVel[i]! + ((goal - this.#pop[i]!) * POP_K - this.#popVel[i]! * POP_C) * dt;
       this.#popVel[i] = pv;
       const p = this.#pop[i]! + pv * dt;
@@ -742,8 +819,9 @@ class Squad implements SquadSystem {
 
       // Zero it outright on the way out, or the slot freezes mid-shrink and
       // leaves a sliver of a soldier standing on the road forever.
-      if (!alive && this.#pop[i]! < 0.01) {
+      if (!alive && this.#fall[i]! >= 1 && this.#pop[i]! < 0.01) {
         this.#live[i] = 0;
+        this.#fall[i] = 0;
         this.#pop[i] = 0;
         this.#prevPop[i] = 0;
       }
@@ -762,13 +840,23 @@ class Squad implements SquadSystem {
     quat.identity();
 
     for (let i = 0; i < n; i++) {
+      const fall = this.#fall[i]!;
       const x = lerp(this.#prevX[i]!, this.#posX[i]!, alpha);
       const z = lerp(this.#prevZ[i]!, this.#posZ[i]!, alpha);
       const y = lerp(this.#prevBob[i]!, this.#bob[i]!, alpha);
       const p = lerp(this.#prevPop[i]!, this.#pop[i]!, alpha);
       const s = p * UNIT_SCALE;
 
-      pos.set(x, y, z);
+      if (fall > 0) {
+        // Topple away from the camera and sink. Eased so the first part of the
+        // fall is quick and the landing settles.
+        const e = fall * fall;
+        quat.setFromAxisAngle(FALL_AXIS, -e * FALL_ANGLE);
+        pos.set(x, y - e * FALL_SINK, z);
+      } else {
+        quat.identity();
+        pos.set(x, y, z);
+      }
       scl.set(s, s, s);
       m.compose(pos, quat, scl);
       this.#body.setMatrixAt(i, m);

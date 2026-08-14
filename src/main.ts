@@ -39,6 +39,7 @@ import { createFloaters } from "./ui/floaters";
 import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
 import { createTroopCount } from "./ui/troopcount";
+import { createNetPop } from "./ui/netpop";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
 
@@ -70,6 +71,9 @@ const bossBar = createBossBar(ui);
 // The only number on screen used to be the boss bar's, which counts DOWN.
 // Players read it as their army. Now the army has its own readout.
 const troopCount = createTroopCount(ui);
+// The per-unit +1s say WHICH soldiers; they are bad at saying HOW MANY when a
+// row resolves three segments at once. This is the running total on top.
+const netPop = createNetPop(ui, stage.camera);
 
 const renderables: System[] = [
   squad,
@@ -81,6 +85,7 @@ const renderables: System[] = [
   growthFx,
   bossBar,
   troopCount,
+  netPop,
 ];
 
 // ── Rewards ────────────────────────────────────────────────────────────────
@@ -96,16 +101,30 @@ function payTroops(amount: number): void {
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
   const delta = world.troops - before;
   if (delta === 0) return;
-  if (delta > 0) {
-    floaters.spawn(squad.center, delta, squad.radiusX);
-    growthFx.play(squad.center, squad.radius);
-    return;
-  }
-  // A red gate is the same beat run backwards, and it has to be as legible as
-  // the payout — the player needs to see the size of what it cost, not just
-  // watch a bar shrink. Counted off ACTUAL losses, so a -20 taken at 8 troops
-  // rains eight, not twenty.
-  floaters.drop(squad.center, -delta, squad.radiusX);
+  netPop.add(delta);
+  if (delta > 0) growthFx.play(squad.center, squad.radius);
+  // The floaters are NOT spawned here any more. A `+1` has to sit over the
+  // soldier it is counting, and that soldier does not exist yet — the squad
+  // creates him on its next update. `drainSquadEvents()` runs after that and
+  // places the glyphs on the actual bodies.
+}
+
+/** Scratch for the squad's spawn/death reports. Allocated once. */
+const bodyEvents = Array.from({ length: 32 }, () => new THREE.Vector3());
+
+/**
+ * Put a glyph on every body that just appeared or fell.
+ *
+ * Runs immediately after `squad.update`, because that is the tick where the new
+ * units get their positions and the dying ones start toppling. Any earlier and
+ * there is nothing to point at; any later and the glyph is a frame behind the
+ * body it belongs to.
+ */
+function drainSquadEvents(): void {
+  const gained = squad.takeSpawns(bodyEvents, bodyEvents.length);
+  if (gained > 0) floaters.spawnAt(bodyEvents, gained, "gain");
+  const lost = squad.takeDeaths(bodyEvents, bodyEvents.length);
+  if (lost > 0) floaters.spawnAt(bodyEvents, lost, "loss");
 }
 
 // `troops`, not `value`: the panel's number is what a WHOLE army walking through
@@ -126,9 +145,33 @@ gates.onResolve((hit) => {
   payTroops(hit.troops);
 });
 
+/**
+ * A DESTROYED BARREL RECRUITS ITS RIDER.
+ *
+ * The figures standing on barrels were built as hostile "gold rim-lit elites",
+ * on the strength of a line in REFERENCE.md that turned out to be a misread of
+ * the footage. `reference-media/clip1a` settles it: they wear the PLAYER's blue
+ * helmet and pale uniform with a gold upgrade glow, while the actual enemies in
+ * the same frames are green zombies and brown walkers. Shooting a barrel is
+ * supposed to free an ally, not drop an attacker.
+ *
+ * So the rider is removed rather than released, and the barrel pays a recruit
+ * bonus on top of its normal payout. That bonus is what makes shooting cover
+ * worth doing for its own sake instead of only clearing a path.
+ *
+ * NOT YET the "stronger unit" the reference implies — every troop is currently
+ * identical, so there is nothing for a recruit to be stronger THAN. That needs
+ * the split between crowd size and weapon tier discussed in the pacing
+ * proposal, and it is the natural first piece of it.
+ */
+const RECRUIT_BONUS = 3;
+
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
   payTroops(barrelPayout(maxHp));
-  if (tag >= 0) enemies.unpin(tag);
+  if (tag >= 0) {
+    enemies.remove(tag);
+    payTroops(RECRUIT_BONUS);
+  }
 });
 
 /**
@@ -294,6 +337,9 @@ function seatRider(_id: number, tag: number, x: number, topY: number, z: number)
 // ── Collision ──────────────────────────────────────────────────────────────
 
 const BARREL_PAD = 0.2;
+/** Gates span the road, so lateral tolerance matters less than depth; this is
+ *  just enough that a round grazing a segment edge still counts. */
+const GATE_PAD = 0.1;
 const ENEMY_PAD = 0.32;
 
 /**
@@ -311,6 +357,11 @@ function resolveHits(): void {
     const y = view.y[id]!;
     const z = view.z[id]!;
     const dmg = view.damage[id]!;
+
+    // Gates FIRST and without consuming: a blue segment grows when it is shot,
+    // and the reference plainly shows fire passing over a barrier to reach what
+    // is behind it. A gate that ate the stream would be a wall, not a decision.
+    gates.shootAt(x, z, GATE_PAD, dmg);
 
     if (barrels.damageAt(x, z, BARREL_PAD, dmg) >= 0) {
       bullets.consume(id, x, y, z);
@@ -356,6 +407,8 @@ function tick(dt: number): void {
 
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
     squad.update(dt, world);
+    // Immediately after, while the bodies that just arrived or fell are current.
+    drainSquadEvents();
 
     // 2. Muzzles sit at the blob's front edge, spread across its width — firing
     //    from a single point reads as one soldier no matter how many there are.
@@ -386,6 +439,7 @@ function tick(dt: number): void {
     bossBar.update(dt, world);
     // Last of the readouts, so it reports the count this tick actually ended on.
     troopCount.update(dt, world);
+    netPop.update(dt, world);
 
     scrolled += world.scrollSpeed * dt;
 
@@ -569,6 +623,10 @@ if (import.meta.env.DEV) {
           }
         }
         return { samples, deaths, final: world.troops };
+      },
+      /** Face values of every live unresolved gate segment, nearest row first. */
+      gateValues(): number[] {
+        return gates.debugValues();
       },
       /** Place an exact gate row, for testing how a wide crowd resolves it. */
       spawnGate(values: number[], z = SPAWN_Z): void {

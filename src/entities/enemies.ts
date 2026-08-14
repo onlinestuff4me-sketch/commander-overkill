@@ -148,6 +148,14 @@ export interface EnemySystem extends System {
   pin(id: number, x: number, y: number, z: number): void;
   /** Release a pinned elite. It falls to the road and starts advancing. */
   unpin(id: number): void;
+  /**
+   * Take a unit off the board without killing it.
+   *
+   * For a barrel rider that gets RECRUITED rather than dropped: no death
+   * callback, no kill credit, no debris — it simply stops being an enemy,
+   * because it never was one. See the note on `onDestroyed` in main.ts.
+   */
+  remove(id: number): void;
 
   isAlive(id: number): boolean;
   /** Current hit points, or -1 for a dead/invalid id. */
@@ -491,6 +499,12 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       u.y = y;
       u.z = z;
       u.vy = 0;
+    },
+
+    remove(id) {
+      const u = units[id];
+      if (!u || !u.alive) return;
+      retire(id, u, false);
     },
 
     unpin(id) {

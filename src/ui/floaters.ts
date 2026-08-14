@@ -103,6 +103,9 @@ const MIN_REACH = 1.2;
 /** Metres above the squad centre the lowest floaters appear (helmet height). */
 const HEIGHT_BASE = 1.25;
 const HEIGHT_SPREAD = 1.5;
+/** Metres above a body's muzzle height the anchored glyph sits. Just clear of
+ *  the helmet, so the number reads as belonging to that soldier. */
+const ANCHOR_LIFT = 0.55;
 /** Default scatter radius when the caller does not know the blob's size. */
 const DEFAULT_RADIUS = 1.6;
 
@@ -242,6 +245,17 @@ export interface FloaterSystem extends System {
    * congratulating the player for losing half their army.
    */
   drop(center: THREE.Vector3, count: number, radius?: number): void;
+  /**
+   * Place glyphs at EXACT world positions rather than scattering them over the
+   * blob — one per body that appeared or died.
+   *
+   * The scatter placement was built to keep a burst legible, and it does, but it
+   * severs the link between a `+1` and the soldier it counts. When the crowd can
+   * report where each unit actually arrived or fell, anchoring beats scattering:
+   * the player can follow a glyph down to a body. `points` is read immediately
+   * and not retained.
+   */
+  spawnAt(points: readonly THREE.Vector3[], count: number, kind?: "gain" | "loss"): void;
   /** Floaters currently alive, counting ones still inside their spawn stagger. */
   readonly active: number;
   dispose(): void;
@@ -490,6 +504,44 @@ class Floaters implements FloaterSystem {
 
   drop(center: THREE.Vector3, count: number, radius = DEFAULT_RADIUS): void {
     this.#burst(center, count, radius, KIND_LOSS);
+  }
+
+  spawnAt(points: readonly THREE.Vector3[], count: number, kind: "gain" | "loss" = "gain"): void {
+    const k = kind === "loss" ? KIND_LOSS : KIND_GAIN;
+    const n = Math.min(count, points.length, MAX_PER_BURST);
+    for (let i = 0; i < n; i++) {
+      const at = points[i];
+      if (!at) break;
+      const f = this.#pool[this.#cursor % CAPACITY]!;
+      this.#cursor++;
+
+      f.kind = k;
+      // Directly over the body for a gain, and directly over the falling body
+      // for a loss — the glyph is a label on a specific soldier, so it does not
+      // get the scatter's outward drift either.
+      f.x = at.x;
+      f.y = at.y + ANCHOR_LIFT;
+      f.z = at.z;
+      f.px = f.x;
+      f.py = f.y;
+      f.pz = f.z;
+
+      f.vx = rand2() * DRIFT * 0.25;
+      if (k === KIND_LOSS) {
+        f.vy = -FALL_START;
+        f.vz = FALL_TOWARD;
+      } else {
+        f.vy = RISE;
+        f.vz = 0;
+      }
+
+      f.life = (k === KIND_LOSS ? LOSS_LIFETIME : LIFETIME) * (1 + rand2() * LIFETIME_JITTER);
+      f.delay = (i / Math.max(1, n)) * STAGGER * rand();
+      f.age = 0;
+      f.prevAge = 0;
+      if (!f.live) this.#live++;
+      f.live = true;
+    }
   }
 
   /** Placement is identical for both kinds — only the launch velocity, the
