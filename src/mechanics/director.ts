@@ -42,8 +42,36 @@
  * beat table, not this loop.
  */
 
-/** What the director can ask the orchestrator to put on the road. */
-export type Placement = "gate" | "barrels" | "walkers";
+/**
+ * What the director can ask the orchestrator to put on the road.
+ *
+ * The last two are COMPOUND: two things at the same z, on opposite sides, placed
+ * so they cannot overlap. That is the shape a genuine either/or has to take.
+ *
+ * A playtester's diagnosis, and it was right: "everything that comes at me is an
+ * inevitability, and I can do little to move out of its way." Sequential content
+ * cannot fix that on its own, because a crowd only has to be in one place at the
+ * moment each row arrives — it can take the best of every row in turn. Two
+ * prizes on the same plane is the one arrangement where taking one means not
+ * taking the other, whatever the player's reflexes are.
+ *
+ *   blockade    a gate row on one side, an enemy pack standing in the gap
+ *   crossroads  a barrel cluster on one side, a gate row on the other
+ */
+export type Placement = "gate" | "barrels" | "walkers" | "blockade" | "crossroads";
+
+/**
+ * A placement plus which side of the road it wants.
+ *
+ * `side` is −1 left, +1 right, 0 "anywhere". It is relative to the beat's own
+ * phrase side, resolved by the director, so a beat can say "put the guard where
+ * the prize is" (both +1) or "make them cross for it" (+1 then −1) without
+ * knowing or caring which kerb that turns out to be.
+ */
+export interface Cue {
+  readonly what: Placement;
+  readonly side: number;
+}
 
 /**
  * BEATS — the corridor's rhythm, as data.
@@ -62,6 +90,16 @@ export interface Beat {
   readonly name: string;
   /** What this beat puts on the road, in order. */
   readonly places: readonly Placement[];
+  /**
+   * Which side each placement wants, parallel to `places`. +1 is the beat's own
+   * phrase side, −1 the other kerb, 0 anywhere. Omit for all-free.
+   *
+   * This is where a beat stops being a list of objects and becomes a shape. Two
+   * +1s in a row is a guard standing in front of a prize; +1 then −1 is a
+   * crossing that costs most of the gap between them (see LATERAL_SPEED in
+   * entities/squad.ts — a full crossing is 1.7 s against a 1.8 s gap).
+   */
+  readonly sides?: readonly number[];
   /** Extra metres of clear road AFTER the beat, on top of the normal spacing. */
   readonly trail: number;
   /** Relative likelihood of being picked. Not a probability — normalised. */
@@ -74,20 +112,32 @@ export const BEATS: readonly Beat[] = [
   { name: "decision", places: ["gate"], trail: 0, weight: 4 },
 
   // Somewhere for the guns to matter, with no decision on top of it.
-  { name: "combat", places: ["barrels", "walkers"], trail: 4, weight: 2 },
+  { name: "combat", places: ["barrels", "walkers"], sides: [1, 1], trail: 4, weight: 2 },
 
   // The two mechanics interacting: shoot through the cover, then immediately
   // choose. This is the beat a fixed cycle could only produce by accident.
-  { name: "gauntlet", places: ["barrels", "gate"], trail: 2, weight: 2 },
+  { name: "gauntlet", places: ["barrels", "gate"], sides: [1, 1], trail: 2, weight: 2 },
 
-  // A run of decisions with no combat between them — pure steering.
-  { name: "fork", places: ["gate", "gate"], trail: 3, weight: 2 },
+  // Two decisions on OPPOSITE kerbs. Taking both is not physically available —
+  // a full crossing eats the whole gap — so this is the beat that asks the
+  // player to give one of them up on purpose.
+  { name: "fork", places: ["gate", "gate"], sides: [1, -1], trail: 3, weight: 2 },
 
   // Nothing at all. Cheap to build, and it is what makes the rest read.
   { name: "rest", places: [], trail: 16, weight: 1 },
 
-  // Loud on purpose: cover, a wave, and a decision in quick succession.
-  { name: "surge", places: ["walkers", "barrels", "gate"], trail: 6, weight: 1 },
+  // The either/or, on one plane: a gate row on one side and a pack of walkers
+  // standing in the gap beside it. Threading the gap means fighting through
+  // bodies; taking the row means paying whatever the row asks.
+  { name: "blockade", places: ["blockade"], trail: 5, weight: 2 },
+
+  // Growth or firepower, and only one of them. The barrels carry a pickup and
+  // the row carries troops, on the same plane, on opposite kerbs.
+  { name: "crossroads", places: ["crossroads"], trail: 6, weight: 2 },
+
+  // Loud on purpose: cover, a wave, and a decision in quick succession, with
+  // the wave planted where the cover was so the guns are already pointed at it.
+  { name: "surge", places: ["walkers", "barrels", "gate"], sides: [1, 1, -1], trail: 6, weight: 1 },
 ];
 
 /**
@@ -98,7 +148,19 @@ export const BEATS: readonly Beat[] = [
  * phrase, and forbidding all repeats makes the sequence feel shuffled rather
  * than composed.
  */
-const NO_REPEAT: ReadonlySet<string> = new Set(["rest", "surge"]);
+const NO_REPEAT: ReadonlySet<string> = new Set(["rest", "surge", "blockade", "crossroads"]);
+
+/**
+ * Does this placement put a DECISION on the road?
+ *
+ * Both spacing and the dry-streak limiter care about decisions rather than
+ * objects, and the compound placements each contain a gate row. Answering "is it
+ * literally the string 'gate'" would give a blockade the scenery gap and let a
+ * corridor of nothing but blockades count as dry.
+ */
+function hasGate(p: Placement): boolean {
+  return p === "gate" || p === "blockade" || p === "crossroads";
+}
 
 /**
  * Most placements the corridor may run without a gate before the next beat is
@@ -156,7 +218,7 @@ export interface DirectorState {
    * happen — the alternative is dropping both on the same plane, which is the
    * bug this module exists to prevent.
    */
-  advance(metres: number): Placement | null;
+  advance(metres: number): Cue | null;
   /** Back to the start of the cycle. For a run restart. */
   reset(): void;
   /** Placements made since the last reset. Diagnostics and tests. */
@@ -189,6 +251,9 @@ export function createDirector(seed = 0x5eed): DirectorState {
 
   let beat: Beat = BEATS[0]!;
   let step = 0;
+  /** Which kerb the current beat's "+1" resolves to. Re-rolled per beat, so the
+   *  corridor does not develop a handedness a player can lean on. */
+  let phraseSide = 1;
   let lastName = "";
   let count = 0;
   let pending = 0;
@@ -217,13 +282,15 @@ export function createDirector(seed = 0x5eed): DirectorState {
         // Leads with a gate, not merely contains one: `surge` puts two
         // placements down before its decision, so accepting it here would let
         // the dry streak run two past the limit it is supposed to enforce.
-        if (neededGate && b.places[0] !== "gate") break;
+        if (neededGate && !hasGate(b.places[0] ?? "barrels")) break;
         return b;
       }
     }
     // Fall back to the plainest beat that satisfies the constraint rather than
     // to BEATS[0] blindly, so the guarantee holds even on an unlucky streak.
-    return neededGate ? (BEATS.find((b) => b.places[0] === "gate") ?? BEATS[0]!) : BEATS[0]!;
+    return neededGate
+      ? (BEATS.find((b) => hasGate(b.places[0] ?? "barrels")) ?? BEATS[0]!)
+      : BEATS[0]!;
   }
 
   /**
@@ -237,6 +304,7 @@ export function createDirector(seed = 0x5eed): DirectorState {
       lastName = beat.name;
       beat = pickBeat();
       step = 0;
+      phraseSide = rng() < 0.5 ? -1 : 1;
     }
   }
 
@@ -248,7 +316,7 @@ export function createDirector(seed = 0x5eed): DirectorState {
    * gap and put two decisions 8 m apart.
    */
   function nextGap(from: Placement, to: Placement): number {
-    const base = from === "gate" && to === "gate" ? GATE_TO_GATE_SPACING : SPACING;
+    const base = hasGate(from) && hasGate(to) ? GATE_TO_GATE_SPACING : SPACING;
     const jitter = (rng() * 2 - 1) * SPACING_JITTER;
     const owed = trail;
     trail = 0;
@@ -264,20 +332,25 @@ export function createDirector(seed = 0x5eed): DirectorState {
       ensureReady();
       const placement = beat.places[step];
       if (!placement) return null;
+      const side = (beat.sides?.[step] ?? 0) * phraseSide;
       step++;
       count++;
-      sinceGate = placement === "gate" ? 0 : sinceGate + 1;
+      // A compound placement contains a gate, so it resets the dry streak too —
+      // otherwise a run of blockades would read as "no decisions" to the limiter
+      // while being nothing but decisions on screen.
+      sinceGate = hasGate(placement) ? 0 : sinceGate + 1;
 
       // Resolve the FOLLOWING placement before measuring the gap, so the
       // spacing rule sees across the beat boundary.
       ensureReady();
       gap = nextGap(placement, beat.places[step] ?? "barrels");
-      return placement;
+      return { what: placement, side };
     },
 
     reset() {
       beat = BEATS[0]!;
       step = 0;
+      phraseSide = 1;
       lastName = "";
       count = 0;
       pending = 0;

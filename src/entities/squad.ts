@@ -291,6 +291,42 @@ const HP_BAR_Y = 2.05;
 const CENTER_FOLLOW = 30;
 
 /**
+ * TOP LATERAL SPEED, and the reason strategy exists in this game at all.
+ *
+ * The lag above is a TIME CONSTANT, not a speed limit, so the crowd reached any
+ * point on the road in about a tenth of a second no matter how far away it was.
+ * Position therefore cost nothing, and anything that costs nothing cannot be
+ * traded against anything else: with rows 11–16 m apart (1.8–2.7 s at the
+ * default scroll) the player could take the best segment of every row on the
+ * board, on both kerbs, in any order. That — not the road's width — is why a
+ * playtester reported having no meaningful decisions to make. Widening the road
+ * alone would only have given them a bigger free-travel area.
+ *
+ * A speed cap turns the road into a distance again. At 7 m/s a full crossing of
+ * the 11.2 m road takes 1.6 s, which is most of the gap between two placements:
+ * two prizes on opposite kerbs one row apart are now genuinely exclusive, and
+ * two on the same side are still free. That ratio — crossing time against
+ * placement spacing — is the dial the whole strategic layer turns on. If either
+ * `SPACING` in mechanics/director.ts or `scrollSpeed` moves, this moves with it.
+ *
+ * AND A BIG ARMY IS A JUGGERNAUT. A thousand men do not change lanes like three,
+ * and making that literal gives crowd size its first real cost: past
+ * `MASS_TROOPS` the cap eases down toward `MASS_SPEED`, so the late game is
+ * played by committing early rather than by darting. Kept mild — this is meant
+ * to add weight, not to take the controls away.
+ */
+const LATERAL_SPEED = 7;
+const MASS_TROOPS = 400;
+const MASS_SPEED = 5;
+/**
+ * Metres/second² the centre gains and sheds speed at. Without it the cap is a
+ * hard clamp, so the crowd snaps from stationary to full speed and back and the
+ * weight the cap is supposed to add never reads. At 34 the crowd is at full
+ * lateral speed in ~0.2 s — a lean into the turn, not a delay.
+ */
+const LATERAL_ACCEL = 34;
+
+/**
  * Uniform, straight off the reference: blue helmet, cream shirt, navy trousers.
  * The cream/blue/navy contrast is the whole reason a player can tell their own
  * crowd from the tan/brown enemies at a glance, so the shirt is the one colour
@@ -514,6 +550,9 @@ class Squad implements SquadSystem {
   // --- centre steering ---
   #centerX = 0;
   #prevCenterX = 0;
+  /** Metres/second the centre is sliding at. Integrated rather than derived so
+   *  the speed cap and the acceleration ramp have something to act on. */
+  #centerVel = 0;
 
   /** Own clock rather than world.elapsed. The bob is the one thing that must
    *  never stop, and it should not depend on another system remembering to
@@ -757,7 +796,19 @@ class Squad implements SquadSystem {
     const targetX = clamp(laneToX(world.squadLane), -CENTER_X_LIMIT, CENTER_X_LIMIT);
 
     this.#prevCenterX = this.#centerX;
-    this.#centerX += (targetX - this.#centerX) * Math.min(1, CENTER_FOLLOW * dt);
+    // The lag says how eagerly the crowd wants to be somewhere; the cap says how
+    // fast it is physically able to get there. Both are needed — the lag alone
+    // is a time constant, so it arrives just as quickly from across the road as
+    // from next door, which is what made position free. See LATERAL_SPEED.
+    const want = (targetX - this.#centerX) * CENTER_FOLLOW;
+    const top = this.#topLateralSpeed();
+    const goal = clamp(want, -top, top);
+    const step = LATERAL_ACCEL * dt;
+    this.#centerVel = clamp(goal - this.#centerVel, -step, step) + this.#centerVel;
+    // Never overshoot the target inside one tick — at 60 Hz the cap alone would
+    // let a crowd 1 cm from its goal sail 12 cm past it and buzz.
+    const travel = clamp(this.#centerVel * dt, -Math.abs(targetX - this.#centerX), Math.abs(targetX - this.#centerX));
+    this.#centerX += travel;
     this.center.set(this.#centerX, 0, SQUAD_Z);
     world.squadCenter.copy(this.center);
     // NOT `radiusX`. That is the ellipse the crowd is LAID OUT in, and at small
@@ -1007,6 +1058,16 @@ class Squad implements SquadSystem {
 
   // -------------------------------------------------------------------------
 
+
+  /**
+   * Top lateral speed for the current army. Eases from `LATERAL_SPEED` down to
+   * `MASS_SPEED` as the crowd passes `MASS_TROOPS`, on a curve rather than a
+   * cliff so no single reward is the moment the controls got heavier.
+   */
+  #topLateralSpeed(): number {
+    const t = Math.min(1, this.#count / MASS_TROOPS);
+    return LATERAL_SPEED + (MASS_SPEED - LATERAL_SPEED) * t * t;
+  }
 
   /** Clump ellipse from troop count. Only runs when the count actually moves. */
   #reshape(zoom: number): void {

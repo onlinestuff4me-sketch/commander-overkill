@@ -147,8 +147,8 @@ const CLIMB_PER_DAMAGE = 1 / 55;
  *
  * The floor is what keeps a one-soldier squad's first gate meaningful.
  */
-const REWARD_SPAN_BASE = 1.92;
-const REWARD_SPAN_EXPONENT = 0.685;
+const REWARD_SPAN_BASE = 2.2;
+const REWARD_SPAN_EXPONENT = 0.6;
 const REWARD_SPAN_MIN = 8;
 
 /**
@@ -167,6 +167,38 @@ const REWARD_SPAN_MIN = 8;
  */
 const JACKPOT_CHANCE = 0.2;
 const JACKPOT_MULTIPLE = 2.8;
+
+/**
+ * Where a row of `count` segments sits on the road, and how wide it is.
+ *
+ * Pure and exported so the layout rules can be checked without a GPU — the same
+ * reason `composeAutoRow` is. `bias` steers the row toward one side when the
+ * director wants a guard lined up with a prize (see mechanics/director.ts);
+ * pass 0 for a free roll.
+ */
+export interface RowPlacement {
+  /** World X of the row's middle. */
+  centerX: number;
+  /** Half the row's total width, in metres. */
+  halfSpan: number;
+}
+
+export function rowPlacement(rng: () => number, count: number, bias = 0): RowPlacement {
+  const halfSpan = Math.min(CORRIDOR_HALF_WIDTH, (count * SEGMENT_WIDTH) / 2);
+  // How far the row's middle may sit from the centreline without any of it
+  // hanging off the road. A four-wide row barely moves; a two-wide row can be
+  // anywhere, which is what makes narrow rows the ones worth steering for.
+  const reach = Math.max(0, CORRIDOR_HALF_WIDTH - halfSpan);
+  if (reach <= 1e-3) return { centerX: 0, halfSpan };
+
+  // The bias is a REQUEST, not a command: it picks the side, and the roll still
+  // decides how committed the row is to it. A director that could place rows
+  // exactly would produce a corridor that reads as a pattern within a minute.
+  const side = bias !== 0 ? Math.sign(bias) : rng() < 0.5 ? -1 : 1;
+  const flush = rng() < ROW_FLUSH_CHANCE || bias !== 0;
+  const centerX = flush ? side * reach * (0.65 + rng() * 0.35) : (rng() - 0.5) * reach * 0.5;
+  return { centerX, halfSpan };
+}
 
 /**
  * How far a blue segment may climb above where it started, for an army of
@@ -234,6 +266,57 @@ const CROSS_FRACTION = 1 / 3;
  *  a tolerance rather than a thickness — wide enough that a round travelling
  *  44 m/s cannot step over the plane between two ticks. */
 const GATE_HIT_DEPTH = 0.9;
+
+/**
+ * A ROW DOES NOT SPAN THE ROAD ANY MORE, and this is the single change that
+ * makes the game strategic rather than merely reactive.
+ *
+ * Rows used to be stretched from kerb to kerb and divided into `count` segments,
+ * which meant every row was a wall: the only question a gate could ask was
+ * "which part of this do you want", never "do you want this at all". A
+ * playtester put it exactly right — everything coming at you is an
+ * inevitability, and you can do little to move out of its way.
+ *
+ * So a segment now has a roughly FIXED PHYSICAL WIDTH and the row is however
+ * wide its segments add up to, placed somewhere on an 11.2 m road. The width of
+ * a row therefore carries information the player can read from a long way off:
+ *
+ *   2 segments   4.7 m   42% of the road   6.5 m of clear road — easily dodged
+ *   3 segments   7.0 m   63%               4.2 m — threadable by a small crowd
+ *   4 segments   9.4 m   84%               1.8 m — effectively unavoidable
+ *
+ * `composeAutoRow`'s existing shape roll (18% two, 68% three, 14% four) was
+ * cosmetic before and is now the difficulty of the row. Combined with the
+ * crowd's lateral speed cap (see LATERAL_SPEED in entities/squad.ts), a narrow
+ * row on the far kerb is a real decision: going for it means not being anywhere
+ * else for the next second and a half.
+ */
+const SEGMENT_WIDTH = 2.35;
+/**
+ * Chance a row is pushed flush against a kerb rather than centred.
+ *
+ * Flush leaves ONE continuous gap, which is the clearest possible read at
+ * distance: the barrier covers this much, the rest is open. Centred leaves two
+ * narrower gaps and is the harder shape, so it is the minority.
+ */
+const ROW_FLUSH_CHANCE = 0.72;
+
+/** Candidate positions `bestLane` scores across the road. 24 puts them ~0.47 m
+ *  apart, finer than the tolerance any single decision turns on. */
+const LANE_SAMPLES = 24;
+
+/**
+ * Chance of a 2-wide and a 3-wide row, per difficulty tier; the remainder is
+ * 4-wide. Indexed by the same tier that selects `PENALTY_BANDS`.
+ *
+ * Read down the table and it is the whole difficulty curve in one place: at tier
+ * 0 nearly every row can be walked around, at tier 2 four in ten cannot.
+ */
+const ROW_WIDTHS: readonly (readonly [two: number, three: number])[] = [
+  [0.45, 0.5],
+  [0.25, 0.55],
+  [0.1, 0.5],
+];
 
 /**
  * PENALTIES ARE A SHARE OF THE ARMY, painted as an absolute number.
@@ -338,7 +421,13 @@ export interface GateHit {
 
 export interface GateSystem extends System {
   setAutoSpawn(enabled: boolean): void;
-  spawnRow(segments: readonly (number | GateSegmentSpec)[], z?: number): boolean;
+  /** `placement` decides where on the road the row sits and how wide it is.
+   *  Omit it for a free roll — see `rowPlacement`. */
+  spawnRow(
+    segments: readonly (number | GateSegmentSpec)[],
+    z?: number,
+    placement?: RowPlacement,
+  ): boolean;
   onResolve(handler: (hit: GateHit) => void): () => void;
   /**
    * Register a bullet hit against any BLUE segment overlapping (x, z), raising
@@ -390,6 +479,11 @@ export function composeAutoRow(
   elapsed: number,
   troops: number,
   out: number[],
+  /** Ceiling on segments, so a caller that needs road left over beside the row
+   *  can ask for a narrow one. A compound placement (see `blockade` in
+   *  mechanics/director.ts) puts a second thing in the gap, and a four-wide row
+   *  covers 84% of the road — there would be no gap to put it in. */
+  maxCount = MAX_SEGMENTS,
 ): number {
   // A squad this small cannot absorb a wrong answer, so it is not asked one:
   // the penalties stay mild and a blue segment is always on the board.
@@ -406,8 +500,19 @@ export function composeAutoRow(
   const penaltyShare = (roll: number): number =>
     Math.min(PENALTY_CAP, band[0] + roll * (band[1] - band[0]));
 
+  // WIDTH IS THE DIFFICULTY, now that a row can be dodged. A two-wide row leaves
+  // 6.5 m of clear road and is a genuine "do you even want this"; a four-wide
+  // leaves 1.8 m and is the old unavoidable wall. Escalating the mix with the
+  // penalty tier is what turns Mischa's brief into geometry: early levels are
+  // about missed opportunity — the cost of a bad read is a reward you did not
+  // take — and late ones are about damage, because by then there is nowhere to
+  // stand that is free.
+  const widths = ROW_WIDTHS[tier] ?? ROW_WIDTHS[0]!;
   const shape = rng();
-  const count = shape < 0.18 ? 2 : shape < 0.86 ? 3 : 4;
+  const count = Math.max(
+    2,
+    Math.min(maxCount, shape < widths[0] ? 2 : shape < widths[0] + widths[1] ? 3 : 4),
+  );
   // Both draws happen unconditionally so the seeded stream advances by the same
   // amount either way — mercy forces the OUTCOME without shifting the sequence,
   // which is what keeps a seeded run reproducible across the threshold. Rolling
@@ -511,10 +616,20 @@ interface Row {
   postState: Post[];
   count: number;
   postCount: number;
+  /** Where the row sits on the road and how much of it it covers. Kept on the
+   *  row so `bestLane` can point the autopilot at the gap as well as at a
+   *  segment — "go around" is now a move, so a player has to be able to pick it. */
+  centerX: number;
+  halfSpan: number;
   z: number;
   prevZ: number;
   active: boolean;
   resolved: boolean;
+  /** True when the crowd actually hit something in this row. A row the crowd
+   *  drove AROUND is resolved but not smashed: it stays standing, its posts do
+   *  not fly, and it sails off the end of the corridor intact — which is what
+   *  "you avoided it" has to look like. */
+  smashed: boolean;
   /** Seconds since the barrier broke; negative while intact. */
   burst: number;
 }
@@ -526,6 +641,10 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
   /** Troop count as of the last update. `spawnRow` needs it to size a blue's
    *  ceiling and does not otherwise see the world. */
   let lastTroops = 1;
+  /** The crowd's real half-width, mirrored off the last update. `bestLane` needs
+   *  it to score a position the way `resolve` will actually judge it, and it has
+   *  no world to read. */
+  let lastHalfWidth = 0.3;
   let autoSpawn = options?.autoSpawn ?? true;
 
   const root = new THREE.Group();
@@ -680,15 +799,22 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       postState,
       count: 0,
       postCount: 0,
+      centerX: 0,
+      halfSpan: CORRIDOR_HALF_WIDTH,
       z: SPAWN_Z,
       prevZ: SPAWN_Z,
       active: false,
       resolved: false,
+      smashed: false,
       burst: -1,
     };
   }
 
-  function spawnRow(specs: readonly (number | GateSegmentSpec)[], z: number = SPAWN_Z): boolean {
+  function spawnRow(
+    specs: readonly (number | GateSegmentSpec)[],
+    z: number = SPAWN_Z,
+    placement?: RowPlacement,
+  ): boolean {
     let row: Row | undefined;
     for (const r of rows) {
       if (!r.active) {
@@ -705,11 +831,15 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // so a row with no blue in it still advances the stream by the same amount.
     const climbSpan = rewardSpan(lastTroops, rng() < JACKPOT_CHANCE);
 
-    // Normalise weights into world widths across the full road.
+    // Normalise weights into world widths across the row's own span — which is
+    // a slice of the road, not the whole of it. See SEGMENT_WIDTH.
     let weightSum = 0;
     for (let i = 0; i < count; i++) weightSum += weightOf(specs[i]);
-    const span = CORRIDOR_HALF_WIDTH * 2;
-    let cursor = -CORRIDOR_HALF_WIDTH;
+    const placed = placement ?? rowPlacement(rng, count);
+    const span = placed.halfSpan * 2;
+    let cursor = placed.centerX - placed.halfSpan;
+    row.centerX = placed.centerX;
+    row.halfSpan = placed.halfSpan;
 
     for (let i = 0; i < count; i++) {
       const spec = specs[i];
@@ -767,7 +897,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     // the post's LEFT (the leftmost takes the segment on its right) — that is the
     // pattern in frame_009, where only the far-right cap turns blue for the +2.
     row.postCount = count + 1;
-    let edge = -CORRIDOR_HALF_WIDTH;
+    let edge = placed.centerX - placed.halfSpan;
     for (let i = 0; i < row.postCount; i++) {
       const post = row.postState[i];
       if (!post) continue;
@@ -790,6 +920,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
     row.prevZ = z;
     row.active = true;
     row.resolved = false;
+    row.smashed = false;
     row.burst = -1;
     row.group.visible = true;
     row.group.position.set(0, 0, z);
@@ -893,7 +1024,6 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
 
   function resolve(row: Row, crossX: number, halfWidth: number): void {
     row.resolved = true;
-    row.burst = 0;
 
     const half = Math.max(0.15, halfWidth);
     const left = crossX - half;
@@ -918,13 +1048,18 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
       }
     }
 
-    // Steered off the end of the barrier, or threading a gap too small to count
-    // anywhere: the nearest segment is taken, so overhanging the road never lets
-    // the crowd through for free.
-    if (!anyCrossed) {
-      const seg = row.segments[dominant];
-      if (seg) seg.crossed = true;
-    }
+    // GOING AROUND IS FREE, and that is the point of the whole layout change.
+    //
+    // This used to charge the nearest segment whenever nothing was properly
+    // crossed, on the reasoning that a row spanned the road and so overhanging
+    // the kerb must not buy a free pass. Rows no longer span the road (see
+    // SEGMENT_WIDTH), so a crowd clear of the barrier is genuinely clear of it —
+    // and making that pay nothing is what turns a gate from a toll into a
+    // decision. Keeping the fallback would have made the wider road cosmetic.
+    if (!anyCrossed) return;
+
+    row.smashed = true;
+    row.burst = 0;
 
     for (let i = 0; i < row.count; i++) {
       const seg = row.segments[i];
@@ -965,6 +1100,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
   const system: GateSystem = {
     update(dt, world) {
       lastTroops = world.troops;
+      lastHalfWidth = world.squadHalfWidth;
       const speed = world.scrollSpeed;
       const crossZ = world.squadCenter.z;
       const crossX = world.squadCenter.x;
@@ -1030,7 +1166,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           if (seg.burst > BURST_LIFE) seg.group.visible = false;
         }
 
-        if (row.resolved) {
+        if (row.smashed) {
           row.burst += dt;
           for (let i = 0; i < row.postCount; i++) {
             const post = row.postState[i];
@@ -1047,6 +1183,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           // Every segment shot away before the crowd arrived: nothing left to
           // charge, so retire the row rather than resolving an empty barrier.
           row.resolved = true;
+          row.smashed = true;
           row.burst = 0;
         }
 
@@ -1055,7 +1192,7 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
           if (seg && seg.pop > 0) seg.pop = Math.max(0, seg.pop - TICK_POP_DECAY * dt);
         }
 
-        if (row.z > RECYCLE_Z || (row.resolved && row.burst > BURST_LIFE)) recycle(row);
+        if (row.z > RECYCLE_Z || (row.smashed && row.burst > BURST_LIFE)) recycle(row);
       }
     },
 
@@ -1149,16 +1286,35 @@ export function createGates(scene: THREE.Scene, options?: GateOptions): GateSyst
         // Rows travel toward the camera, so the nearest pending decision is the
         // one with the largest z.
         if (row.z <= bestZ) continue;
-        let bestValue = -Infinity;
+
+        // SCORE POSITIONS, NOT SEGMENTS.
+        //
+        // This used to walk the segments and aim at the highest number, which is
+        // not how the row resolves and therefore measured a player who does not
+        // exist: a crowd is metres wide, it smashes everything it overlaps, and
+        // the +9 next to a −14 is a trap. Sweeping candidate positions and
+        // scoring each one with the SAME rule `resolve` uses gets both real
+        // options — the best segment, and the gap beside the row — out of one
+        // loop, and gets them right for the crowd's actual width.
+        const half = Math.max(0.15, lastHalfWidth);
+        let bestScore = -Infinity;
         let bestX = 0;
-        for (let i = 0; i < row.count; i++) {
-          const seg = row.segments[i];
-          if (!seg) continue;
-          if (seg.value > bestValue) {
-            bestValue = seg.value;
-            bestX = seg.centerX;
+        for (let s = 0; s <= LANE_SAMPLES; s++) {
+          const x = -CORRIDOR_HALF_WIDTH + (s / LANE_SAMPLES) * CORRIDOR_HALF_WIDTH * 2;
+          let score = 0;
+          for (let i = 0; i < row.count; i++) {
+            const seg = row.segments[i];
+            if (!seg || seg.broken) continue;
+            const lo = Math.max(x - half, seg.centerX - seg.halfWidth);
+            const hi = Math.min(x + half, seg.centerX + seg.halfWidth);
+            if (hi - lo >= seg.halfWidth * 2 * CROSS_FRACTION) score += seg.value;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestX = x;
           }
         }
+
         bestZ = row.z;
         target = bestX / CORRIDOR_HALF_WIDTH;
       }

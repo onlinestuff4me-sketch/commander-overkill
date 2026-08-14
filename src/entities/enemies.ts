@@ -119,7 +119,17 @@ export type EnemyKind = "pack" | "elite" | "biker";
 /** Fired when a unit's hp hits zero. Primitives only — this runs inside update(). */
 export type EnemyKilled = (id: number, kind: EnemyKind, x: number, z: number) => void;
 /** Fired when a unit reaches the squad line. `hp` is what it still had left. */
-export type EnemyBreached = (id: number, kind: EnemyKind, hp: number) => void;
+/**
+ * `bodies` is how many of this unit are still STANDING when it reaches the
+ * crowd — eight for a pack you ignored, one or two for a pack you shot at, one
+ * for anything that is not a pack.
+ *
+ * On the callback because what a breach costs has to scale with what actually
+ * arrived. Charging a flat price per unit made a whole pack cost the same as a
+ * survivor, which made shooting them pointless and made walking through them
+ * free — and "walk through them" is one half of every blockade.
+ */
+export type EnemyBreached = (id: number, kind: EnemyKind, hp: number, bodies: number) => void;
 
 export interface EnemySystem extends System {
   /** Group holding every enemy mesh. Already added to the scene. */
@@ -631,7 +641,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
 
         if (!u.breached && u.z > breachZ) {
           u.breached = true;
-          for (const fn of breachedListeners) fn(i, u.kind, u.hp);
+          const bodies = u.kind === "pack" ? Math.max(0, u.crowdAlive) : 1;
+          for (const fn of breachedListeners) fn(i, u.kind, u.hp, bodies);
         }
         if (u.z > DESPAWN_Z) retire(i, u, false);
       }
@@ -859,19 +870,41 @@ function place(geo: THREE.BufferGeometry, x: number, y: number, z: number): THRE
  * Brown/tan walker: torso, legs, greenish head, wide brimmed hat. ~130 tris,
  * which at 240 instances is still one draw call and 31k triangles.
  */
+/**
+ * A walker.
+ *
+ * REBUILT IN RED, and the reason is a playtest report rather than art direction:
+ * a pack out at z −30 was described as "strange artifacts hovering over the
+ * road". They were not hovering and they were not artifacts — they were exactly
+ * where they should be, correctly shadowed, doing their job. They were brown
+ * lumps in brown hats on a grey road, at forty pixels, and nothing about them
+ * said "enemy".
+ *
+ * Red says it, and it says it in this game's own vocabulary: red is already the
+ * colour of a thing that takes troops off you, so a red silhouette approaching
+ * is legible before a single detail resolves. It is also the maximum possible
+ * separation from the player's own cream-and-blue crowd, which is the read that
+ * has to survive when the two are mixed together. The pale head stays — the
+ * green is the only cool note on the unit, and at distance it is what stops the
+ * whole thing collapsing into one blob.
+ *
+ * The brim is what makes the silhouette non-human at a glance. Kept, and widened
+ * slightly, because "it is not one of mine" is the first thing the shape has to
+ * answer and the second is "how many".
+ */
 function buildWalker(): THREE.BufferGeometry {
   const h = WALKER_HEIGHT;
   return mergeParts([
-    { geo: place(new THREE.BoxGeometry(0.3, 0.34, 0.2), 0, h * 0.17, 0), color: 0x5f4126 },
-    { geo: place(new THREE.BoxGeometry(0.36, 0.4, 0.24), 0, h * 0.5, 0), color: 0xb08248 },
-    { geo: place(new THREE.SphereGeometry(0.145, 6, 5), 0, h * 0.79, 0), color: 0x9fb27a },
+    { geo: place(new THREE.BoxGeometry(0.3, 0.34, 0.2), 0, h * 0.17, 0), color: 0x2e2126 },
+    { geo: place(new THREE.BoxGeometry(0.36, 0.4, 0.24), 0, h * 0.5, 0), color: 0xc23a2c },
+    { geo: place(new THREE.SphereGeometry(0.145, 6, 5), 0, h * 0.79, 0), color: 0xb9c98d },
     {
-      geo: place(new THREE.CylinderGeometry(0.27, 0.27, 0.045, 10), 0, h * 0.87, 0),
-      color: 0x6d4a2b,
+      geo: place(new THREE.CylinderGeometry(0.29, 0.29, 0.05, 10), 0, h * 0.87, 0),
+      color: 0x7d1f18,
     },
     {
       geo: place(new THREE.CylinderGeometry(0.13, 0.15, 0.16, 8), 0, h * 0.93, 0),
-      color: 0x7a5533,
+      color: 0x8e2a20,
     },
   ]);
 }

@@ -20,7 +20,7 @@ import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
 import type { System, WeaponTier } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
-import { createCorridor, laneToX } from "./mechanics/lane";
+import { createCorridor, CORRIDOR_HALF_WIDTH } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
 import {
@@ -31,7 +31,7 @@ import {
 } from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
 import type { Placement } from "./mechanics/director";
-import { composeAutoRow, createGates, MERCY_TROOPS } from "./mechanics/gates";
+import { composeAutoRow, createGates, MERCY_TROOPS, rowPlacement } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
 import { createPickups } from "./entities/pickups";
@@ -230,15 +230,35 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
  * and it is the thing that makes enemy hit points worth scaling at all: a wave
  * that survives long enough to arrive now has a consequence when it does.
  */
+/**
+ * What one surviving enemy body costs when it reaches the crowd, as a share of
+ * the army — and this is the price of the "or fight through them" half of every
+ * blockade.
+ *
+ * It used to be a flat count per UNIT: one troop for a whole eight-strong pack,
+ * whatever the army size. That made shooting a pack pointless and walking
+ * through one free, which measured out exactly as you would expect once the
+ * player could dodge a gate row — the autopilot's median run went from 436 to
+ * 660 troops with zero wipes, because "go around" had no downside anywhere on
+ * the board. A pack that arrives intact now costs about 12% of the army, which
+ * is the same order as a red segment; a pack you shot down to two costs 3%.
+ *
+ * Proportional for the same reason gate penalties are (see PENALTY_BANDS in
+ * mechanics/gates.ts): a fixed price is brutal early and irrelevant late.
+ */
+const BREACH_SHARE = 0.015;
+/** Multiplier per kind, on top of the per-body share. Elites and bikers are one
+ *  body but hit like several. */
 const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3 };
-enemies.onBreached((_id, kind) => {
+enemies.onBreached((_id, kind, _hp, bodies) => {
   // FREE while the squad is tiny, on the same threshold the gate mercy rule
   // uses. A pack is eight bodies and a two-troop army cannot kill any of them,
   // so charging for every breach turns the opening into a death spiral: too
   // weak to kill, so you lose troops, so you are weaker. Combat starts costing
   // once the army is established enough to do something about it.
   if (world.troops < MERCY_TROOPS) return;
-  payTroops(-(BREACH_COST[kind] ?? 1));
+  const weight = (BREACH_COST[kind] ?? 1) * Math.max(1, bodies);
+  payTroops(-Math.max(1, Math.round(world.troops * BREACH_SHARE * weight)));
 });
 
 // Placeholder boss pacing: the bar is a pure display, so something has to drive
@@ -248,7 +268,28 @@ enemies.onKilled(() => bossBar.damage(1));
 
 // ── Content pacing ─────────────────────────────────────────────────────────
 
-const ROW_LANES = [-0.62, 0, 0.62] as const;
+/**
+ * A BARREL CLUSTER IS A PLACE, NOT A ROW.
+ *
+ * Three barrels used to be spread across the lanes at ±0.62 and 0, which on the
+ * old narrow road meant they covered it end to end — the same "everything is a
+ * wall" problem gate rows had. They are now a tight group of three placed
+ * somewhere on the road, so shooting them is a DETOUR: you go to where they are,
+ * which is a second or so of not being anywhere else.
+ */
+const BARREL_SPACING = 1.95;
+const BARREL_CLUSTER = 3;
+/**
+ * Segments a compound placement's gate row may have.
+ *
+ * Two, so the row covers 42% of the road and there is genuinely somewhere else
+ * to be. The whole premise of a blockade or a crossroads is two options on one
+ * plane; a four-wide row covers 84% and there is no second option left to place.
+ */
+const COMPOUND_SEGMENTS = 2;
+/** Metres of road a cluster or a pack keeps clear of the kerb, so nothing ever
+ *  spawns half on the grass. */
+const PLACE_INSET = 1.3;
 const SPAWN_Z = -58;
 let rowIndex = 0;
 /** Suspends the director. Only the dev calibration harness touches this — a
@@ -300,12 +341,29 @@ function walkerHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
 }
 
-function place(what: Placement, z: number): void {
+/**
+ * A world X for a cluster of `width` metres, biased toward `side` when the
+ * director wants this lined up with something. Always leaves `PLACE_INSET` of
+ * road outside it so nothing straddles a kerb.
+ */
+function clusterX(width: number, side: number): number {
+  const reach = Math.max(0, CORRIDOR_HALF_WIDTH - width / 2 - PLACE_INSET);
+  if (reach <= 0) return 0;
+  const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
+  return dir * reach * (0.35 + rowRng() * 0.65);
+}
+
+/**
+ * `side` is the director's lateral request: −1 left, +1 right, 0 free. It is how
+ * a guard gets lined up with the prize it is guarding — see mechanics/director.ts.
+ */
+function place(what: Placement, z: number, side = 0): void {
   switch (what) {
-    case "gate":
-      composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer);
-      gates.spawnRow(gateBuffer, z);
+    case "gate": {
+      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer);
+      gates.spawnRow(gateBuffer, z, rowPlacement(rowRng, count, side));
       return;
+    }
 
     case "barrels": {
       rowIndex++;
@@ -316,16 +374,61 @@ function place(what: Placement, z: number): void {
         bullets.tuning,
         squad.radiusX,
       );
-      for (const lane of ROW_LANES) {
-        const rider = pickups.spawn(pickForRow(), laneToX(lane), barrels.riderY, z);
+      const width = (BARREL_CLUSTER - 1) * BARREL_SPACING + 1.7;
+      const cx = clusterX(width, side);
+      for (let i = 0; i < BARREL_CLUSTER; i++) {
+        const x = cx + (i - (BARREL_CLUSTER - 1) / 2) * BARREL_SPACING;
+        const lane = x / CORRIDOR_HALF_WIDTH;
+        const rider = pickups.spawn(pickForRow(), x, barrels.riderY, z);
         barrels.spawn(lane, z, hp, rider);
       }
       return;
     }
 
-    case "walkers":
-      enemies.spawnPack(0, z, 8, walkerHp());
+    case "walkers": {
+      // A pack is ~2 m across, so it is a thing standing in one part of the road
+      // rather than a line across it. That is what lets it guard an approach.
+      const lane = clusterX(2.2, side) / CORRIDOR_HALF_WIDTH;
+      enemies.spawnPack(lane, z, 8, walkerHp());
       return;
+    }
+
+    // ---- compound placements: two things on ONE plane, on opposite sides ----
+    //
+    // Everything above is sequential, and sequential content cannot force a
+    // choice: the crowd only has to be in one place at the moment each row
+    // arrives, so it can take the best of every row in turn. These two put both
+    // options on the same plane, where taking one is not taking the other.
+
+    case "blockade": {
+      // The gate takes one side; the walkers stand in the gap on the other, so
+      // the clear road is not clear. Pay the row, or fight through the bodies.
+      const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
+      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer, COMPOUND_SEGMENTS);
+      const placed = rowPlacement(rowRng, count, dir);
+      gates.spawnRow(gateBuffer, z, placed);
+      // Middle of whatever road the row left over, so the pack stands squarely
+      // in the way of the dodge rather than off beside it.
+      const inner = placed.centerX - dir * placed.halfSpan;
+      enemies.spawnPack(
+        (-dir * CORRIDOR_HALF_WIDTH + inner) / 2 / CORRIDOR_HALF_WIDTH,
+        z,
+        8,
+        walkerHp(),
+      );
+      return;
+    }
+
+    case "crossroads": {
+      // Bodies or firepower. The row pays troops, the barrels carry a pickup,
+      // and they are on opposite kerbs — this is the beat that teaches that a
+      // run heavy in one axis and empty in the other is a choice you made.
+      const dir = side !== 0 ? Math.sign(side) : rowRng() < 0.5 ? -1 : 1;
+      const count = composeAutoRow(rowRng, world.elapsed, world.troops, gateBuffer, COMPOUND_SEGMENTS);
+      gates.spawnRow(gateBuffer, z, rowPlacement(rowRng, count, dir));
+      place("barrels", z, -dir);
+      return;
+    }
   }
 }
 
@@ -353,7 +456,7 @@ function primeCorridor(): void {
   const step = 0.5;
   for (let d = 0; d < PRIME_SPAN; d += step) {
     const due = director.advance(step);
-    if (due) place(due, SPAWN_Z + (PRIME_SPAN - d));
+    if (due) place(due.what, SPAWN_Z + (PRIME_SPAN - d), due.side);
   }
 }
 
@@ -480,7 +583,7 @@ function tick(dt: number): void {
       // Distance, not time. Spacing is authored in metres of road, so it holds
       // even if the world speeds up or slows down.
       const due = director.advance(world.scrollSpeed * dt);
-      if (due) place(due, SPAWN_Z);
+      if (due) place(due.what, SPAWN_Z, due.side);
     }
 
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
@@ -525,7 +628,7 @@ function tick(dt: number): void {
     // Last, so it steps on the count this tick actually ended with — a gate
     // that pays 200 troops should move the camera on the same beat the +1s
     // bloom, not one tick later.
-    zoom.update(dt, world.troops);
+    zoom.update(dt, world.troops, squad.center.x);
     world.zoom = zoom.distance;
 
     if (world.troops <= 0) {
@@ -669,7 +772,7 @@ function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
  * the content rather than of anybody's thumbs, so measuring them needs a hand
  * that plays the same way every time.
  */
-function autopilot(seconds = 120, sampleEvery = 5) {
+function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
   const dt = 1 / 60;
   const ticks = Math.round(seconds / dt);
   const samples: { t: number; troops: number }[] = [];
@@ -677,9 +780,21 @@ function autopilot(seconds = 120, sampleEvery = 5) {
   let peak = world.troops;
   let worstDrop = 0;
   let prev = world.troops;
+  // REACTION TIME, because a bot that re-decides sixty times a second is not a
+  // measurement of the game — it is a measurement of the game played perfectly.
+  // At reaction 0 the autopilot wiped 0 runs in 16 while a human playtester was
+  // losing armies, and tuning the difficulty until an optimal player dies would
+  // have made the game unplayable for anyone else. Re-deciding every ~0.3 s puts
+  // it in the range a thumb actually operates in, and it is the setting the
+  // brief's per-level failure rates should be read against.
+  let sinceDecision = Infinity;
   for (let i = 0; i < ticks; i++) {
-    const want = gates.bestLane();
-    if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
+    sinceDecision += dt;
+    if (sinceDecision >= reaction) {
+      sinceDecision = 0;
+      const want = gates.bestLane();
+      if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
+    }
     tick(dt);
     peak = Math.max(peak, world.troops);
     // Biggest single-tick loss as a share of what was standing. A wipe is the
@@ -714,6 +829,10 @@ if (import.meta.env.DEV) {
   Object.assign(window, {
     __overkill: {
       world,
+      /** The live scene graph. For asking what is ACTUALLY in the world rather
+       *  than what a module believes it drew — the only way to chase down a
+       *  stray instance without a module volunteering a debug accessor. */
+      scene: stage.scene,
       probeDamagePerPass,
       /** Sweep the probe across troop counts. This is the barrel HP curve. */
       damageCurve(counts: readonly number[] = [1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120]) {
@@ -721,6 +840,12 @@ if (import.meta.env.DEV) {
       },
       setSpawning(on: boolean): void {
         contentSpawning = on;
+      },
+      /** Drop one placement at an exact Z, bypassing the director. For posing a
+       *  single piece of content in an otherwise empty corridor — the only way
+       *  to photograph one thing without the rest of the road in frame. */
+      place(what: Placement, z = SPAWN_Z): void {
+        place(what, z);
       },
       autopilot,
       /**
@@ -731,13 +856,13 @@ if (import.meta.env.DEV) {
        * project have been about whether a single unlucky playthrough meant the
        * economy was wrong; this is what replaces that with a number.
        */
-      sample(runs = 12, seconds = 110) {
+      sample(runs = 12, seconds = 110, reaction = 0.3) {
         const out: { final: number; peak: number; wiped: boolean }[] = [];
         for (let r = 0; r < runs; r++) {
           const before = wipes;
           resetRun();
           world.elapsed = 0;
-          const run = autopilot(seconds, seconds);
+          const run = autopilot(seconds, seconds, reaction);
           out.push({ final: run.final, peak: run.peak, wiped: wipes - before > 0 });
         }
         const finals = out.map((r) => r.final).sort((a, b) => a - b);
