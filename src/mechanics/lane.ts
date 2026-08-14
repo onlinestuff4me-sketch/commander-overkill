@@ -8,7 +8,34 @@
 
 import * as THREE from "three";
 
-export const CORRIDOR_HALF_WIDTH = 3.4;
+/**
+ * Half the carriageway, in metres.
+ *
+ * WAS 3.4, AND THAT WAS MOST OF THE STRATEGY PROBLEM. A 6.8 m road is narrower
+ * than a grown crowd, so every placement spanned it, every placement was
+ * therefore unavoidable, and the only question a gate ever asked was "which
+ * third of this wall do you want" — never "do you want this at all".
+ *
+ * 5.6 is set by the screen rather than by taste. Measured against the current
+ * camera (52° vertical, 22° above the horizon, portrait), the visible half-width
+ * on the road plane runs:
+ *
+ *     z      -6     -12     -20     -30     -45
+ *     half  3.87    5.12    6.79    8.87   12.00   metres
+ *
+ * Content is READ at roughly z −20 to −30 and COMMITTED to by about z −12, so a
+ * 5.6 m half-width is comfortably inside the frame everywhere a decision is
+ * actually being made, and only overflows in the last two seconds — where the
+ * reference clip's road overflows too. The screen was already carrying twice the
+ * lateral room the road was using.
+ *
+ * It costs nothing at the far end and buys two things at the near end: content
+ * that can leave a gap wide enough to drive through, and a crowd that only fills
+ * the road at ~250 troops instead of ~120, so most of a run is played by an army
+ * small enough to dodge with. That second one is emergent rather than authored,
+ * and it is the good kind: being enormous now costs you manoeuvring room.
+ */
+export const CORRIDOR_HALF_WIDTH = 5.6;
 /** How far down -Z the road is drawn. Beyond this the fog has taken over anyway. */
 export const CORRIDOR_LENGTH = 70;
 

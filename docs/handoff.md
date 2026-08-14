@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3._
+_Last updated: 2026-08-14, session 3 (second pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -10,18 +10,25 @@ _Last updated: 2026-08-14, session 3._
 **Repo:** `onlinestuff4me-sketch/commander-overkill`, public, `main`.
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
-**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 55 passing;
-`npm run build` succeeds; the page loads with no console errors. 75 draw calls
-and 199k triangles at 508 troops with the camera stepped back to 1.7.
+**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 60 passing;
+`npm run build` succeeds; the page loads with no console errors. 93 draw calls
+and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**The economy is measured, not guessed.** `__overkill.sample(16, 110)` plays
-sixteen full autopilot runs: median **436 troops**, against a 300–500 target, and
-**3 of 16 wiped**. A 50-second sample — the first two penalty tiers, which is the
-closest thing we have to "levels 1–2" — wipes **0 of 16** at a median of 258. Read
-that as the difficulty ramp inside one run currently standing in for the level
-ramp: the opening is the power fantasy the brief asks for, and the back half is
-already at the brief's level 3–4 difficulty. Re-run `sample()` after touching
-anything in `gates.ts`.
+**The economy is measured, not guessed.** `__overkill.sample(16, 110, 0.3)` plays
+sixteen full autopilot runs with a 0.3 s reaction time: median **509 troops**
+against a 300–500 target, spread 223–1036, and **0 of 16 wiped**.
+
+That last number is the honest bad news and it should not be tuned away. Since a
+row can now be walked around, a player who reads the board correctly cannot be
+killed — every option is upside against less upside. Fixing that properly means
+**levels** (see #1): late levels need content that is unavoidable by
+construction, which the width distribution (`ROW_WIDTHS`) has the hooks for and
+nothing yet drives. Inflating penalties now would only make the mid-game
+miserable without putting the difficulty anywhere in particular.
+
+Note the autopilot plays near-optimally, so its wipe rate is a FLOOR, not the
+brief's per-level target. `sample()` takes a reaction time for this reason; 0.3 s
+is the setting the failure-rate bands should be read against.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -33,7 +40,7 @@ guardrails, the architecture invariants, and how to verify work.
 Ranked. Nothing here is blocked on Mischa except items 3 and 4, which are
 product calls rather than engineering ones.
 
-### 1. LEVELS. The economy is tuned; there is nothing to tune it per-level FOR
+### 1. LEVELS, and the difficulty they are supposed to carry
 
 The pacing plan in [`docs/pacing-proposal.md`](pacing-proposal.md) is done except
 for its last piece. The conductor owns the corridor (`mechanics/director.ts`),
@@ -60,6 +67,20 @@ had to drop, and the gap between two placements depends on the PAIR (16 m
 gate-to-gate, 11 m otherwise) because what needs separating is decisions, not
 objects.
 
+The lever the level system most needs is already in place and unused:
+`ROW_WIDTHS` in `mechanics/gates.ts` decides how many segments a row has, and a
+row's width is now literally how avoidable it is (2 segments leave 6.5 m of clear
+road, 4 leave 1.8 m). It is currently indexed by the `elapsed` tier. Point it at
+a level number and the failure-rate bands become tunable in one table.
+
+### 1b. Nothing on the road punishes you for being big
+
+The crowd's lateral speed eases from 7 m/s down to 5 m/s past 400 troops, which
+is the only cost of size in the game. It is not enough to make growth a real
+decision. The obvious next lever is content that scales with the army rather than
+with the clock — a barrier a small squad can slip past and a large one cannot,
+which the geometry now supports and nothing generates.
+
 ### 2. Decide the camera ANGLE — still blocks accurate calibration
 
 Unchanged, still undecided, still needs Mischa. Note this is the camera's
@@ -80,22 +101,23 @@ a re-measure pass per module. Treat it as its own milestone, not a one-line edit
 
 ### 3. The squad splits at ~60 in the reference; we still cannot express it
 
-The road fits ~11 units abreast, so a single blob caps out near 70 troops. The
-reference does not solve this by deepening — **it splits into two groups at ~60**,
-which is what the second health bar in `frame_035` is.
+The reference does not solve a crowd outgrowing its road by deepening — **it
+splits into two groups at ~60**, which is what the second health bar in
+`frame_035` is.
 
-**The steering half of this is fixed** — the centre now travels the full road at
-every size, and a crowd wider than the road simply overhangs it, which is what
-`reference-clip-1a.mov` shows. What remains is that one blob past ~120 troops
-can only get deeper, and deep is the axis this camera reads worst.
+**This got less urgent, twice over.** The steering half was fixed earlier (the
+centre travels the full road and a wider crowd simply overhangs it), and the road
+is now 11.2 m rather than 6.8 m, so the crowd does not fill it until ~250 troops
+instead of ~120. What remains is that one blob past that point can only get
+deeper, and deep is the axis this camera reads worst.
 
 **Contract change required if it is ever wanted:** `squadLane` and `health` in
 `src/core/types.ts` become per-group. **Product question for Mischa:** does one
 input steer both groups together, or select between them?
 
-Worth saying plainly: the stepped camera zoom may have made this unnecessary.
-461 troops now fit on screen as one crowd. Do not build the split until
-something actually fails without it.
+Worth saying plainly: the stepped zoom and the wider road may have made this
+unnecessary. 500 troops now fit on screen as one crowd. Do not build the split
+until something actually fails without it.
 
 ### 4. The RPG layer has three pieces now — the rest is untouched
 
@@ -137,7 +159,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `entities/squad.ts` | Instanced crowd, 181 tris/unit with rifle and arms, 4 draw calls at any count. Vogel-spiral layout, per-unit springs, drop shadows, HP bar. Fills the road and overhangs it under steering; depth cap scales with the camera zoom. Per-instance tint: crimson death flash, gold elites at 1.34× scale. |
 | `mechanics/bullets.ts` | One stream per soldier, golden-ratio phase offsets, three weapon tiers, pooled at 768. Fires a **parallel curtain** — convergence is off. Exports the derived damage model. |
 | `mechanics/gates.ts` | Segmented red/blue barriers, heavy outlined numerals, the climbing blue reward, burst on pass or on hitting its ceiling. Blocks fire per segment. Row composition and the reward span are pure exported functions. |
-| `mechanics/director.ts` | The conductor. One cursor owns every placement in the corridor, in weighted beats with pair-dependent spacing. Pure, seeded, tested. |
+| `mechanics/director.ts` | The conductor. One cursor owns every placement in the corridor, in weighted beats with pair-dependent spacing, and now with a lateral SIDE per placement — which is what lets a beat put a guard in front of a prize or two prizes on opposite kerbs. Pure, seeded, tested. |
 | `ui/troopcount.ts`, `ui/netpop.ts`, `ui/loadout.ts` | Army size top-left, the net `+14`/`−12` over the crowd, and what you are carrying. All DOM, all silent until they have something to say. |
 | `mechanics/pacing.ts` | Barrel hit points, payouts, and the lane-coverage model. Pure arithmetic, no three.js, fully tested. |
 | `entities/barrels.ts` | Numbered destructible cover that counts down under fire, chunky plank debris, riders that drop when it dies. |
@@ -145,7 +167,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. Four draw calls. |
-| `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis. Scales the squad depth cap and the fog with it. |
+| `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
 
 ---
@@ -205,8 +227,10 @@ __overkill.setSpawning(bool) // suspend content pacing
 __overkill.setElites(n)      // gold veterans, worth 4 rifles each
 __overkill.probeDamagePerPass(troops)  // measured damage over one barrel approach
 __overkill.damageCurve()     // that swept across troop counts
-__overkill.autopilot(secs)   // one run steered at the best segment; troop curve
-__overkill.sample(runs, secs) // many runs; median, spread and WIPE RATE
+__overkill.autopilot(secs, sampleEvery, reaction)  // one run; troop curve
+__overkill.sample(runs, secs, reaction)  // many runs; median, spread, WIPE RATE
+__overkill.place("blockade", z)  // pose one placement on empty road
+__overkill.scene              // the live scene graph, for chasing stray instances
 ```
 
 **`sample()` is how the difficulty brief becomes a number.** A failure rate is a
@@ -215,6 +239,19 @@ about whether one unlucky playthrough meant the economy was wrong. It resets the
 run between each, so it is destructive; `autopilot()` is the single-run version
 and also reports `worstDrop`, the biggest one-tick loss as a share of the army —
 which is the number that catches a wipe mechanism before it costs you a run.
+
+**`reaction` is not a detail.** At 0 the autopilot re-decides sixty times a
+second, which measures the game played perfectly rather than the game. Tuning
+difficulty until an optimal player dies would make it unplayable for anyone else.
+0.3 s is roughly a thumb.
+
+**`bestLane()` scores POSITIONS, not segments.** It sweeps candidate positions
+across the road and judges each with the same rule `resolve()` uses, for the
+crowd's actual width. Picking the highest number instead measured a player who
+does not exist — a crowd is metres wide, it smashes everything it overlaps, and
+the +9 beside a −14 is a trap. Changing it moved the measured median by 30%, on
+identical game rules, which is worth remembering before trusting any economy
+number: **half of a measurement is how good the hand holding the controls is.**
 
 **`damageCurve()` is the instrument the whole barrel curve rests on.** It spawns
 a barrel with effectively infinite hit points, runs the real update order for a
@@ -273,6 +310,54 @@ firehose's damage and made the upgrade a downgrade. Damage is the lever that
 changes the numbers without changing the picture, and barrel HP reads it through
 `damagePerPass`, so nothing needed re-tuning by hand.
 
+**THE STRATEGY PROBLEM WAS THAT MOVEMENT WAS FREE, not that the road was narrow.**
+This is the most important thing in this file to not undo.
+
+A playtester reported having no meaningful decisions, and diagnosed it as the
+road being too narrow to dodge anything. The road was part of it — every
+placement spanned it, so the only question a gate could ask was "which third of
+this wall do you want". But the deeper cause was the opposite of "you cannot get
+out of the way": the crowd centre chased its target on a first-order lag with a
+0.1 s time constant and NO SPEED LIMIT, so it arrived just as fast from across
+the road as from next door. Position cost nothing, and nothing that costs nothing
+can be traded against anything. Widening the road on its own would have produced
+a bigger area to teleport around in.
+
+The fix is three constants that only work together, and pulling any one of them
+back re-breaks the other two:
+
+  LATERAL_SPEED   entities/squad.ts   7 m/s, so crossing the road takes 1.7 s
+  CORRIDOR_HALF_WIDTH  mechanics/lane.ts   5.6 m, so there is a road to cross
+  SEGMENT_WIDTH   mechanics/gates.ts   2.35 m, so a row leaves a gap beside it
+
+The ratio that matters is **crossing time against placement spacing**: 1.7 s
+against 1.8–2.7 s (`SPACING` / `GATE_TO_GATE_SPACING` in mechanics/director.ts at
+6 m/s). Two prizes on opposite kerbs one placement apart are therefore mutually
+exclusive, and two on the same side are free. If `scrollSpeed`, `SPACING` or the
+road width move, re-derive the speed — a measured kerb-to-kerb crossing is
+`__overkill` plus a `setLane` sweep, and it took under a minute to check.
+
+**Going around a row is free, and rows do not span the road.** `resolve()` used
+to charge the nearest segment whenever nothing was properly crossed. That
+fallback made every row a toll and would have made the wider road cosmetic. A
+crowd clear of the barrier now pays nothing, the row stays standing, and it sails
+past intact.
+
+**Two things on ONE plane is the only arrangement that forces a choice.**
+Sequential content cannot, because the crowd only has to be in one place at the
+moment each row arrives — it can take the best of every row in turn. The
+`blockade` and `crossroads` placements (mechanics/director.ts, executed in
+main.ts) put a gate row on one side and an enemy pack or a barrel cluster in the
+gap on the other. Their rows are forced to `COMPOUND_SEGMENTS` (2) because a
+four-wide row covers 84% of the road and leaves nowhere to put the second half of
+the choice.
+
+**A breach costs a share of the army per BODY that arrives.** It was one troop
+per unit, so a whole eight-strong pack cost one troop — which made shooting them
+pointless and made "or fight through them", one half of every blockade, free. The
+autopilot measured it exactly: with dodging available and a flat breach cost, the
+median run went to 660 troops with zero wipes.
+
 **A row's penalties are capped as a whole, not per segment**
 (`ROW_PENALTY_CAP = 0.42` in `gates.ts`). A per-segment cap was correct while the
 crowd stood in one lane; it stopped being correct once the crowd spanned the
@@ -316,6 +401,21 @@ read gold. It also constrains the palette: the tint cannot pick out one part of
 the body, and a bright multiplier clips the near-white shirt to a flat acid
 colour, so the elite tint deliberately darkens as well as warms.
 
+**Enemies are red, and that was a legibility bug rather than art direction.** A
+walker pack at z −30 was reported as "strange artifacts hovering over the road".
+They were exactly where they should be, correctly shadowed, doing their job — and
+they were brown lumps in brown hats on a grey road at forty pixels. Red is this
+game's existing word for "this takes troops off you", so a red silhouette is
+legible before any detail resolves, and it is the maximum separation from the
+player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
+create a trade-off.
+
+**The camera pans laterally, and it is still a pure translation.** `core/zoom.ts`
+moves the camera AND its look-at point by the same vector, so every billboard
+basis baked at module load stays correct — the same rule the dolly obeys. Sliding
+the camera while the target stays put would rotate it and silently break
+bullets/floaters/squad. Keep them moving as a pair.
+
 **Barrel payouts are capped at 10 troops** (`barrelPayout`). A tenth of hit
 points was fine when barrels topped out at 50; now that they reach 250, three
 late-run barrels at an uncapped tenth would out-earn a whole row of gates and
@@ -355,9 +455,15 @@ ships, pinned by postcss. Revisit when postcss bumps.
 - **The boss bar is a display with nothing behind it.** No boss entity exists;
   it is currently driven by enemy kills. It is also the obvious place to hang an
   end-of-level boundary once levels exist.
-- **Enemies and mines are thin.** Mischa asked for more destructive obstacles to
-  space the big reward climbs out. Walkers exist and cost troops on a breach;
-  there are no mines, and enemy density is one pack per `combat`/`surge` beat.
+- **Enemies and mines are thin.** Walkers exist, read as enemies, and now cost a
+  share of the army per body that reaches you. There are still no mines, enemies
+  do not shoot back, and a pack is the only enemy the director ever places —
+  `spawnElite` and the biker variant are built and unused.
+- **The autopilot ignores enemies.** `bestLane()` scores gate segments only, so
+  it will happily dodge a row straight into a pack. Every economy number here is
+  therefore slightly pessimistic about a good player and blind to whether the
+  blockade trade-off is actually balanced. Teaching it to price a pack is the
+  next real improvement to the instrument.
 - **Enemies do not shoot back.** The reference's gold elites fire orange tracers.
   Adding it is a small hook in `enemies.ts` plus a call into `bullets.ts`.
 - **Zero troops restarts the run immediately.** There is no debrief screen, no

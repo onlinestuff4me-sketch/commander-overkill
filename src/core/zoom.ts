@@ -24,6 +24,14 @@
  * every one of those bases is still correct. Only the scale changes. Orbit the
  * camera instead — raise it, tilt it, slide it sideways — and all three modules
  * silently render against a camera that no longer exists.
+ *
+ * THE LATERAL PAN OBEYS THE SAME RULE, and it is worth being precise about why
+ * it is allowed. Sliding the camera sideways while the look-at point stays put
+ * would ROTATE it, which is exactly the case the paragraph above forbids. This
+ * module moves the camera and its look-at point together by the same vector, so
+ * what happens is a pure TRANSLATION: every axis of the view basis is untouched,
+ * and every module that baked one is still correct. Keep it that way — the pan
+ * and the target must always move as a pair.
  */
 
 import * as THREE from "three";
@@ -62,6 +70,23 @@ const HYSTERESIS = 0.85;
  *  that triggered it, slow enough not to read as a cut. */
 const EASE_TIME = 0.45;
 
+/**
+ * Share of the crowd's offset from the centreline that the camera matches.
+ *
+ * NOT 1. A camera that tracks the crowd exactly pins it to the middle of the
+ * frame, and then steering produces no visible movement of the thing you are
+ * steering — only the world sliding past, which reads as the road moving rather
+ * than as you moving. At 0.78 the crowd still travels visibly within the frame
+ * while the camera brings the far kerb into view ahead of it, which is the whole
+ * reason the pan exists: an 11.2 m road is wider than the screen at the player's
+ * own depth, so without this, half of what you may steer to is off-screen.
+ */
+const PAN_GAIN = 0.78;
+/** First-order follow rate for the pan, in 1/seconds. Deliberately slower than
+ *  the crowd's own steering (see LATERAL_SPEED in entities/squad.ts) so the
+ *  camera trails a hard turn and lets the crowd lead it. */
+const PAN_FOLLOW = 5.5;
+
 /** Resting distance from CAMERA_POS to CAMERA_LOOK — the unit the steps scale. */
 const REST_DISTANCE = CAMERA_POS.distanceTo(CAMERA_LOOK);
 
@@ -74,12 +99,15 @@ export interface ZoomController {
   readonly distance: number;
   /** The step the troop count alone would put it at, ignoring the ease. */
   readonly target: number;
+  /** World X the camera has panned to. Read for diagnostics; never written. */
+  readonly panX: number;
   /**
    * Advance the ease and write the camera's position and fog. Call once per
-   * tick, after the troop count for this tick is final.
+   * tick, after the troop count for this tick is final. `centerX` is the crowd's
+   * world X — the pan target, scaled by PAN_GAIN.
    */
-  update(dt: number, troops: number): void;
-  /** Snap to the step for `troops` with no ease. For a run restart. */
+  update(dt: number, troops: number, centerX: number): void;
+  /** Snap to the step for `troops` with no ease, centred. For a run restart. */
   reset(troops: number): void;
 }
 
@@ -109,12 +137,17 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
 
   let distance = 1;
   let target = 1;
+  let panX = 0;
+  /** Scratch for the panned look-at point, so apply() never allocates. */
+  const lookAt = new THREE.Vector3();
 
   function apply(): void {
-    camera.position.copy(CAMERA_LOOK).addScaledVector(VIEW_AXIS, REST_DISTANCE * distance);
-    // The camera never rotates, so lookAt is only needed once — but it is cheap
-    // and it keeps this correct if the look-at point is ever animated.
-    camera.lookAt(CAMERA_LOOK);
+    lookAt.copy(CAMERA_LOOK);
+    lookAt.x += panX;
+    camera.position.copy(lookAt).addScaledVector(VIEW_AXIS, REST_DISTANCE * distance);
+    // Position and target move by the same vector, so this is a translation and
+    // the view basis is unchanged — see the note at the top of the file.
+    camera.lookAt(lookAt);
     // Fog is measured from the camera, so pulling back would haze content that
     // was crisp a moment ago — and a barrel you cannot read is a decision you
     // cannot plan. Push the band back by exactly what the camera gained.
@@ -134,22 +167,32 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
     get target() {
       return target;
     },
+    get panX() {
+      return panX;
+    },
 
-    update(dt, troops) {
+    update(dt, troops, centerX) {
       target = stepFor(troops, target);
-      if (distance === target) return;
+      const wantPan = centerX * PAN_GAIN;
+      const nextPan = panX + (wantPan - panX) * Math.min(1, PAN_FOLLOW * dt);
+      const moved = Math.abs(nextPan - panX) > 1e-5;
+      panX = nextPan;
+      if (distance === target && !moved) return;
       // Exponential approach: covers ~95% of the remaining gap in EASE_TIME,
       // whatever the size of the step, so a two-step jump does not take twice
       // as long as a one-step one. Snapped at the end so `distance === target`
       // actually becomes true and this stops doing work.
-      distance += (target - distance) * (1 - Math.exp((-3 * dt) / EASE_TIME));
-      if (Math.abs(target - distance) < 1e-4) distance = target;
+      if (distance !== target) {
+        distance += (target - distance) * (1 - Math.exp((-3 * dt) / EASE_TIME));
+        if (Math.abs(target - distance) < 1e-4) distance = target;
+      }
       apply();
     },
 
     reset(troops) {
       target = stepFor(troops, ZOOM_STEPS[0]![1]);
       distance = target;
+      panX = 0;
       apply();
     },
   };

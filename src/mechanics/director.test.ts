@@ -18,14 +18,23 @@ import {
 import type { Placement } from "./director";
 
 /** Run the corridor for `metres` and report where each placement landed. */
-function run(metres: number, seed = 1, step = 0.1): { at: number; what: Placement }[] {
+function run(
+  metres: number,
+  seed = 1,
+  step = 0.1,
+): { at: number; what: Placement; side: number }[] {
   const director = createDirector(seed);
-  const out: { at: number; what: Placement }[] = [];
+  const out: { at: number; what: Placement; side: number }[] = [];
   for (let d = 0; d < metres; d += step) {
     const due = director.advance(step);
-    if (due) out.push({ at: d, what: due });
+    if (due) out.push({ at: d, what: due.what, side: due.side });
   }
   return out;
+}
+
+/** Placements that put a decision on the road. Mirrors hasGate() in the module. */
+function decides(what: Placement): boolean {
+  return what === "gate" || what === "blockade" || what === "crossroads";
 }
 
 function gaps(placed: { at: number }[]): number[] {
@@ -58,7 +67,9 @@ describe("spacing", () => {
     const placed = run(4000, 13);
     let gateGaps = 0;
     for (let i = 1; i < placed.length; i++) {
-      if (placed[i]!.what !== "gate" || placed[i - 1]!.what !== "gate") continue;
+      // A blockade and a crossroads each contain a gate row, so they are
+      // decisions for spacing purposes too — see hasGate() in director.ts.
+      if (!decides(placed[i]!.what) || !decides(placed[i - 1]!.what)) continue;
       gateGaps++;
       const g = placed[i]!.at - placed[i - 1]!.at;
       expect(g).toBeGreaterThan(DIRECTOR_GATE_SPACING - DIRECTOR_SPACING_JITTER - 0.2);
@@ -114,7 +125,7 @@ describe("content mix", () => {
     // contains, and two of those cannot land back to back.
     let sinceGate = 0;
     for (const p of run(20000, 4)) {
-      sinceGate = p.what === "gate" ? 0 : sinceGate + 1;
+      sinceGate = decides(p.what) ? 0 : sinceGate + 1;
       // DRY_LIMIT is 3, and the streak can reach 4 because the limit is only
       // checked when a new beat is picked — a beat already in flight finishes.
       // Measured worst case over 20 km of corridor is exactly 4.
@@ -138,7 +149,7 @@ describe("determinism", () => {
     expect(director.count).toBeGreaterThan(0);
     director.reset();
     expect(director.count).toBe(0);
-    expect(director.advance(0)).toBe(BEATS[0]!.places[0]);
+    expect(director.advance(0)?.what).toBe(BEATS[0]!.places[0]);
   });
 });
 

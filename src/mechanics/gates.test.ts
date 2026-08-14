@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { composeAutoRow, MERCY_TROOPS, rewardSpan } from "./gates";
+import { composeAutoRow, MERCY_TROOPS, rewardSpan, rowPlacement } from "./gates";
+import { CORRIDOR_HALF_WIDTH } from "./lane";
 
 /** Same generator the gate module uses, so the sequences under test are real. */
 function mulberry32(seed: number): () => number {
@@ -154,6 +155,63 @@ describe("the reward span", () => {
   it("pays a jackpot several times an ordinary row", () => {
     for (const n of [10, 100, 500]) {
       expect(rewardSpan(n, true)).toBeGreaterThan(rewardSpan(n) * 2);
+    }
+  });
+});
+
+describe("a row leaves road beside it", () => {
+  // The whole strategic layer rests on this: if a row can span the road then
+  // "go around" is not a move, and a playtester's verdict — "everything that
+  // comes at me is an inevitability" — is structurally true again.
+  /** The widest single stretch of clear road beside a row — what you can drive
+   *  through. Not the total: two 0.9 m gaps are not a 1.8 m gap. */
+  const widestGap = (p: { centerX: number; halfSpan: number }): number =>
+    Math.max(
+      p.centerX - p.halfSpan + CORRIDOR_HALF_WIDTH,
+      CORRIDOR_HALF_WIDTH - (p.centerX + p.halfSpan),
+    );
+
+  it("never covers the whole road, at any segment count", () => {
+    const rng = mulberry32(3);
+    for (let i = 0; i < 400; i++) {
+      for (const count of [2, 3, 4]) {
+        expect(widestGap(rowPlacement(rng, count))).toBeGreaterThan(0.5);
+      }
+    }
+  });
+
+  it("leaves a narrow row genuinely dodgeable", () => {
+    // A crowd is ~2 m across at 10 troops and ~5 m at 90. A 2-wide row has to
+    // leave enough road that steering around it is a real option rather than a
+    // technicality, or the width distribution carries no difficulty at all.
+    const rng = mulberry32(23);
+    let worst = Infinity;
+    for (let i = 0; i < 400; i++) worst = Math.min(worst, widestGap(rowPlacement(rng, 2)));
+    expect(worst).toBeGreaterThan(3);
+  });
+
+  it("stays inside the kerbs", () => {
+    const rng = mulberry32(11);
+    for (let i = 0; i < 400; i++) {
+      for (const count of [2, 3, 4]) {
+        const p = rowPlacement(rng, count);
+        expect(Math.abs(p.centerX) + p.halfSpan).toBeLessThanOrEqual(CORRIDOR_HALF_WIDTH + 1e-9);
+      }
+    }
+  });
+
+  it("makes a narrow row leave more room than a wide one", () => {
+    // Width is the difficulty now — a 2-wide is a genuine "do you want this",
+    // a 4-wide is the old unavoidable wall. See SEGMENT_WIDTH.
+    const rng = mulberry32(5);
+    expect(rowPlacement(rng, 2).halfSpan).toBeLessThan(rowPlacement(rng, 4).halfSpan);
+  });
+
+  it("honours a side request, so a guard can be lined up with a prize", () => {
+    const rng = mulberry32(19);
+    for (let i = 0; i < 200; i++) {
+      expect(rowPlacement(rng, 2, 1).centerX).toBeGreaterThan(0);
+      expect(rowPlacement(rng, 2, -1).centerX).toBeLessThan(0);
     }
   });
 });
