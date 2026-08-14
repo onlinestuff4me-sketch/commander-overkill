@@ -40,6 +40,7 @@ import { createFloaters } from "./ui/floaters";
 import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
 import { createTroopCount } from "./ui/troopcount";
+import { createLoadout } from "./ui/loadout";
 import { createNetPop } from "./ui/netpop";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
@@ -74,6 +75,9 @@ const bossBar = createBossBar(ui);
 // The only number on screen used to be the boss bar's, which counts DOWN.
 // Players read it as their army. Now the army has its own readout.
 const troopCount = createTroopCount(ui);
+// Crowd size is one axis; what the crowd is CARRYING is the other, and until
+// this existed the second one was invisible — see ui/loadout.ts.
+const loadout = createLoadout(ui);
 // The per-unit +1s say WHICH soldiers; they are bad at saying HOW MANY when a
 // row resolves three segments at once. This is the running total on top.
 const netPop = createNetPop(ui, stage.camera);
@@ -89,6 +93,7 @@ const renderables: System[] = [
   growthFx,
   bossBar,
   troopCount,
+  loadout,
   netPop,
 ];
 
@@ -104,6 +109,11 @@ function payTroops(amount: number): void {
   const before = world.troops;
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
   const delta = world.troops - before;
+  // ELITES ARE THE LAST THING YOU LOSE. Ordinary losses eat the crowd around
+  // them, so this only ever bites once the army has been ground down to the
+  // elite count itself — which is the read we want: a shattered squad is a
+  // handful of gold veterans, not a random survivor.
+  if (world.elites > world.troops) world.elites = world.troops;
   if (delta === 0) return;
   netPop.add(delta);
   if (delta > 0) growthFx.play(squad.center, squad.radius);
@@ -163,12 +173,17 @@ gates.onResolve((hit) => {
  * bonus on top of its normal payout. That bonus is what makes shooting cover
  * worth doing for its own sake instead of only clearing a path.
  *
- * NOT YET the "stronger unit" the reference implies — every troop is currently
- * identical, so there is nothing for a recruit to be stronger THAN. That needs
- * the split between crowd size and weapon tier discussed in the pacing
- * proposal, and it is the natural first piece of it.
+ * AND THE RECRUIT IS GENUINELY STRONGER. He arrives with three ordinary bodies
+ * (the bonus) AND as an elite: bigger, gold, and worth four rifles
+ * (`ELITE_SHOOTER_WEIGHT` in mechanics/bullets.ts). Before that, "recruit" was
+ * three anonymous troops with a different explosion — and the reference's whole
+ * point is that the figure on the barrel is SOMEBODY. A reward you cannot pick
+ * out of the crowd a second later is not a reward anyone steers for.
  */
 const RECRUIT_BONUS = 3;
+/** Elites gained per recruit pickup. One, so the gold in the crowd is a count of
+ *  barrels you committed to rather than a colour the whole army drifts toward. */
+const RECRUIT_ELITES = 1;
 /**
  * What a weapon pickup is worth, as a multiplier on the axis it upgrades.
  *
@@ -191,6 +206,10 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
   pickups.collect(tag);
   if (kind === "recruit") {
     payTroops(RECRUIT_BONUS);
+    // After the payout, so the elite has bodies to be one of. payTroops clamps
+    // elites down to the troop count, and doing this first would have the clamp
+    // eat the recruit at low counts.
+    world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES);
   } else if (kind === "minigun") {
     world.fireRate = Math.min(FIRE_RATE_MAX, world.fireRate * MINIGUN_RATE_STEP);
   } else if (kind === "rocket") {
@@ -348,6 +367,10 @@ function primeCorridor(): void {
  */
 const START_TROOPS = 1;
 
+/** Runs lost since boot. The failure-rate target is a ratio of runs, so it has
+ *  to be counted rather than inferred from a troop curve. Read by the autopilot. */
+let wipes = 0;
+
 /**
  * Zero troops is a loss. Restarting immediately (rather than freezing on an
  * empty road) keeps the prototype iterable — there is no debrief screen yet,
@@ -366,6 +389,7 @@ function resetRun(): void {
   pickupCursor = 0;
   world.firepower = 1;
   world.fireRate = 1;
+  world.elites = 0;
   primeCorridor();
   zoom.reset(world.troops);
   world.zoom = zoom.distance;
@@ -408,10 +432,14 @@ function resolveHits(): void {
     const z = view.z[id]!;
     const dmg = view.damage[id]!;
 
-    // Gates FIRST and without consuming: a blue segment grows when it is shot,
-    // and the reference plainly shows fire passing over a barrier to reach what
-    // is behind it. A gate that ate the stream would be a wall, not a decision.
-    gates.shootAt(x, z, GATE_PAD, dmg);
+    // GATES FIRST, AND THEY STOP THE ROUND. A barrier is a physical thing: the
+    // stream ends at the nearest standing one and only reaches what is behind
+    // once that has come apart. A blue grows as it soaks fire and breaks itself
+    // at its ceiling, which is what opens the lane.
+    if (gates.shootAt(x, z, GATE_PAD, dmg)) {
+      bullets.consume(id, x, y, z);
+      continue;
+    }
 
     if (barrels.damageAt(x, z, BARREL_PAD, dmg) >= 0) {
       bullets.consume(id, x, y, z);
@@ -489,6 +517,7 @@ function tick(dt: number): void {
     bossBar.update(dt, world);
     // Last of the readouts, so it reports the count this tick actually ended on.
     troopCount.update(dt, world);
+    loadout.update(dt, world);
     netPop.update(dt, world);
 
     scrolled += world.scrollSpeed * dt;
@@ -499,7 +528,10 @@ function tick(dt: number): void {
     zoom.update(dt, world.troops);
     world.zoom = zoom.distance;
 
-    if (world.troops <= 0) resetRun();
+    if (world.troops <= 0) {
+      wipes++;
+      resetRun();
+    }
 }
 
 function draw(alpha: number): void {
@@ -629,6 +661,46 @@ function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
 }
 
 /**
+ * Run `seconds` of play with a simple autopilot steering at the best segment of
+ * the nearest gate, and report the troop curve. Dev-only, like the probe.
+ *
+ * "Steer at the biggest number" is not a good player, and that is the point: it
+ * is a REPEATABLE one. A growth target and a failure rate are both properties of
+ * the content rather than of anybody's thumbs, so measuring them needs a hand
+ * that plays the same way every time.
+ */
+function autopilot(seconds = 120, sampleEvery = 5) {
+  const dt = 1 / 60;
+  const ticks = Math.round(seconds / dt);
+  const samples: { t: number; troops: number }[] = [];
+  const before = wipes;
+  let peak = world.troops;
+  let worstDrop = 0;
+  let prev = world.troops;
+  for (let i = 0; i < ticks; i++) {
+    const want = gates.bestLane();
+    if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
+    tick(dt);
+    peak = Math.max(peak, world.troops);
+    // Biggest single-tick loss as a share of what was standing. A wipe is the
+    // tail of this distribution, so watching it is how a change to the penalty
+    // model gets judged on more than one unlucky run.
+    if (prev > 0) worstDrop = Math.max(worstDrop, (prev - world.troops) / prev);
+    prev = world.troops;
+    if (i % Math.max(1, Math.round(sampleEvery / dt)) === 0) {
+      samples.push({ t: Number((i * dt).toFixed(1)), troops: world.troops });
+    }
+  }
+  return {
+    samples,
+    wipes: wipes - before,
+    peak,
+    worstDrop: Number(worstDrop.toFixed(3)),
+    final: world.troops,
+  };
+}
+
+/**
  * HEADLESS DRIVE — dev builds only, stripped from production.
  *
  * An offscreen browser pane reports `document.hidden` and throttles
@@ -650,29 +722,34 @@ if (import.meta.env.DEV) {
       setSpawning(on: boolean): void {
         contentSpawning = on;
       },
+      autopilot,
       /**
-       * Run `seconds` of play with a simple autopilot steering at the best
-       * segment of the nearest gate, and report the troop curve. This is how a
-       * growth target or a failure rate gets measured instead of guessed.
+       * Play `runs` fresh runs of `seconds` each and report the distribution.
+       *
+       * The brief specs a failure RATE — 1 in 8 at levels 1–2 — and a rate is
+       * not a thing one run can measure. Half the tuning arguments on this
+       * project have been about whether a single unlucky playthrough meant the
+       * economy was wrong; this is what replaces that with a number.
        */
-      autopilot(seconds = 120, sampleEvery = 5) {
-        const dt = 1 / 60;
-        const ticks = Math.round(seconds / dt);
-        const samples: { t: number; troops: number }[] = [];
-        let deaths = 0;
-        let prev = world.troops;
-        for (let i = 0; i < ticks; i++) {
-          const want = gates.bestLane();
-          if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
-          tick(dt);
-          if (world.troops > prev + 50 && prev <= 1) deaths++; // reset snapped it back up
-          if (world.troops <= 1 && prev > 1) deaths++;
-          prev = world.troops;
-          if (i % Math.round(sampleEvery / dt) === 0) {
-            samples.push({ t: Number((i * dt).toFixed(1)), troops: world.troops });
-          }
+      sample(runs = 12, seconds = 110) {
+        const out: { final: number; peak: number; wiped: boolean }[] = [];
+        for (let r = 0; r < runs; r++) {
+          const before = wipes;
+          resetRun();
+          world.elapsed = 0;
+          const run = autopilot(seconds, seconds);
+          out.push({ final: run.final, peak: run.peak, wiped: wipes - before > 0 });
         }
-        return { samples, deaths, final: world.troops };
+        const finals = out.map((r) => r.final).sort((a, b) => a - b);
+        return {
+          runs: out.length,
+          wiped: out.filter((r) => r.wiped).length,
+          median: finals[Math.floor(finals.length / 2)],
+          min: finals[0],
+          max: finals[finals.length - 1],
+          peaks: out.map((r) => r.peak),
+          finals,
+        };
       },
       /** Face values of every live unresolved gate segment, nearest row first. */
       gateValues(): number[] {
@@ -720,6 +797,10 @@ if (import.meta.env.DEV) {
       },
       setTroops(n: number): void {
         world.troops = clamp(Math.round(n), 0, MAX_TROOPS);
+        if (world.elites > world.troops) world.elites = world.troops;
+      },
+      setElites(n: number): void {
+        world.elites = clamp(Math.round(n), 0, world.troops);
       },
       setLane(n: number): void {
         touch.lane = clamp(n, -1, 1);
@@ -727,6 +808,9 @@ if (import.meta.env.DEV) {
       pay: payTroops,
       stats: () => ({
         troops: world.troops,
+        elites: world.elites,
+        firepower: Number(world.firepower.toFixed(2)),
+        fireRate: Number(world.fireRate.toFixed(2)),
         tier: world.weaponTier,
         elapsed: Number(world.elapsed.toFixed(2)),
         squadX: Number(squad.center.x.toFixed(2)),

@@ -58,13 +58,15 @@ const FLY_TIME = 0.45;
 const FLY_LIFT = 1.6;
 
 /**
- * Diameter of the glow disc, in metres.
+ * Diameter of the glow quad, in metres.
  *
- * Sized to sit just OUTSIDE the object rather than behind it. At 1.5 the disc
- * was wider than the pickup and read as a white blob at distance — the glow was
- * the silhouette, which defeats the point of three distinguishable shapes.
+ * The ring inside the texture peaks at 0.66 of the radius, so this puts the
+ * bright band at ~0.82 m across and the transparent hole at ~0.58 m — just
+ * outside a pickup, which is ~0.5 m wide. Sized against the object rather than
+ * picked: too small and the ring lands ON the silhouette it is supposed to
+ * separate, too large and it reads as unrelated scenery.
  */
-const GLOW_SIZE = 1.05;
+const GLOW_SIZE = 1.25;
 
 /** Seconds without a `pin` before a pickup is assumed orphaned and retired.
  *  Two ticks would do; this is generous enough to survive a frame hitch. */
@@ -134,11 +136,30 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
   }
 
   const glowTex = glowTexture();
+  /**
+   * NOT ADDITIVE, and that is the fix for the "objects encased in a white cloud"
+   * a playtester reported.
+   *
+   * Two faults stacked. Additive blending was fogged, and three fogs by mixing
+   * the fragment toward the fog colour, which additive then ADDS at full
+   * strength — so a distant pickup did not haze out, it acquired a pale sky-blue
+   * disc. `barrels.ts` documents that same trap; this predated the rule.
+   *
+   * Turning fog off exposed the second fault, which is the real one: our sky is
+   * `0x7cc4e8`, already at 0.9 in blue. ANY additive colour over it clips to
+   * white, so a gold rim light is gold on the road and a white cloud against the
+   * sky — and the sky is the background for every pickup more than ~20 m out.
+   * Additive rim lights need a dark scene, and this one is bright.
+   *
+   * Normal alpha blending keeps the ring the colour it is authored, wherever it
+   * lands. It is a hollow ring rather than a disc so the pickup's own silhouette
+   * still reads through the middle of it.
+   */
   const glowMat = new THREE.MeshBasicMaterial({
     map: glowTex,
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    fog: false,
   });
   const glow = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), glowMat, CAPACITY);
   glow.frustumCulled = false;
@@ -432,8 +453,16 @@ function rocketGeometry(): THREE.BufferGeometry {
   ]);
 }
 
-/** Soft radial gold, drawn behind the pickup. This is the reference's rim glow
- *  approximated with one additive sprite instead of an outline pass. */
+/**
+ * A gold RING, drawn behind the pickup — the reference's rim outline, one sprite
+ * instead of an outline pass.
+ *
+ * Genuinely hollow: fully transparent out to 0.46, so nothing at all is painted
+ * over the object. The earlier version put 18% alpha across the centre, which is
+ * a veil over the exact pixels the player is trying to identify — and with
+ * additive blending that veil is what turned a distant recruit into a pale blob.
+ * A rim light belongs strictly outside the silhouette.
+ */
 function glowTexture(): THREE.CanvasTexture {
   const size = 128;
   const c = document.createElement("canvas");
@@ -441,14 +470,16 @@ function glowTexture(): THREE.CanvasTexture {
   c.height = size;
   const ctx = c.getContext("2d")!;
   const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  // Hollow-ish: dim in the middle so the object reads against it, brightest in
-  // the ring just outside the silhouette. That is what makes it a RIM light
-  // rather than a lamp the pickup is standing in front of.
-  g.addColorStop(0, "rgba(255, 226, 130, 0.18)");
-  g.addColorStop(0.45, "rgba(255, 205, 90, 0.42)");
-  g.addColorStop(0.72, "rgba(255, 180, 50, 0.28)");
-  g.addColorStop(1, "rgba(255, 170, 40, 0)");
+  g.addColorStop(0, "rgba(255, 196, 60, 0)");
+  g.addColorStop(0.46, "rgba(255, 196, 60, 0)");
+  g.addColorStop(0.66, "rgba(255, 190, 48, 0.72)");
+  g.addColorStop(0.82, "rgba(246, 158, 26, 0.34)");
+  g.addColorStop(1, "rgba(240, 150, 20, 0)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
-  return new THREE.CanvasTexture(c);
+  const tex = new THREE.CanvasTexture(c);
+  // The gradient is authored in sRGB like every other canvas texture here; say
+  // so, or three treats it as linear and the gold comes out washed.
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }

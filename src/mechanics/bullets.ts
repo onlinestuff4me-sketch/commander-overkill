@@ -976,7 +976,9 @@ class Bullets implements BulletSystem, BulletView {
 
     // Pickups multiply the rate; the governor still clamps the result, so a
     // stack of miniguns can never overrun the pool.
-    const total = totalShotsPerSecond(tier, world.troops, t) * Math.max(0, world.fireRate);
+    const total =
+      totalShotsPerSecond(tier, effectiveShooters(world.troops, world.elites), t) *
+      Math.max(0, world.fireRate);
     if (total <= 0) return;
 
     // Every stream fires at the same rate; the crowd's volume is the sum, which
@@ -1458,6 +1460,29 @@ export function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletT
 
   const k = Math.max(0.5, t.saturationKnee);
   return desired / Math.pow(1 + Math.pow(desired / max, k), 1 / k);
+}
+
+/**
+ * How many ordinary soldiers a crowd containing `elites` of them shoots like.
+ *
+ * An elite recruit is worth ELITE_SHOOTER_WEIGHT rifles. It stays part of the
+ * WEAPON model rather than the economy for the same reason `firepower` does:
+ * `pacing.ts` sizes barrels off `damagePerPass(tier, troops, …)`, which is fed
+ * the plain head count, so the extra output an elite buys is not immediately
+ * eaten by tougher barrels. Pull elites into the HP model and a recruit becomes
+ * a number that changes nothing, which is exactly the trap `tierFor(troops)` was.
+ *
+ * 4 is set by what a recruit costs: a barrel carrying one takes a full approach
+ * to break, and three ordinary troops (RECRUIT_BONUS) is a middling gate segment.
+ * The elite has to be worth more than the bodies that came with it or there is
+ * no reason to prefer a barrel over a blue gate.
+ */
+export const ELITE_SHOOTER_WEIGHT = 4;
+
+export function effectiveShooters(troops: number, elites: number): number {
+  const n = Math.max(0, Math.floor(troops));
+  const e = Math.min(n, Math.max(0, Math.floor(elites)));
+  return n + e * (ELITE_SHOOTER_WEIGHT - 1);
 }
 
 /**

@@ -192,7 +192,7 @@ const SPRING_SLACK = 0.06;
 /** Seconds a dying soldier takes to topple and sink out of sight. Long enough
  *  to read as a body falling, short enough that a big loss does not leave the
  *  road littered while the next decision arrives. */
-const FALL_TIME = 0.55;
+const FALL_TIME = 0.7;
 /** Fraction of the fall spent at full size before the unit starts shrinking. */
 const FALL_HOLD = 0.55;
 /** Radians the body rotates as it goes down. Slightly past flat, so it lands
@@ -206,6 +206,51 @@ const FALL_AXIS = new THREE.Vector3(1, 0, 0);
 /** Ceiling on queued spawn/death reports between drains. Matches the floater
  *  burst cap: past this the eye cannot follow individual units anyway. */
 const MAX_QUEUE = 64;
+
+/**
+ * PER-INSTANCE TINT, and why the topple alone was not enough.
+ *
+ * A dying unit already fell over and sank. Playtesting said it still read as
+ * "the crowd shuffled" rather than "I lost men", and the reason is arithmetic
+ * rather than animation: a body toppling among sixty identical bodies changes
+ * about one part in sixty of the silhouette, over half a second, at a camera
+ * angle that foreshortens the fall. Nothing about the motion is wrong — there is
+ * simply not enough of it to see.
+ *
+ * Colour is the one channel that is still free. `instanceColor` MULTIPLIES the
+ * baked vertex colours, so one float3 per unit repaints a whole soldier without
+ * a second material, a second draw call or a shader of our own. A dying man goes
+ * crimson within a sixth of a second and then falls; the flash is what you
+ * notice, and the fall is what tells you what the flash meant.
+ *
+ * These are multipliers, not colours. The cream shirt (the biggest bright area
+ * on a unit) is what carries each of them; the helmet goes along for the ride.
+ */
+const DEATH_TINT = [1.9, 0.25, 0.2] as const;
+/** How fast the death tint arrives, as a multiple of the fall's own rate. 4 puts
+ *  full crimson at 0.18 s — before the body has visibly started to lean, so the
+ *  flash leads the motion instead of confirming it. */
+const DEATH_TINT_RAMP = 4;
+
+/**
+ * ELITES — the recruits pulled off barrels, and the first troops in this game
+ * that are not interchangeable with every other troop.
+ *
+ * Two cues, because either alone is ambiguous at 40 px: gold, and BIGGER. Size
+ * on its own reads as "nearer" from a camera this shallow, and colour on its own
+ * gets lost when the crowd is deep. Together they are unmistakable, and both are
+ * free — the tint rides the instance colour and the scale rides the matrix that
+ * was already being composed.
+ *
+ * The tint DARKENS as well as warms, which is not the obvious choice. The shirt
+ * is already a near-white cream, so a bright gold multiplier clips it straight
+ * to acid yellow and the unit loses all its shading — six of them at the centre
+ * of the blob read as one flat yellow slab rather than as six soldiers. Pulling
+ * the multiplier under 1 on green and hard down on blue lands an amber that
+ * still has form in it.
+ */
+const ELITE_TINT = [1.22, 0.86, 0.3] as const;
+const ELITE_SCALE = 1.34;
 
 /** Run-in-place bob. abs(sin) doubles the rate, so ~2.7 footfalls/second. */
 const BOB_HEIGHT = 0.105;
@@ -461,6 +506,10 @@ class Squad implements SquadSystem {
   /** Slots that appeared / began dying this tick, drained by the orchestrator. */
   #spawnQueue: number[] = [];
   #deathQueue: number[] = [];
+  /** Live elite count, clamped to the troop count. Mirrors `world.elites`. */
+  #elites = 0;
+  /** Slots `0, stride, 2·stride, …` are the elites. See the note in update(). */
+  #eliteStride = 1;
 
   // --- centre steering ---
   #centerX = 0;
@@ -534,6 +583,13 @@ class Squad implements SquadSystem {
     // sits at the origin, so three would cull the whole crowd on a hard turn.
     this.#body.frustumCulled = false;
     this.#body.count = 0;
+    // Allocate the tint buffer up front and fill it with the identity (white =
+    // multiply by 1). Doing it here rather than on the first death matters: the
+    // attribute's existence is what compiles USE_INSTANCING_COLOR into the
+    // shader, and a material recompile mid-run is a frame hitch on a phone.
+    const white = new THREE.Color(1, 1, 1);
+    for (let i = 0; i < MAX_TROOPS; i++) this.#body.setColorAt(i, white);
+    this.#body.instanceColor!.setUsage(THREE.DynamicDrawUsage);
     scene.add(this.#body);
 
     // --- drop shadows ---
@@ -684,6 +740,15 @@ class Squad implements SquadSystem {
     this.#time += dt;
     this.setCount(world.troops);
     this.#reshape(world.zoom);
+    // Clamped here rather than trusted: an elite is a slot index, and a slot
+    // index past the live count would paint a body that is already falling.
+    this.#elites = Math.min(this.#count, Math.max(0, Math.floor(world.elites)));
+    // SPREAD, NOT STACKED. Slot order is a Vogel spiral with r = sqrt(i/(n-1)),
+    // so slots 0..E-1 are the innermost E units — six elites landed on top of
+    // each other in the middle of the blob and read as one gold platform. Taking
+    // every `stride`-th slot instead walks them from the centre out to the rim,
+    // which is what makes them look like veterans mixed through a crowd.
+    this.#eliteStride = this.#elites > 0 ? Math.max(1, Math.floor(this.#count / this.#elites)) : 1;
 
     // The centre travels the whole road at every size. A crowd wider than the
     // road overhangs it, which is what the reference does and what keeps a big
@@ -839,13 +904,45 @@ class Squad implements SquadSystem {
     const scl = this.#scl;
     quat.identity();
 
+    const elites = this.#elites;
+    const stride = this.#eliteStride;
+    const tint = this.#body.instanceColor!;
+    const tints = tint.array as Float32Array;
+    let tintDirty = false;
+
     for (let i = 0; i < n; i++) {
       const fall = this.#fall[i]!;
       const x = lerp(this.#prevX[i]!, this.#posX[i]!, alpha);
       const z = lerp(this.#prevZ[i]!, this.#posZ[i]!, alpha);
       const y = lerp(this.#prevBob[i]!, this.#bob[i]!, alpha);
       const p = lerp(this.#prevPop[i]!, this.#pop[i]!, alpha);
-      const s = p * UNIT_SCALE;
+      const elite = i % stride === 0 && i / stride < elites;
+      const s = p * UNIT_SCALE * (elite ? ELITE_SCALE : 1);
+
+      // Dying beats elite: a gold soldier going down still has to flash red, or
+      // the one loss the player most wants to see is the one that hides.
+      let cr = 1;
+      let cg = 1;
+      let cb = 1;
+      if (fall > 0) {
+        const f = Math.min(1, fall * DEATH_TINT_RAMP);
+        cr = 1 + f * (DEATH_TINT[0] - 1);
+        cg = 1 + f * (DEATH_TINT[1] - 1);
+        cb = 1 + f * (DEATH_TINT[2] - 1);
+      } else if (elite) {
+        cr = ELITE_TINT[0];
+        cg = ELITE_TINT[1];
+        cb = ELITE_TINT[2];
+      }
+      const o = i * 3;
+      // Compared rather than written blind: the whole buffer re-uploads on any
+      // change, and in the common frame nothing is dying and nothing is new.
+      if (tints[o] !== cr || tints[o + 1] !== cg || tints[o + 2] !== cb) {
+        tints[o] = cr;
+        tints[o + 1] = cg;
+        tints[o + 2] = cb;
+        tintDirty = true;
+      }
 
       if (fall > 0) {
         // Topple away from the camera and sink. Eased so the first part of the
@@ -864,7 +961,8 @@ class Squad implements SquadSystem {
       // The shadow stays welded to the ground and shrinks as the unit rises —
       // that gap is the only cue that tells the eye the bob is a jump and not
       // the whole road moving.
-      const sh = SHADOW_RADIUS * 2 * p * (1 - (y / BOB_HEIGHT) * 0.3);
+      const sh =
+        SHADOW_RADIUS * 2 * p * (elite ? ELITE_SCALE : 1) * (1 - (y / BOB_HEIGHT) * 0.3);
       pos.set(x + SHADOW_OFFSET_X, SHADOW_Y, z + SHADOW_OFFSET_Z);
       scl.set(sh, 1, sh);
       m.compose(pos, quat, scl);
@@ -875,6 +973,7 @@ class Squad implements SquadSystem {
     this.#shadow.count = n;
     this.#body.instanceMatrix.needsUpdate = true;
     this.#shadow.instanceMatrix.needsUpdate = true;
+    if (tintDirty) tint.needsUpdate = true;
 
     const showBar = this.#count >= HP_BAR_MIN_TROOPS;
     this.#barGroup.visible = showBar;
