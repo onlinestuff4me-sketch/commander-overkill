@@ -32,6 +32,7 @@
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import type { System } from "../core/types";
 
@@ -178,7 +179,7 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
   };
 
   // Vertex colours carry the whole look, so one material serves every kind.
-  const bodyMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const bodyMat = toyMaterial({ vertexColors: true });
   const meshes = {} as Record<PickupKind, THREE.InstancedMesh>;
   for (const kind of PICKUP_KINDS) {
     const mesh = new THREE.InstancedMesh(geo[kind], bodyMat, CAPACITY);

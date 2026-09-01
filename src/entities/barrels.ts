@@ -47,6 +47,7 @@
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import type { System } from "../core/types";
 import { laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
@@ -100,9 +101,9 @@ const FIREBALL_LIFE = 0.3;
  * disagreeing is worse than one being slightly wrong.
  */
 const SHADOW_Y = 0.014;
-const SHADOW_OFF_X = -0.2;
-const SHADOW_OFF_Z = -0.28;
-const SHADOW_OPACITY = 0.34;
+const SHADOW_OFF_X = 0.34;
+const SHADOW_OFF_Z = 0.42;
+const SHADOW_OPACITY = 0.46;
 
 /** Numeral canvas. 208×112 keeps three digits crisp at DPR 2 for ~90KB each. */
 const NUMERAL_W = 208;
@@ -263,7 +264,7 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
 
   const woodTex = makeWoodTexture();
   const bodyGeo = makeBarrelGeometry();
-  const bodyMat = new THREE.MeshLambertMaterial({ map: woodTex });
+  const bodyMat = toyMaterial({ map: woodTex });
   const bodies = new THREE.InstancedMesh(bodyGeo, bodyMat, CAPACITY);
   bodies.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   bodies.frustumCulled = false;
@@ -336,7 +337,7 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
 
   const plankGeo = new THREE.BoxGeometry(0.46, 0.11, 0.19);
   bakeTopLitColor(plankGeo, 0xb07a33);
-  const plankMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const plankMat = toyMaterial({ vertexColors: true });
   const debrisMesh = new THREE.InstancedMesh(plankGeo, plankMat, DEBRIS_CAPACITY);
   debrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   debrisMesh.frustumCulled = false;

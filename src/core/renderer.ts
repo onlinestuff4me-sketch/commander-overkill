@@ -71,7 +71,40 @@ export function createStage(canvas: HTMLCanvasElement): Stage {
   const key = new THREE.DirectionalLight(0xffffff, 2.1);
   key.position.set(-4, 10, -6);
   scene.add(key);
-  scene.add(new THREE.HemisphereLight(0xcfefff, 0x4a7a3a, 1.5));
+  // GROUND BOUNCE IS GREY NOW, NOT GREEN, and that is a correction rather than a
+  // preference. The fill's lower hemisphere is the colour the world bounces back
+  // up into everything's vertical faces, and it was 0x4a7a3a — grass, from when
+  // the corridor ran across a green field. The corridor is a concrete bridge over
+  // water. Every vertical surface in the game was being tinted olive by scenery
+  // that no longer exists, which is why the soldiers' cream shirts read as
+  // fatigues from the front and only the sky-facing shoulder yoke looked cream.
+  //
+  // It is a WARM grey rather than a neutral one, and that is the second half of
+  // the fix: a neutral bounce leaves every vertical surface reading as its own
+  // colour drained to grey, which turned the soldiers' shirts from olive into
+  // concrete. Sun off a pale deck is warm, and warming the bounce is what lets
+  // a cream shirt read as cream from the front as well as from above.
+  /**
+   * A SECOND LIGHT, FROM THE CAMERA'S SIDE — and it costs nothing this project
+   * was previously paying for.
+   *
+   * The key is up-screen so the fake contact shadows have a direction to match,
+   * and the consequence was that every surface the camera can actually see got
+   * no key light at all: fronts were carried by hemisphere fill alone, so a
+   * cream shirt read as concrete, a boss's face read as a blank lump, and every
+   * colour in the game was its true colour only on the surfaces pointing away.
+   *
+   * THE COUPLING WAS IMAGINARY. Shadows here are hand-placed quads, not shadow
+   * maps — nothing in the renderer derives their direction from a light. So a
+   * fill light on the camera side changes what the player sees and changes the
+   * shadows not at all. It is warm and well under the key, so the key still owns
+   * the modelling and this only lifts the fronts out of fill.
+   */
+  const fill = new THREE.DirectionalLight(0xfff0dc, 0.8);
+  fill.position.set(3, 5, 12);
+  scene.add(fill);
+
+  scene.add(new THREE.HemisphereLight(0xcfefff, 0xbdb2a2, 1.0));
 
   const resize = (): void => {
     const w = window.innerWidth;
