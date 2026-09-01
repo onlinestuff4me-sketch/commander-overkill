@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-15, session 3 (ninth pass)._
+_Last updated: 2026-09-01, session 3 (tenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -14,9 +14,17 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`:
-median **301 troops** against a 300–500 target, and **4 of 32 wiped** — one in
-eight, which is exactly the failure rate the brief asks for at levels 1–2.
+**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`,
+three consecutive samples with no gameplay change between them: medians **301,
+445, 254** against a 300–500 target, and **4, 4, 5 of 32 wiped** — one in seven,
+which is the failure rate the brief asks for at levels 1–2.
+
+**TRUST THE WIPE RATE, NOT THE MEDIAN.** Those three samples are the same build
+measured three times, and the median moved 75% while the wipe count moved by one.
+The distribution has a long tail — a good run hits the 1200 cap and a stalled one
+never leaves single figures — so the median is dominated by how many runs happen
+to catch fire, and at n=32 that is still a coin toss. The wipe rate is a count of
+tail events and it is steady. Tune against it; quote the median as a range.
 
 **This is the closest the economy has ever been to the brief, and it got there by
 adding content rather than by tuning numbers.** The median had fallen to 230 when
@@ -25,11 +33,12 @@ brought it back to 301 without touching a single reward constant. Do not "fix"
 the median by raising `REWARD_SPAN_BASE` — that lever was deliberately left alone
 and the number came right on its own.
 
-**These medians carry roughly ±25% run-to-run noise at n=16.** The distribution
-has a long tail (a good run reaches the 1200 cap, a bad one never gets going), so
-a sixteen-run sample cannot resolve a 12% tuning change — one attempt to trim the
-median moved it the wrong way by more than the change was worth. Use n≥32 before
-believing any adjustment, and do not chase a number inside the noise band.
+**The noise band is much wider than n=32.** This was first written as "±25% at
+n=16" and the three samples above show it is worse than that: 254 to 445 at n=32
+on an unchanged build. A sixteen-run sample cannot resolve a 12% tuning change
+and a thirty-two-run one cannot resolve a 50% one. Do not chase a median inside
+that band; measure a change by what it does to the wipe count, and if the median
+is genuinely the question, run several samples and quote the spread.
 
 **The failure mode is a STALL, not a wipe.** `min` is 1 in most samples: a run
 that never grew, because filling a reward needs committed fire and a squad that
@@ -232,6 +241,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
+| `core/look.ts` | The house material. One place that decides everything in the game is made of shiny plastic. Objects use it; the road, water and bridge do not. |
 | `entities/boss.ts` | The three bosses, one alive at a time. Owns its own figures, name plate, attack label, danger decal and death. Reports that a strike landed; never touches `world.troops`. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
@@ -606,6 +616,73 @@ game's existing word for "this takes troops off you", so a red silhouette is
 legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
+
+**EVERY OBJECT IS PHONG, EVERY SURFACE IS LAMBERT.** `core/look.ts` owns it.
+Lambert has no specular term at all, and that single fact was most of the
+difference between the reference's moulded-plastic soldiers and our coloured
+paper ones — a Lambert sphere and a Phong sphere have the same silhouette and
+only one of them looks smooth. The road, the water and the bridge stay matt: a
+highlight is a cue that says "this is a thing", so spending it on the backdrop
+spends it on nothing.
+
+**THE LIGHTING HAD TWO BUGS THAT HAD BEEN HIDING BEHIND EACH OTHER.**
+
+- The hemisphere fill's ground bounce was GREEN, left over from when the corridor
+  ran across a field rather than over water. Every vertical surface in the game
+  was being tinted olive by scenery that no longer exists. There is a comment in
+  `squad.ts` deriving the shirt's albedo by pre-dividing that green out, which is
+  a heroic fix for a problem that should never have existed — it is re-derived
+  now, and the note explains how to re-derive it again.
+- Nothing lit the side of anything the camera could see. The key is deliberately
+  up-screen so the fake shadows have a direction to match, and the consequence
+  was that fronts were carried by ambient alone. **That coupling was imaginary:**
+  shadows here are hand-placed quads, not shadow maps, so nothing in the renderer
+  derives their direction from a light. A warm fill from the camera's side
+  changes what the player sees and changes the shadows not at all.
+
+**COLOURS ARE SAMPLED OFF THE FOOTAGE, NOT PICKED.** The helmet was `#2969AD` on
+screen against the reference's `#6FBCE9` — the same hue at half the value, which
+in a crowd reads as a dark lump rather than a bright dome. Sample the rendered
+pixel, sample the reference frame, scale. `ffmpeg -vf "crop=…,scale=1:1" -f
+rawvideo -pix_fmt rgb24` is the whole tool.
+
+**ONE SUN.** The squad threw its shadows down-screen-right, as the reference
+does; the enemies, barrels and boss threw theirs up-left, which from this camera
+is behind the object where nothing can see them. They agree now. If the key light
+moves, every `SHADOW_OFF_*` in the game moves with it.
+
+**THE ARMY WALKS, AND THE LEGS ARE THEIR OWN MESH.** The stride used to be baked
+into the merged figure, frozen, on the theory that the bob carried the run. It
+does not — a crowd bouncing in place with rigid legs reads as bollards on a
+conveyor. One instanced mesh serves every leg in the army: instance 2i is a
+unit's left, 2i+1 its right, mirrored by an x offset and an opposite swing. One
+extra draw call for twelve hundred walking soldiers.
+
+The swing is a COSINE and that is not a detail. The bob is `abs(sin)`, so it
+touches zero at each footfall; cosine puts the legs at full spread exactly there
+and brings them together at the top of the bounce. A sine plants both feet
+together at the bottom of every step.
+
+**SEGMENTS AROUND BUY SMOOTHNESS; SEGMENTS DOWN BUY NOTHING.** A 14×6 helmet cost
+112 triangles a unit — 60k at a full army — and looked identical to a 16×3 one at
+64, because from a camera 34° above the crowd you read the helmet's circular
+outline and not its profile, and the highlight is per-fragment so it stays round
+however coarse the mesh is.
+
+**AN EXPLOSION IS SEVERAL EVENTS, NOT ONE.** A barrel burst was a single
+fireball, thirteen small planks and six puffs, and beside `frame_018` it read as
+a spark. It is layered now: a white core, two offset satellites so the fireball
+has a shape, four tall thin light shafts thrown straight up, staves big enough to
+identify as staves under lower-than-real gravity so they hang long enough to
+follow, and smoke that outlives all of it.
+
+**THE CAMERA SHAKES FOR EXACTLY TWO THINGS.** A boss dying and a boss landing a
+hit on you. `zoom.shake(metres)` takes the larger of the current shake and the
+new one rather than summing, decays in about a fifth of a second, and offsets the
+camera's position and its look-at together — so like every other camera move in
+this project it is a pure translation and every billboard basis stays valid.
+Spend it on anything that happens every few seconds and it stops meaning
+anything.
 
 **A BOSS IS A DECISION, AND ONE LINE IN `place()` IS WHAT MAKES IT ONE.** While a
 boss holds a kerb, every other placement is forced to the opposite one. The

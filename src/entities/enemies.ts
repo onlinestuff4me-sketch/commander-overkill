@@ -42,6 +42,7 @@
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import type { System } from "../core/types";
 import { laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
@@ -132,9 +133,9 @@ const PUFF_RISE = 1.1;
  * REMOVE THIS BLOCK if a shared ground-shadow system lands.
  */
 const SHADOW_Y = 0.012;
-const SHADOW_OFF_X = -0.16;
-const SHADOW_OFF_Z = -0.22;
-const SHADOW_OPACITY = 0.3;
+const SHADOW_OFF_X = 0.2;
+const SHADOW_OFF_Z = 0.26;
+const SHADOW_OPACITY = 0.46;
 const WALKER_SHADOW = 0.62;
 const ELITE_SHADOW = 0.85;
 const BIKER_SHADOW = 1.5;
@@ -308,8 +309,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   const bikerGeo = buildBiker();
   const ogreGeo = buildOgre();
 
-  const walkerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  const eliteMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const walkerMat = toyMaterial({ vertexColors: true });
+  const eliteMat = toyMaterial({ vertexColors: true });
   const rimMat = new THREE.MeshBasicMaterial({
     color: RIM_GOLD,
     // The shell is the *inside* of a slightly fattened copy of the figure, so

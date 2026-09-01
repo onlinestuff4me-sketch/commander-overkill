@@ -47,6 +47,7 @@
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import type { System } from "../core/types";
 import { laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
@@ -76,15 +77,22 @@ const DESPAWN_Z = 13;
 const HIT_SHAKE_TIME = 0.13;
 const HIT_SHAKE_AMOUNT = 0.05;
 
-/** Chunky planks, not particle mist — this is the frame_018 read. */
-const DEBRIS_PER_BURST = 13;
+/**
+ * Chunky planks, not particle mist — this is the frame_018 read, and the staves
+ * in that frame are big: the largest is about a quarter of the barrel it came
+ * out of, and they are individually identifiable as curved pieces of barrel.
+ * Ours were roughly half that and read as woodchips.
+ */
+const DEBRIS_PER_BURST = 18;
 const DEBRIS_CAPACITY = DEBRIS_PER_BURST * 5;
-const DEBRIS_LIFE = 1.25;
-const DEBRIS_GRAVITY = 16;
+const DEBRIS_LIFE = 1.45;
+/** Lower than real gravity on purpose: hang time is what lets the eye follow a
+ *  chunk, and a chunk you can follow is the difference between debris and dust. */
+const DEBRIS_GRAVITY = 13.5;
 
-const SMOKE_PER_BURST = 6;
+const SMOKE_PER_BURST = 9;
 const SMOKE_CAPACITY = SMOKE_PER_BURST * 5;
-const SMOKE_LIFE = 0.95;
+const SMOKE_LIFE = 1.15;
 
 /** Flash pool serves both the small per-hit spark and the big death fireball. */
 const FLASH_CAPACITY = 28;
@@ -100,9 +108,9 @@ const FIREBALL_LIFE = 0.3;
  * disagreeing is worse than one being slightly wrong.
  */
 const SHADOW_Y = 0.014;
-const SHADOW_OFF_X = -0.2;
-const SHADOW_OFF_Z = -0.28;
-const SHADOW_OPACITY = 0.34;
+const SHADOW_OFF_X = 0.34;
+const SHADOW_OFF_Z = 0.42;
+const SHADOW_OPACITY = 0.46;
 
 /** Numeral canvas. 208×112 keeps three digits crisp at DPR 2 for ~90KB each. */
 const NUMERAL_W = 208;
@@ -240,6 +248,9 @@ interface Puff {
   size: number;
   grow: number;
   roll: number;
+  /** Vertical elongation. 1 is a round puff; the tall thin values are what draw
+   *  the light shafts the reference throws straight up out of a blast. */
+  stretch: number;
 }
 
 const _m = new THREE.Matrix4();
@@ -263,7 +274,7 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
 
   const woodTex = makeWoodTexture();
   const bodyGeo = makeBarrelGeometry();
-  const bodyMat = new THREE.MeshLambertMaterial({ map: woodTex });
+  const bodyMat = toyMaterial({ map: woodTex });
   const bodies = new THREE.InstancedMesh(bodyGeo, bodyMat, CAPACITY);
   bodies.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   bodies.frustumCulled = false;
@@ -336,7 +347,7 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
 
   const plankGeo = new THREE.BoxGeometry(0.46, 0.11, 0.19);
   bakeTopLitColor(plankGeo, 0xb07a33);
-  const plankMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const plankMat = toyMaterial({ vertexColors: true });
   const debrisMesh = new THREE.InstancedMesh(plankGeo, plankMat, DEBRIS_CAPACITY);
   debrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   debrisMesh.frustumCulled = false;
@@ -427,7 +438,15 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
 
   /* ---- VFX emitters --------------------------------------------------- */
 
-  function emitFlash(x: number, y: number, z: number, size: number, life: number): void {
+  function emitFlash(
+    x: number,
+    y: number,
+    z: number,
+    size: number,
+    life: number,
+    stretch = 1,
+    roll = Math.random() * Math.PI,
+  ): void {
     for (let i = 0; i < FLASH_CAPACITY; i++) {
       const f = flashes[i];
       if (!f || f.life > 0) continue;
@@ -441,13 +460,41 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
       f.vz = 0;
       f.size = size;
       f.grow = size * 0.9;
-      f.roll = Math.random() * Math.PI;
+      f.roll = roll;
+      f.stretch = stretch;
       return;
     }
   }
 
+  /**
+   * A BARREL COMING APART, and it is deliberately several events rather than one.
+   *
+   * The old burst was a single 2.5 m fireball, thirteen small planks and six
+   * puffs, and beside `frame_018` it read as a spark. What the reference
+   * actually shows is a layered thing: a white core, orange bulk around it,
+   * light shafts thrown straight UP, staves big enough to identify as staves,
+   * and smoke that outlives all of it. Each of those is cheap on its own and
+   * they only read as an explosion together.
+   */
   function emitBurst(x: number, y: number, z: number): void {
-    emitFlash(x, y + 0.1, z, 2.5, FIREBALL_LIFE);
+    // Core: brief, bright, and bigger than the barrel it came out of.
+    emitFlash(x, y + 0.1, z, 3.6, FIREBALL_LIFE);
+    // Two satellites, offset and slower, so the fireball has a shape instead of
+    // being one expanding disc.
+    emitFlash(x - 0.7, y + 0.5, z - 0.2, 2.1, FIREBALL_LIFE * 1.35);
+    emitFlash(x + 0.75, y + 0.35, z + 0.15, 1.9, FIREBALL_LIFE * 1.5);
+    // Light shafts. Tall, thin, upright — no roll, or they lean.
+    for (let i = 0; i < 4; i++) {
+      emitFlash(
+        x + (Math.random() - 0.5) * 1.5,
+        y + 0.9 + Math.random() * 0.6,
+        z + (Math.random() - 0.5) * 0.6,
+        0.42 + Math.random() * 0.3,
+        FIREBALL_LIFE * (1.2 + Math.random() * 0.9),
+        4.5 + Math.random() * 2.5,
+        0,
+      );
+    }
 
     for (let n = 0, spawned = 0; n < DEBRIS_CAPACITY && spawned < DEBRIS_PER_BURST; n++) {
       const d = debris[n];
@@ -464,14 +511,14 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
       d.z = z + (Math.random() - 0.5) * 0.35;
       d.vx = Math.cos(a) * speed;
       d.vz = Math.sin(a) * speed * 0.7;
-      d.vy = 3.4 + Math.random() * 3.6;
+      d.vy = 4.2 + Math.random() * 4.2;
       d.ex = Math.random() * 6.28;
       d.ey = Math.random() * 6.28;
       d.ez = Math.random() * 6.28;
       d.rx = (Math.random() - 0.5) * 16;
       d.ry = (Math.random() - 0.5) * 16;
       d.rz = (Math.random() - 0.5) * 16;
-      d.scale = 0.75 + Math.random() * 0.75;
+      d.scale = 1.15 + Math.random() * 1.1;
     }
 
     for (let n = 0, spawned = 0; n < SMOKE_CAPACITY && spawned < SMOKE_PER_BURST; n++) {
@@ -487,8 +534,8 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
       p.vx = (Math.random() - 0.5) * 1.5;
       p.vy = 0.7 + Math.random() * 0.9;
       p.vz = (Math.random() - 0.5) * 1.0;
-      p.size = 0.9 + Math.random() * 0.7;
-      p.grow = 1.5 + Math.random() * 1.1;
+      p.size = 1.15 + Math.random() * 0.9;
+      p.grow = 2.3 + Math.random() * 1.5;
       p.roll = Math.random() * Math.PI * 2;
     }
   }
@@ -779,7 +826,8 @@ export function createBarrels(scene: THREE.Scene): BarrelSystem {
         const t = 1 - f.life / f.maxLife;
         _pos.set(f.x, f.y, f.z);
         _q.setFromAxisAngle(_AXIS_Z, f.roll).premultiply(BILLBOARD);
-        _scl.setScalar(f.size + f.grow * t);
+        const fs = f.size + f.grow * t;
+        _scl.set(fs, fs * f.stretch, fs);
         _m.compose(_pos, _q, _scl);
         flashMesh.setMatrixAt(i, _m);
         const k = 1 - t * t;
@@ -840,6 +888,7 @@ function newPuff(): Puff {
     size: 1,
     grow: 0,
     roll: 0,
+    stretch: 1,
   };
 }
 

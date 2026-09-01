@@ -42,15 +42,15 @@
  * ---------------------------------------------------------------------------
  * Budget
  * ---------------------------------------------------------------------------
- * Four draw calls total at any troop count: one InstancedMesh for the whole
- * body (all parts merged into one vertex-coloured geometry), one for the drop
- * shadows, two for the HP bar. 181 triangles per unit, so 1200 troops is
- * ~217k tris in a single instanced call — vertex work a phone eats for
- * breakfast. All per-unit state lives in preallocated typed arrays and nothing
- * in update()/render() allocates.
+ * Five draw calls total at any troop count: one InstancedMesh for the body from
+ * the hips up (all parts merged into one vertex-coloured geometry), ONE for
+ * every leg in the army (two instances per unit, so it can walk), one for the
+ * drop shadows, two for the HP bar. All per-unit state lives in preallocated
+ * typed arrays and nothing in update()/render() allocates.
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import { CORRIDOR_HALF_WIDTH, laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import { MAX_TROOPS } from "../core/types";
@@ -305,14 +305,22 @@ const POP_C = 26;
 
 /** The gradient fades to nothing at the rim, so the disc that actually reads is
  *  ~70% of this — sized to land just under a soldier's shoulders. */
-const SHADOW_RADIUS = 0.4;
-const SHADOW_OPACITY = 0.4;
+const SHADOW_RADIUS = 0.47;
+const SHADOW_OPACITY = 0.52;
 /** Slight offset toward camera-right. The scene key light would technically
  *  throw the shadow up-screen, where the unit's own body hides it — and a
  *  shadow you cannot see does not seat anything. This matches the reference
- *  frames instead; flip the signs here if the art direction ever settles. */
-const SHADOW_OFFSET_X = 0.11;
-const SHADOW_OFFSET_Z = 0.1;
+ *  frames instead.
+ *
+ *  THE WHOLE GAME USES THIS DIRECTION NOW. Measured off `frame_018`, every
+ *  shadow in the reference falls to the lower right by roughly half a helmet
+ *  width, and it is a big soft dark blob rather than a smudge — a crowd's
+ *  shadows merging into one dark mass under it is most of what stops the crowd
+ *  hovering. The enemy, barrel and boss modules were throwing theirs UP-LEFT,
+ *  which is behind the object from this camera, so half the game was lit by one
+ *  sun and half by another. */
+const SHADOW_OFFSET_X = 0.22;
+const SHADOW_OFFSET_Z = 0.26;
 
 /** No bar on a handful of troops — `frame_009` (3 units) has none, `frame_023`
  *  (45) does. */
@@ -371,23 +379,33 @@ const LATERAL_ACCEL = 34;
  * crowd from the tan/brown enemies at a glance, so the shirt is the one colour
  * on this unit that is not allowed to drift.
  *
- * WHY THE SHIRT IS AUTHORED AS A PEACH AND NOT AS A CREAM. These are vertex
- * colours on a Lambert material, so what lands on screen is albedo × irradiance,
- * and the scene's irradiance is not white. `renderer.ts` fills with
- * `HemisphereLight(0xcfefff, 0x4a7a3a, 1.5)` — a GREEN ground bounce — and
- * deliberately puts the key light up-screen so it backlights the crowd. Every
- * surface the camera can see therefore gets sky+ground fill and, on the up-facing
- * shoulders that carry the read, irradiance works out to roughly
- * (0.84, 0.95, 1.02): 14% greener and 21% bluer than neutral. An honest cream
- * albedo (the old 0xe8dcbc) comes out the far side at #D7D7BE — the grey-green
- * olive that was on screen. Pre-dividing the target cream by that irradiance is
- * what gives 0xffe4c2, which renders as #ECE0C4. If the lighting in
- * `renderer.ts` ever loses its green ground bounce, re-derive this — do not
- * hand-tweak it.
+ * WHY THE SHIRT IS AUTHORED HOTTER THAN THE CREAM IT IS MEANT TO BE. These are
+ * vertex colours, so what lands on screen is albedo × irradiance, and the
+ * scene's irradiance is not white: the key light is deliberately up-screen and
+ * backlighting the crowd, so every surface the camera can see is carried by the
+ * hemisphere fill. The shirt is therefore pre-divided by that fill rather than
+ * authored at its target value.
+ *
+ * IT WAS PRE-DIVIDED BY THE WRONG FILL FOR MOST OF THIS PROJECT. The old value
+ * (0xffe4c2) compensated for a GREEN ground bounce, from when the corridor ran
+ * over a field; the bounce is grey now (see renderer.ts) and the compensation
+ * went with it. Sampled on screen this renders #F1E5CD against the reference's
+ * #CBBDAA-in-shade, which is the same cream in a brighter part of the day.
+ *
+ * Re-derive rather than hand-tweak if the lighting moves again: sample the
+ * rendered pixel, sample the reference frame, and scale.
  */
-const COLOR_HELMET = 0x3f8ede;
-const COLOR_SHIRT = 0xffe4c2;
-const COLOR_TROUSERS = 0x242f57;
+/**
+ * MEASURED against the footage rather than picked. Sampling a lit helmet in
+ * `frame_018` gives #6FBCE9 — a light sky blue. Ours was rendering #2969AD, a
+ * mid navy, which is the same hue at half the value and reads as a dark lump in
+ * a crowd rather than as a bright plastic dome. The helmet is the single largest
+ * area of colour on a unit and the thing the eye counts, so it has to be the
+ * brightest thing on the figure after the shirt.
+ */
+const COLOR_HELMET = 0x62b0ea;
+const COLOR_SHIRT = 0xf7ecd8;
+const COLOR_TROUSERS = 0x2f52a8;
 /** The only near-black on the unit. In a packed clump the boots are what tell
  *  one pair of legs from the next. */
 const COLOR_BOOT = 0x15171d;
@@ -579,6 +597,8 @@ class Squad implements SquadSystem {
 
   // --- meshes ---
   #body: THREE.InstancedMesh;
+  /** Both legs of every unit: instance 2i is the left, 2i+1 the right. */
+  #legs: THREE.InstancedMesh;
   #shadow: THREE.InstancedMesh;
   #barGroup: THREE.Group;
   #barFill: THREE.Mesh;
@@ -647,6 +667,10 @@ class Squad implements SquadSystem {
   #velZ = new Float32Array(MAX_TROOPS);
   #bob = new Float32Array(MAX_TROOPS);
   #prevBob = new Float32Array(MAX_TROOPS);
+  /** Leg swing angle, radians. Interpolated in render like the bob, so a walk
+   *  cycle running at 60 Hz still looks smooth on a 120 Hz screen. */
+  #swing = new Float32Array(MAX_TROOPS);
+  #prevSwing = new Float32Array(MAX_TROOPS);
   #pop = new Float32Array(MAX_TROOPS);
   #prevPop = new Float32Array(MAX_TROOPS);
   #popVel = new Float32Array(MAX_TROOPS);
@@ -657,6 +681,10 @@ class Squad implements SquadSystem {
   #pos = new THREE.Vector3();
   #quat = new THREE.Quaternion();
   #scl = new THREE.Vector3();
+  /** Leg scratch. Preallocated with everything else — render() allocates
+   *  nothing, and at 1200 units this runs 2400 times a frame. */
+  #legQuat = new THREE.Quaternion();
+  #hip = new THREE.Vector3();
 
   constructor(scene: THREE.Scene) {
     this.#scene = scene;
@@ -682,7 +710,7 @@ class Squad implements SquadSystem {
     // --- body: every part merged into one vertex-coloured geometry ---
     this.#body = new THREE.InstancedMesh(
       buildSoldierGeometry(),
-      new THREE.MeshLambertMaterial({ vertexColors: true }),
+      toyMaterial({ vertexColors: true }),
       MAX_TROOPS,
     );
     this.#body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -699,9 +727,22 @@ class Squad implements SquadSystem {
     this.#body.instanceColor!.setUsage(THREE.DynamicDrawUsage);
     scene.add(this.#body);
 
+    // --- legs: one mesh, two instances per unit ---
+    this.#legs = new THREE.InstancedMesh(
+      buildLegGeometry(),
+      toyMaterial({ vertexColors: true }),
+      MAX_TROOPS * 2,
+    );
+    this.#legs.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.#legs.frustumCulled = false;
+    this.#legs.count = 0;
+    for (let i = 0; i < MAX_TROOPS * 2; i++) this.#legs.setColorAt(i, white);
+    this.#legs.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+    scene.add(this.#legs);
+
     // One instanced mesh per weapon kind, drawn at its carriers' shoulders. Two
     // draw calls for every carrier on screen, and only when there are any.
-    const kitMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    const kitMat = toyMaterial({ vertexColors: true });
     this.#gunnerKit = new THREE.InstancedMesh(buildMinigunKit(), kitMat, MAX_TROOPS);
     this.#rocketKit = new THREE.InstancedMesh(buildRocketKit(), kitMat, MAX_TROOPS);
     for (const kit of [this.#gunnerKit, this.#rocketKit]) {
@@ -957,6 +998,7 @@ class Squad implements SquadSystem {
       this.#prevX[i] = this.#posX[i]!;
       this.#prevZ[i] = this.#posZ[i]!;
       this.#prevBob[i] = this.#bob[i]!;
+      this.#prevSwing[i] = this.#swing[i]!;
       this.#prevPop[i] = this.#pop[i]!;
 
       // --- target slot in the clump ellipse ---
@@ -1044,8 +1086,10 @@ class Squad implements SquadSystem {
       const p = this.#pop[i]! + pv * dt;
       this.#pop[i] = p < 0 ? 0 : p;
 
-      // --- run-in-place bob ---
-      this.#bob[i] = Math.abs(Math.sin(t * this.#slotBobRate[i]! + this.#slotBobPhase[i]!)) * BOB_HEIGHT;
+      // --- run-in-place bob, and the stride that goes with it ---
+      const gait = t * this.#slotBobRate[i]! + this.#slotBobPhase[i]!;
+      this.#bob[i] = Math.abs(Math.sin(gait)) * BOB_HEIGHT;
+      this.#swing[i] = Math.cos(gait) * LEG_SWING;
 
       // Zero it outright on the way out, or the slot freezes mid-shrink and
       // leaves a sliver of a soldier standing on the road forever.
@@ -1077,6 +1121,8 @@ class Squad implements SquadSystem {
     let rocketCount = 0;
     const tint = this.#body.instanceColor!;
     const tints = tint.array as Float32Array;
+    const legTint = this.#legs.instanceColor!;
+    const legTints = legTint.array as Float32Array;
     let tintDirty = false;
 
     for (let i = 0; i < n; i++) {
@@ -1121,6 +1167,15 @@ class Squad implements SquadSystem {
         tints[o] = cr;
         tints[o + 1] = cg;
         tints[o + 2] = cb;
+        // The legs carry the same tint, or a gold elite would be gold from the
+        // waist up and a dying soldier would go red above blue trousers.
+        const lo = i * 6;
+        legTints[lo] = cr;
+        legTints[lo + 1] = cg;
+        legTints[lo + 2] = cb;
+        legTints[lo + 3] = cr;
+        legTints[lo + 4] = cg;
+        legTints[lo + 5] = cb;
         tintDirty = true;
       }
 
@@ -1137,6 +1192,24 @@ class Squad implements SquadSystem {
       scl.set(s, s, s);
       m.compose(pos, quat, scl);
       this.#body.setMatrixAt(i, m);
+
+      // --- legs ---------------------------------------------------------
+      // Each hangs from its own hip and swings the opposite way, and both
+      // inherit the body's rotation so a toppling unit's legs go over with it.
+      // A dying unit stops walking: the swing is scaled out over the fall, or
+      // the corpse marches into the road.
+      const gait = fall > 0 ? 0 : lerp(this.#prevSwing[i]!, this.#swing[i]!, alpha);
+      for (let side = 0; side < 2; side++) {
+        const dir = side === 0 ? -1 : 1;
+        this.#legQuat.setFromAxisAngle(LEG_AXIS, dir * gait);
+        this.#legQuat.premultiply(quat);
+        this.#hip.set(dir * LEG_X * s, HIP_Y * s, 0).applyQuaternion(quat);
+        this.#hip.x += pos.x;
+        this.#hip.y += pos.y;
+        this.#hip.z += pos.z;
+        m.compose(this.#hip, this.#legQuat, scl);
+        this.#legs.setMatrixAt(i * 2 + side, m);
+      }
 
       // The weapon rides the same transform as its carrier, offset to the
       // shoulder in unit space so it inherits the bob, the pop and the topple
@@ -1162,10 +1235,15 @@ class Squad implements SquadSystem {
     }
 
     this.#body.count = n;
+    this.#legs.count = n * 2;
     this.#shadow.count = n;
     this.#body.instanceMatrix.needsUpdate = true;
+    this.#legs.instanceMatrix.needsUpdate = true;
     this.#shadow.instanceMatrix.needsUpdate = true;
-    if (tintDirty) tint.needsUpdate = true;
+    if (tintDirty) {
+      tint.needsUpdate = true;
+      legTint.needsUpdate = true;
+    }
     this.#gunnerKit.count = gunnerCount;
     this.#rocketKit.count = rocketCount;
     this.#gunnerKit.instanceMatrix.needsUpdate = true;
@@ -1195,6 +1273,9 @@ class Squad implements SquadSystem {
     this.#body.geometry.dispose();
     (this.#body.material as THREE.Material).dispose();
     this.#body.dispose();
+    this.#legs.geometry.dispose();
+    (this.#legs.material as THREE.Material).dispose();
+    this.#legs.dispose();
     this.#shadow.geometry.dispose();
     (this.#shadow.material as THREE.Material).dispose();
     this.#shadow.dispose();
@@ -1262,9 +1343,34 @@ interface Part {
   color: number;
 }
 
-/** How far each leg swings out of the stride. Both legs at z=0 is what made the
- *  lower body read as one block. */
-const LEG_STRIDE = 0.16;
+/**
+ * THE LEGS ARE NOT PART OF THE BODY MESH ANY MORE — they walk.
+ *
+ * The stride used to be BAKED into the merged figure: one leg forward, one back,
+ * frozen, on the theory that the bob carried the run. It does not. A crowd
+ * bouncing in place with rigid legs reads as a row of bollards on a conveyor,
+ * and at the start of a run — one soldier, alone, on an empty bridge — there is
+ * nothing else on screen to distract from it.
+ *
+ * So a leg is its own instanced mesh, authored around the hip so a rotation is
+ * a plain angle, and it swings against the bob it already had. ONE mesh serves
+ * both legs: instance 2i is the left, 2i+1 the right, mirrored by an x offset
+ * and an opposite swing. That is one extra draw call for the whole army rather
+ * than two, and a leg is symmetric so no geometry has to be mirrored.
+ *
+ * COSINE, NOT SINE, and the phase matters: the bob is `abs(sin)`, so it touches
+ * zero at each footfall. Cosine puts the legs at full spread exactly there and
+ * brings them together at the top of the bounce, which is what walking is. Sine
+ * would plant both feet together at the bottom of every step.
+ */
+const LEG_SWING = 0.44;
+/** Legs swing about X: rotating a downward leg by +θ throws the foot to −Z,
+ *  which is down-road, away from the camera. */
+const LEG_AXIS = new THREE.Vector3(1, 0, 0);
+/** Hip height in unit space — the top of the thigh, which is where it pivots. */
+const HIP_Y = 0.455;
+/** Half the distance between the legs. */
+const LEG_X = 0.105;
 /**
  * Rifle attitude, and it is set by where the barrel lands ON SCREEN rather than
  * by what looks right in a modelling view.
@@ -1320,23 +1426,8 @@ const RIFLE_LENGTH = 0.9;
 function buildSoldierGeometry(): THREE.BufferGeometry {
   const parts: Part[] = [];
 
-  // --- legs and boots ------------------------------------------------------
-  // Proportions are stubby on purpose. The reference unit is roughly as wide as
-  // it is half-tall — chunky cartoon, not a realistic figure.
-  //
-  // The stride is baked, not animated: the bob already carries the run, and two
-  // boxes offset in Z read as legs from above where two boxes side by side read
-  // as one slab. side -1 swings forward, side +1 trails.
-  for (const side of [-1, 1]) {
-    const leg = new THREE.BoxGeometry(0.145, 0.44, 0.19);
-    leg.rotateX(-side * LEG_STRIDE);
-    leg.translate(side * 0.105, 0.235, side * 0.05);
-    parts.push({ geo: leg, color: COLOR_TROUSERS });
-
-    const boot = new THREE.BoxGeometry(0.16, 0.13, 0.26);
-    boot.translate(side * 0.105, 0.07, side * 0.085);
-    parts.push({ geo: boot, color: COLOR_BOOT });
-  }
+  // Legs are a separate mesh so they can walk — see LEG_SWING and
+  // buildLegGeometry(). Everything from the hips up lives here.
 
   // --- torso and shoulder yoke ---------------------------------------------
   const torso = new THREE.BoxGeometry(0.38, 0.54, 0.32);
@@ -1349,7 +1440,7 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // brightest cream on the unit), and it presents the most area to a camera that
   // is looking down. It is also wider than the helmet, so it shows at the sides
   // as well as behind.
-  const yoke = new THREE.BoxGeometry(UNIT_HALF_WIDTH * 2, 0.17, 0.44);
+  const yoke = new THREE.BoxGeometry(0.46, 0.15, 0.30);
   yoke.rotateX(BODY_LEAN);
   yoke.translate(0, UNIT_SHOULDER_Y - 0.085, 0.06);
   parts.push({ geo: yoke, color: COLOR_SHIRT });
@@ -1398,19 +1489,51 @@ function buildSoldierGeometry(): THREE.BufferGeometry {
   // Brim: a flat disc overhanging the dome by ~0.05 all round, levelled against
   // the body lean the same way the yoke is. Nine triangles for the single
   // cheapest "that is a helmet, not a ball" cue available.
-  const brim = new THREE.CircleGeometry(0.262, 9);
+  const brim = new THREE.CircleGeometry(0.275, 14);
   brim.rotateX(-Math.PI / 2);
   brim.rotateX(BODY_LEAN);
   brim.translate(0, 1.15, -0.13);
   parts.push({ geo: brim, color: COLOR_HELMET });
 
-  const dome = new THREE.SphereGeometry(0.215, 8, 3, 0, Math.PI * 2, 0, Math.PI * 0.55);
-  dome.translate(0, 1.14, -0.13);
+  // 16 segments AROUND, only 3 down. From a camera 34° above the crowd you read
+  // the helmet's circular outline, not its profile, so the width segments are
+  // what buy smoothness and the height segments are what waste triangles — and
+  // the highlight is per-fragment, so it stays round however coarse the mesh is.
+  // 14×6 looked identical to this and cost 112 triangles a unit instead of 64,
+  // which is 60k triangles at a full army for nothing.
+  const dome = new THREE.SphereGeometry(0.235, 16, 3, 0, Math.PI * 2, 0, Math.PI * 0.62);
+  dome.translate(0, 1.15, -0.13);
   parts.push({ geo: dome, color: COLOR_HELMET });
 
   const merged = mergeParts(parts);
   // Lean pivots about the feet so the soles stay on the shadow.
   merged.rotateX(-BODY_LEAN);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * One leg, hanging from a hip at the origin.
+ *
+ * Authored downward from y=0 so the instance matrix can rotate it about the hip
+ * with no pivot arithmetic at all. The boot is the important half: in a packed
+ * clump the near-black boots are the only thing separating one unit's legs from
+ * the next one's, and they are what the eye tracks when the crowd is walking.
+ */
+function buildLegGeometry(): THREE.BufferGeometry {
+  const parts: Part[] = [];
+  const leg = new THREE.BoxGeometry(0.145, 0.44, 0.19);
+  leg.translate(0, -0.22, 0);
+  parts.push({ geo: leg, color: COLOR_TROUSERS });
+
+  // Overlapping the bottom of the trouser, not hanging below it: the sole has to
+  // land exactly on HIP_Y below the hip or the whole army walks on stilts a
+  // centimetre above its own shadows.
+  const boot = new THREE.BoxGeometry(0.17, 0.14, 0.27);
+  boot.translate(0, -0.385, 0.04);
+  parts.push({ geo: boot, color: COLOR_BOOT });
+
+  const merged = mergeParts(parts);
   merged.computeBoundingSphere();
   return merged;
 }

@@ -433,6 +433,9 @@ boss.onStrike((_kind, zx, half) => {
   const hi = Math.min(zx + half, world.squadCenter.x + crowd);
   const covered = Math.max(0, hi - lo) / (crowd * 2);
   if (covered <= 0) return;
+  // Scaled by how much of the crowd was actually in it, so a graze is a nudge
+  // and a direct hit is a jolt.
+  zoom.shake(SHAKE_BOSS_HIT * covered);
   payTroops(-Math.max(1, Math.round(world.troops * BOSS_HIT_SHARE * covered)));
 });
 
@@ -459,7 +462,41 @@ const BOSS_REWARD_SHARE = 0.3;
 const BOSS_REWARD_FLOOR = 12;
 const BOSS_CREW = 2;
 
+/**
+ * How hard the camera is knocked, in metres of peak offset.
+ *
+ * Only two events in the game get one, and that is the whole design: a shake
+ * spent on something that happens every few seconds stops meaning anything. A
+ * boss dying and a boss landing a hit on you are the two moments where the
+ * screen should move.
+ */
+const SHAKE_BOSS_DEATH = 0.6;
+const SHAKE_BOSS_HIT = 0.42;
+
+/** Blasts thrown around a dying boss, and how far out they scatter. */
+const BOSS_DEATH_BLASTS = 7;
+const BOSS_DEATH_SPREAD = 2.4;
+const BOSS_DEATH_FLASH = 5.5;
+/** Seconds between them. Seven of these fill 0.72 s, just inside the boss's own
+ *  death animation, so the last blast lands as the wreck hits the deck. */
+const BOSS_BLAST_GAP = 0.12;
+let blastsLeft = 0;
+let blastTimer = 0;
+let blastX = 0;
+let blastZ = 0;
+
 boss.onKilled((kind) => {
+  // A boss that just fell over was the least explosive thing in a game whose
+  // barrels detonate. It comes apart in a string of blasts up its own body, and
+  // the camera takes the hit.
+  zoom.shake(SHAKE_BOSS_DEATH);
+  // Staggered, not simultaneous. Seven blasts in one frame is one big flash;
+  // seven blasts walking up the body over three quarters of a second is a boss
+  // coming apart, and the death animation lasts long enough to carry it.
+  blastsLeft = BOSS_DEATH_BLASTS;
+  blastTimer = 0;
+  blastX = boss.x;
+  blastZ = boss.z;
   payTroops(Math.max(BOSS_REWARD_FLOOR, Math.round(world.troops * BOSS_REWARD_SHARE)));
   if (kind === "brute") world.rocketeers += ROCKET_CREW * BOSS_CREW;
   else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
@@ -854,6 +891,7 @@ function resetRun(): void {
   barrels.clear();
   enemies.clear();
   boss.clear();
+  blastsLeft = 0;
   bossBar.hide();
   bossShowing = false;
   bossIndex = 0;
@@ -1058,6 +1096,22 @@ function tick(dt: number): void {
     // a hit lands where the boss is now — it moves fast during a charge and a
     // tick of lag there reads as rounds passing through it.
     boss.update(dt, world);
+    // The dying boss's blast chain. Driven here rather than from the boss module
+    // because the flashes belong to the bullet system, and an entity module does
+    // not reach into another one.
+    if (blastsLeft > 0) {
+      blastTimer -= dt;
+      if (blastTimer <= 0) {
+        blastTimer = BOSS_BLAST_GAP;
+        blastsLeft--;
+        bullets.spawnImpact(
+          blastX + (Math.random() - 0.5) * BOSS_DEATH_SPREAD,
+          0.5 + Math.random() * 3.6,
+          blastZ + (Math.random() - 0.5) * BOSS_DEATH_SPREAD * 0.6,
+          BOSS_DEATH_FLASH * (0.6 + Math.random() * 0.7),
+        );
+      }
+    }
     if (boss.fighting) bossBar.set(boss.hp);
     else if (!boss.active && bossShowing) bossBar.hide();
     bossShowing = boss.active;

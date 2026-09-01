@@ -141,6 +141,7 @@
  */
 
 import * as THREE from "three";
+import { toyMaterial } from "../core/look";
 import type { System, WeaponTier, WorldState } from "../core/types";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import { CORRIDOR_HALF_WIDTH } from "./lane";
@@ -1004,7 +1005,7 @@ class Bullets implements BulletSystem, BulletView {
     // muzzle flash is just a short fat version of the same flame lick.
     this.#rocketMesh = new THREE.InstancedMesh(
       rocketGeometry(),
-      new THREE.MeshLambertMaterial({ vertexColors: true }),
+      toyMaterial({ vertexColors: true }),
       ROCKET_CAPACITY,
     );
     this.#rocketMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

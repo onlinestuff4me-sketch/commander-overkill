@@ -56,6 +56,7 @@
 import * as THREE from "three";
 import type { System, WorldState } from "../core/types";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
+import { toyMaterial } from "../core/look";
 
 /* -------------------------------------------------------------------------- */
 /* Tunables                                                                    */
@@ -161,9 +162,9 @@ const BODY_HALF_Z = 2.0;
  *  construction as every other module's, and it has to move with this one or
  *  the boss reads as a sticker. */
 const SHADOW_Y = 0.02;
-const SHADOW_OFF_X = -0.5;
-const SHADOW_OFF_Z = -0.7;
-const SHADOW_OPACITY = 0.34;
+const SHADOW_OFF_X = 0.8;
+const SHADOW_OFF_Z = 1.1;
+const SHADOW_OPACITY = 0.44;
 
 /** Height of the name plate above the deck, and of the attack label under it. */
 /** Plate heights, and they are a framing budget rather than a taste call: at the
@@ -240,8 +241,8 @@ interface Rig {
   body: THREE.Mesh;
   /** The part that animates: club arm, spinning drum, hatch lid. */
   limb: THREE.Mesh;
-  material: THREE.MeshLambertMaterial;
-  limbMaterial: THREE.MeshLambertMaterial;
+  material: THREE.MeshPhongMaterial;
+  limbMaterial: THREE.MeshPhongMaterial;
   halfWidth: number;
   shadowScale: number;
 }
@@ -871,8 +872,8 @@ function at(geo: THREE.BufferGeometry, x: number, y: number, z: number): THREE.B
   return geo;
 }
 
-function lambert(): THREE.MeshLambertMaterial {
-  return new THREE.MeshLambertMaterial({ vertexColors: true });
+function lambert(): THREE.MeshPhongMaterial {
+  return toyMaterial({ vertexColors: true });
 }
 
 /**
@@ -907,8 +908,8 @@ function rigFrom(
 
 /* Colours. Deliberately outside the player's cream-and-blue and outside the
  * enemy walkers' flat red, so a boss reads as its own faction at forty pixels. */
-const FLESH = 0xe8a184;
-const FLESH_DARK = 0xc07a60;
+const FLESH = 0xdb8c6c;
+const FLESH_DARK = 0xb06a50;
 const LEATHER = 0x6b4230;
 const IRON = 0x8d97a4;
 const IRON_DARK = 0x5c646f;
