@@ -57,9 +57,15 @@
  *
  *   blockade    a gate row on one side, an enemy pack standing in the gap
  *   crossroads  a barrel cluster on one side, a gate row on the other
+ *
+ * `boss` is the odd one out: it is NOT drawn from the beat table, because a
+ * boss is punctuation and punctuation cannot be left to a weighted roll. It is
+ * scheduled by distance and pre-empts whatever the current beat was going to do
+ * next — see BOSS_INTERVAL.
  */
 export type Placement =
   | "gate"
+  | "boss"
   | "barrels"
   | "walkers"
   | "elites"
@@ -173,9 +179,12 @@ const NO_REPEAT: ReadonlySet<string> = new Set(["rest", "surge", "blockade", "cr
  * objects, and the compound placements each contain a gate row. Answering "is it
  * literally the string 'gate'" would give a blockade the scenery gap and let a
  * corridor of nothing but blockades count as dry.
+ *
+ * A boss counts, and it is the biggest one on the board: fight it or take the
+ * prizes going past on the other kerb, for as long as its patience holds.
  */
 function hasGate(p: Placement): boolean {
-  return p === "gate" || p === "blockade" || p === "crossroads";
+  return p === "gate" || p === "blockade" || p === "crossroads" || p === "boss";
 }
 
 /**
@@ -223,6 +232,37 @@ const GATE_TO_GATE_SPACING = 16;
  * Kept below SPACING/3 so the minimum gap never falls under ~7 m.
  */
 const SPACING_JITTER = 3;
+
+/**
+ * Metres of road between bosses, and before the first one.
+ *
+ * BOSSES ARE PUNCTUATION, WHICH IS WHY THEY ARE NOT IN THE BEAT TABLE. Every
+ * other placement is a weighted roll, and that is right for texture — but a
+ * shape you can feel needs events that arrive when the run says so, not when
+ * the dice say so. At the default 6 m/s these work out to a boss at ~28 s and
+ * then one every ~35 s, so a 90 s run meets two and a two-minute run meets
+ * three, each one harder than the last.
+ *
+ * The first is deliberately later than the interval: the opening is where the
+ * army is built, and a boss before there is anything to fight it with is not a
+ * decision, it is a wall.
+ */
+const FIRST_BOSS = 168;
+const BOSS_INTERVAL = 210;
+
+/**
+ * Clear road BEFORE a boss, and only a little after it.
+ *
+ * The silence in front is most of what makes an arrival read as one: 22 m is
+ * nearly four seconds of empty bridge with the boss already visible at the far
+ * end of it. Almost nothing follows it, and that is deliberate and load-bearing
+ * — the corridor keeps delivering prizes THROUGHOUT the fight, onto the kerb the
+ * boss is not standing on. An empty road during a boss would turn the encounter
+ * into a shooting gallery with one target; a road still offering barrels is what
+ * makes every second of fire poured into the boss a second of greed given up.
+ */
+const BOSS_APPROACH = 22;
+const BOSS_TRAIL = 6;
 
 export interface DirectorState {
   /**
@@ -278,6 +318,16 @@ export function createDirector(seed = 0x5eed): DirectorState {
   let trail = 0;
   /** Placements since the last gate. Gates are the game; see DRY_LIMIT. */
   let sinceGate = 0;
+  /** Metres since the last boss. Counts road, not placements, so the boss
+   *  cadence is immune to whatever the beat table happens to be rolling. */
+  let sinceBoss = 0;
+  let bossDue = FIRST_BOSS;
+  /** Which kerb the next boss takes. Alternated rather than rolled, so a run
+   *  cannot put three bosses in a row on the same side and teach the player to
+   *  hold one thumb position. */
+  let bossSide = 1;
+  /** True once the approach gap has been opened and the boss lands next. */
+  let bossArmed = false;
 
   /**
    * Weighted pick, with two structural refusals.
@@ -342,8 +392,40 @@ export function createDirector(seed = 0x5eed): DirectorState {
   return {
     advance(metres) {
       pending += metres;
+      sinceBoss += metres;
       if (pending < gap) return null;
       pending -= gap;
+
+      // A boss pre-empts the beat table, and it does so in two steps: the first
+      // opportunity after it comes due is spent opening the approach, and the
+      // one after that places it. Widening the gap retroactively is not
+      // available — by the time the boss is due, the placement in front of it
+      // has already been made — so the gap is bought with a skipped slot.
+      if (sinceBoss >= bossDue) {
+        if (!bossArmed) {
+          bossArmed = true;
+          gap = BOSS_APPROACH;
+          // Normally the approach is bought with a skipped slot. If the world
+          // has jumped far enough to already owe that distance — a resumed tab —
+          // it is paid immediately instead, so a single huge step still places
+          // exactly one thing rather than nothing.
+          if (pending < gap) return null;
+          pending -= gap;
+        }
+        bossArmed = false;
+        sinceBoss = 0;
+        bossDue = BOSS_INTERVAL;
+        const side = bossSide;
+        bossSide = -bossSide;
+        count++;
+        // A boss is the biggest decision the corridor makes, so it resets the
+        // dry streak. Without this the limiter would treat a fifteen-second
+        // encounter as fifteen seconds of nothing happening and force a gate
+        // row into the middle of it.
+        sinceGate = 0;
+        gap = BOSS_TRAIL + SPACING;
+        return { what: "boss", side };
+      }
 
       ensureReady();
       const placement = beat.places[step];
@@ -373,6 +455,10 @@ export function createDirector(seed = 0x5eed): DirectorState {
       gap = 0;
       trail = 0;
       sinceGate = 0;
+      sinceBoss = 0;
+      bossDue = FIRST_BOSS;
+      bossArmed = false;
+      bossSide = 1;
     },
 
     get count() {
