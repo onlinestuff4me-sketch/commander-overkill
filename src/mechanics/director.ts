@@ -70,6 +70,7 @@ export type Placement =
   | "walkers"
   | "elites"
   | "bikers"
+  | "ogres"
   | "blockade"
   | "crossroads";
 
@@ -135,6 +136,23 @@ export const BEATS: readonly Beat[] = [
   // only enemy that punishes reading the board late rather than reading it
   // wrong — which is a different mistake, and worth having one of.
   { name: "charge", places: ["bikers", "gate"], sides: [1, -1], trail: 4, weight: 1 },
+
+  // An ogre standing squarely in front of a barrel cluster. It soaks most of an
+  // approach, so shooting through it costs the barrels behind it and going
+  // around costs them too — this is the beat where the prize is guarded by
+  // something you cannot simply out-shoot on the way past.
+  //
+  // WEIGHT 1, MEASURED. At 2 these two beats between them displaced enough of
+  // `fork` and `surge` — the beats that actually take armies apart — to halve
+  // the run's failure rate, from 4 wipes in 32 to 0. An enemy that soaks fire
+  // should make a run harder; putting one in place of a decision made it
+  // easier, which is a thing worth knowing before adding the next beat.
+  { name: "heavyguard", places: ["ogres", "barrels"], sides: [1, 1], trail: 5, weight: 1 },
+
+  // The same body used the other way: a heavy on one kerb and a decision on the
+  // other, so the cost of taking the row is walking past something you did not
+  // kill.
+  { name: "bulwark", places: ["ogres", "gate"], sides: [1, -1], trail: 4, weight: 1 },
 
   // The two mechanics interacting: shoot through the cover, then immediately
   // choose. This is the beat a fixed cycle could only produce by accident.
@@ -401,7 +419,11 @@ export function createDirector(seed = 0x5eed): DirectorState {
       // one after that places it. Widening the gap retroactively is not
       // available — by the time the boss is due, the placement in front of it
       // has already been made — so the gap is bought with a skipped slot.
-      if (sinceBoss >= bossDue) {
+      // Armed one approach-length EARLY, so that the distance the constants name
+      // is the distance the boss is PLACED at rather than where it started being
+      // set up. Without this the approach gap and the placement grid pushed the
+      // first boss 44 m past its nominal 168.
+      if (sinceBoss >= bossDue - (bossArmed ? 0 : BOSS_APPROACH)) {
         if (!bossArmed) {
           bossArmed = true;
           gap = BOSS_APPROACH;

@@ -34,6 +34,7 @@ import {
   damageOnSegment,
   ELITE_PASS_SHARE,
   enemyHp,
+  OGRE_PASS_SHARE,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
@@ -302,7 +303,7 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
 const BREACH_SHARE = 0.015;
 /** Multiplier per kind, on top of the per-body share. Elites and bikers are one
  *  body but hit like several. */
-const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3 };
+const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3, ogre: 10 };
 enemies.onBreached((_id, kind, _hp, bodies) => {
   // FREE while the squad is tiny, on the same threshold the gate mercy rule
   // uses. A pack is eight bodies and a two-troop army cannot kill any of them,
@@ -578,6 +579,20 @@ function eliteHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
 }
 
+/** An OGRE soaks most of a whole approach — see OGRE_PASS_SHARE. The floor is
+ *  high because an ogre met early must still be a wall rather than a speed bump;
+ *  it is meant to be walked around at low strength, not shot down. */
+function ogreHp(): number {
+  return enemyHp(
+    world.troops,
+    tierFor(world.troops),
+    bullets.tuning,
+    squad.radiusX,
+    OGRE_PASS_SHARE,
+    90,
+  );
+}
+
 /** A biker arrives sooner, so it gets less of the approach to be shot at and is
  *  priced accordingly. Two thirds of a heavy. */
 function bikerHp(): number {
@@ -711,6 +726,14 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
         const x = cx + (i - (ELITE_SQUAD - 1) / 2) * ELITE_SPACING;
         enemies.spawnElite(x / CORRIDOR_HALF_WIDTH, z, eliteHp(), false);
       }
+      return;
+    }
+
+    case "ogres": {
+      // ONE BODY, and that is the design. A line of ogres is a wall, which the
+      // gate rows already do better; a single one standing in front of something
+      // you want is a question about whether the prize is worth the approach.
+      enemies.spawnOgre(clusterX(1.8, side) / CORRIDOR_HALF_WIDTH, z, ogreHp());
       return;
     }
 

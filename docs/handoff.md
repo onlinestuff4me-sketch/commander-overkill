@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-08-14, session 3 (eighth pass)._
+_Last updated: 2026-08-15, session 3 (ninth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -10,20 +10,20 @@ _Last updated: 2026-08-14, session 3 (eighth pass)._
 **Repo:** `onlinestuff4me-sketch/commander-overkill`, public, `main`.
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
-**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 60 passing;
+**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 63 passing;
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
 **The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`:
-median **230 troops** against a 300–500 target, and **5 of 32 wiped**.
+median **301 troops** against a 300–500 target, and **4 of 32 wiped** — one in
+eight, which is exactly the failure rate the brief asks for at levels 1–2.
 
-**That median is BELOW target and was left there deliberately.** It fell from 508
-when a missed blue started costing you the number you had reached (see the
-decisions), which is a real cost the old economy never charged. The tempting fix
-is to raise reward spans until the median comes back, and that would only hide
-the new mechanic — the honest read is that the punishing reward needs the LEVEL
-system to place it deliberately rather than at the same rate all run. Measure
-before touching `REWARD_SPAN_BASE`; the number is real, not noise.
+**This is the closest the economy has ever been to the brief, and it got there by
+adding content rather than by tuning numbers.** The median had fallen to 230 when
+a missed blue started costing you the number you had reached; bosses and ogres
+brought it back to 301 without touching a single reward constant. Do not "fix"
+the median by raising `REWARD_SPAN_BASE` — that lever was deliberately left alone
+and the number came right on its own.
 
 **These medians carry roughly ±25% run-to-run noise at n=16.** The distribution
 has a long tail (a good run reaches the 1200 cap, a bad one never gets going), so
@@ -42,9 +42,18 @@ wipe rate was a flat zero: since a row can be walked around, a player who read
 the board correctly could not be killed, and every option was upside against less
 upside. The punishing reward changed that — walking into a blue you have not
 filled TAKES the number instead of giving it, so a bad commitment is now a loss
-rather than a missed gain. 5 of 32 is close to the brief's mid-game band by
-accident, not by design; it still needs **levels** (see #1) to put the difficulty
-somewhere in particular rather than at a constant rate all run.
+rather than a missed gain. Bosses added the other half: one that breaks through
+takes a fifth of the army in a single hit. 4 of 32 is the brief's early-level
+band, but it is a flat rate across the whole run — it still needs **levels** (see
+#1) to put the difficulty somewhere in particular rather than everywhere equally.
+
+**A BEAT THAT SOAKS FIRE CAN MAKE A RUN EASIER, WHICH IS BACKWARDS AND WORTH
+KNOWING.** The two ogre beats went in at weight 2 and the wipe rate fell from 4
+in 32 to 0 — not because ogres are harmless, but because a beat displaces other
+beats, and these two displaced enough `fork` and `surge` (the phrases that
+actually take armies apart) to soften the whole mix. At weight 1 the rate is back
+to 4. Whenever you add a beat, re-measure: the thing you added is only half of
+what changed.
 
 `sample()` takes a reaction time because a bot re-deciding sixty times a second
 measures the game played perfectly; 0.3 s is the setting the brief's per-level
@@ -63,9 +72,10 @@ clip it. Do not reopen the art question.
 against the reference game screen by screen and ranks what to build. Its headline
 finding — that the WORLD was the gap, a suspension bridge over water against our
 grey strip on a green field — **is now built** (`mechanics/lane.ts`: water deck,
-railings, scrolling towers, hangers). What is still open on that list is
-**bosses**, the rest of the prize chains (flamethrower, mortar, shield bearer,
-drone, magnet), and the chibi soldier proportions.
+railings, scrolling towers, hangers), and so are **bosses** — three of them, in
+`entities/boss.ts`. What is still open on that list is the rest of the prize
+chains (flamethrower, mortar, shield bearer, drone, magnet), a FLYING enemy, and
+the chibi soldier proportions.
 
 Read [`CLAUDE.md`](../CLAUDE.md) before touching anything. It holds the npm
 guardrails, the architecture invariants, and how to verify work.
@@ -177,15 +187,22 @@ Elites still do not — they are a tint and a scale, so a hundred of them look l
 a stronger version of the same soldier. Giving them a distinct body is the next
 step on this axis, and the carrier meshes are the pattern to copy.
 
-### 4b. Bosses are the biggest missing SPECTACLE, and the bar is already there
+### 4b. Bosses exist now, and the two things they still want
 
-`ui/bossbar.ts` is a working health bar driven by nothing but enemy kills, and
-`docs/reference/gap-analysis.md` specs four bosses (Roller, Spitter, Wall, Swarm
-Queen) with name plates and labelled attacks. This is the item most likely to
-produce what Mischa is actually asking the game for — a moment somebody would
-clip — and it is also the natural end-of-level boundary that item #1 needs. Build
-it after levels, not before: a boss with nowhere to sit is a set piece that
-interrupts a run at random.
+Three archetypes are built (`entities/boss.ts`), scheduled by distance, wired to
+the boss bar, and measured. What they do not have yet:
+
+- **An end-of-level boundary to sit on.** They currently arrive every 210 m
+  forever, which is a rhythm rather than a structure. The natural home for a boss
+  is the end of a level (item #1), and the ramp constants (`BOSS_RAMP_BASE`,
+  `BOSS_RAMP_STEP` in `main.ts`) are already shaped like a per-level difficulty
+  table waiting to be indexed by one.
+- **A fourth archetype that attacks at RANGE.** All three resolve at a distance
+  the crowd can shoot back from, so the answer to every one of them is "point the
+  guns and maybe step sideways". The gap analysis's Spitter — arcing globs that
+  leave a lingering zone on the deck — is the one that would make the player move
+  rather than aim, and the machinery for it (telegraph, danger decal, strike
+  callback) is all in place.
 
 ### 5. Nothing else from the RPG layer exists yet
 
@@ -215,6 +232,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
+| `entities/boss.ts` | The three bosses, one alive at a time. Owns its own figures, name plate, attack label, danger decal and death. Reports that a strike landed; never touches `world.troops`. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
 | `core/*`, `input/touch.ts` | Fixed-60Hz loop with render interpolation, state machine, event bus, single-thumb relative drag. |
 
@@ -589,6 +607,60 @@ legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
 
+**A BOSS IS A DECISION, AND ONE LINE IN `place()` IS WHAT MAKES IT ONE.** While a
+boss holds a kerb, every other placement is forced to the opposite one. The
+corridor keeps delivering barrels throughout the fight and the guns only point
+one way, so the trade is: seconds spent on the boss are prizes given up, against
+a patience clock that ends with the boss coming through the crowd for a fifth of
+the army. Delete that line and a boss becomes a shooting gallery with one target.
+
+**THE STANDOFF DISTANCE IS A WEAPON RANGE.** Rounds die 22 m from the soldier who
+fired them (`range` in mechanics/bullets.ts) and soldiers fire from throughout the
+crowd's depth. A boss holding at 29 m was outside the reach of the whole army:
+seven seconds of fire took 500 points off a 2,800-point boss, which then died in
+a second and a half the moment it charged into range. `STANDOFF_Z` is −23 and it
+moves if `range`, the scroll speed, or the crowd's depth budget move.
+
+**BOSS HIT POINTS ARE THE ONE HP MODEL THAT KNOWS ABOUT YOUR UPGRADES.** Every
+other one deliberately ignores them so a launcher stays worth picking up. Two
+corrections got the boss here, and both are easy to undo by accident:
+
+- It is priced off `damagePerPass` directly, NOT `enemyHp`. That function scales
+  its answer by `laneCoverage` — the share of a curtain of fire a 1.7 m barrel
+  face intercepts — which for a wide crowd is under a third. A six-metre boss
+  catches the whole curtain, so pricing one through that path made it four times
+  cheaper than intended.
+- `BOSS_UPGRADE_BITE` (0.6) puts most of the army's weapon multipliers back into
+  the boss's health. Without it a kitted ninety-strong army killed a brute in
+  2.5 s against a bare army's 7.5 — a boss that evaporates is not a check on the
+  army, it is a cutscene with a health bar. At 0.6 the spread is 3.5 s to 5.8 s
+  against a nine-second patience, which is the window the whole encounter is
+  designed around.
+
+**THE FIRST BOSS IS SCALED TO 0.7 AND THE THIRD TO 1.4.** At full weight the
+first boss anyone ever meets is unwinnable — a bare thirty-strong army, which is
+what a run actually has at the 168 m mark, needs twelve seconds against nine. The
+ramp is the difficulty curve for the whole encounter type and it is two constants
+in `main.ts`.
+
+**EVERYTHING A BIG FIGURE HAS TO SAY BELONGS ON +Z.** The camera sits at z +9.5
+and looks down the corridor, so the side facing the player is POSITIVE z. The
+first pass put the face, the maw and the hazard plates on all three bosses at −z
+and they came back as blank lumps. The same rule governs the ogre's iron plate
+and the elite's rifle.
+
+**A HIT FLASH TUNED FOR A WALKER IS WRONG FOR A BOSS.** A boss is hit several
+times per frame, so the flash never decays: a white flash at a walker's strength
+left the brute a featureless white blob for the entire fight. It is a third the
+strength and biased orange, which reads as glowing hot under sustained fire and
+still pops on a single rocket.
+
+**THE OGRE IS PRICED SO THAT SHOOTING IT IS A QUESTION.** `OGRE_PASS_SHARE` is
+0.8 of a whole approach, which means an ogre standing in front of a barrel
+cluster costs you the cluster — there is not enough approach left to kill both. A
+guard that can simply be shot through on the way past is scenery, and that is
+what the walker packs in a `blockade` already are.
+
 **THE GAME IS ON A BRIDGE NOW, AND THE SCENERY IS WHAT MAKES IT MOVE.** The road
 sits on a deck over water with railings, and `addTowers()` (`mechanics/lane.ts`)
 scrolls suspension towers past and recycles them at `TOWER_RECYCLE_Z`. This is
@@ -664,11 +736,11 @@ ships, pinned by postcss. Revisit when postcss bumps.
 - **The boss bar is a display with nothing behind it.** No boss entity exists;
   it is currently driven by enemy kills. It is also the obvious place to hang an
   end-of-level boundary once levels exist.
-- **Enemies and mines are thin.** Walkers, gold elites and bikers all exist, read
-  as enemies, cost a share of the army per body that reaches you, and are all
-  placed by the director now (`heavies` and `charge` beats). There are still no
-  mines, enemies do not shoot back, and there is **no boss** — the gap analysis
-  specs four (Roller, Spitter, Wall, Swarm Queen) and none is built.
+- **Nothing shoots back.** Five enemy kinds exist and are placed — walker packs,
+  gold elites, bikers, ogres, and three bosses — but every one of them hurts you
+  by ARRIVING. No enemy has a ranged attack, so the whole game is still resolved
+  by where the crowd stands rather than by anything it has to react to. There are
+  also no mines and no flying enemy.
 - **The autopilot does not aim.** It positions the crowd but never chooses a
   segment to concentrate fire on, so it under-collects under the fill-to-earn
   rule and every economy median here is a floor. Teaching it to hold a lane until
