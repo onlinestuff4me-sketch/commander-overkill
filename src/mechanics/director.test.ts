@@ -34,7 +34,7 @@ function run(
 
 /** Placements that put a decision on the road. Mirrors hasGate() in the module. */
 function decides(what: Placement): boolean {
-  return what === "gate" || what === "blockade" || what === "crossroads";
+  return what === "gate" || what === "blockade" || what === "crossroads" || what === "boss";
 }
 
 function gaps(placed: { at: number }[]): number[] {
@@ -108,6 +108,40 @@ describe("content mix", () => {
       for (const place of beat.places) {
         expect(kinds.has(place), `${beat.name} places ${place}, never seen`).toBe(true);
       }
+    }
+  });
+
+  it("punctuates the run with bosses, on a cadence rather than a roll", () => {
+    // The whole reason bosses are not in the beat table. A run of a given
+    // length must meet a predictable number of them, or "shape" is back to
+    // being whatever the dice did.
+    const placed = run(1400, 3);
+    const bosses = placed.filter((p) => p.what === "boss");
+    expect(bosses.length).toBeGreaterThanOrEqual(6);
+    for (let i = 1; i < bosses.length; i++) {
+      const apart = bosses[i]!.at - bosses[i - 1]!.at;
+      // The cadence is in metres of road, and the only slack is the placement
+      // grid it has to land on.
+      expect(apart).toBeGreaterThan(180);
+      expect(apart).toBeLessThan(260);
+    }
+  });
+
+  it("opens clear road in front of every boss", () => {
+    // The silence before the arrival is most of what makes it read as one.
+    const placed = run(1400, 2);
+    for (let i = 1; i < placed.length; i++) {
+      if (placed[i]!.what !== "boss") continue;
+      expect(placed[i]!.at - placed[i - 1]!.at).toBeGreaterThan(20);
+    }
+  });
+
+  it("alternates which kerb a boss holds", () => {
+    // Bosses take a side and the orchestrator pushes everything else to the
+    // other one, so a run of same-side bosses would teach one thumb position.
+    const bosses = run(1400, 3).filter((p) => p.what === "boss");
+    for (let i = 1; i < bosses.length; i++) {
+      expect(bosses[i]!.side).toBe(-bosses[i - 1]!.side);
     }
   });
 

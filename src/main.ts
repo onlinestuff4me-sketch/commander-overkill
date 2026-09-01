@@ -22,13 +22,19 @@ import type { System, WeaponTier } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
 import { createCorridor, CORRIDOR_HALF_WIDTH } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
-import { createBullets, MAX_STREAMS } from "./mechanics/bullets";
+import {
+  createBullets,
+  damagePerPass,
+  effectiveShooters,
+  MAX_STREAMS,
+} from "./mechanics/bullets";
 import {
   barrelHp,
   barrelPayout,
   damageOnSegment,
   ELITE_PASS_SHARE,
   enemyHp,
+  OGRE_PASS_SHARE,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
 import { createDirector, createRng } from "./mechanics/director";
@@ -42,6 +48,8 @@ import {
 } from "./mechanics/gates";
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
+import { createBoss } from "./entities/boss";
+import type { BossKind } from "./entities/boss";
 import { createPickups } from "./entities/pickups";
 import type { PickupKind } from "./entities/pickups";
 import { createFloaters } from "./ui/floaters";
@@ -75,6 +83,9 @@ const bullets = createBullets(stage.scene);
 const gates = createGates(stage.scene, { autoSpawn: false });
 const barrels = createBarrels(stage.scene);
 const enemies = createEnemies(stage.scene);
+// Punctuation. Everything else on the road is a decision you make in passing;
+// this is one that stands there and waits for an answer. See entities/boss.ts.
+const boss = createBoss(stage.scene);
 // What rides a barrel. Not an enemy — see the note in entities/pickups.ts.
 const pickups = createPickups(stage.scene);
 const floaters = createFloaters(stage.scene);
@@ -96,6 +107,7 @@ const renderables: System[] = [
   gates,
   barrels,
   enemies,
+  boss,
   pickups,
   floaters,
   growthFx,
@@ -291,7 +303,7 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
 const BREACH_SHARE = 0.015;
 /** Multiplier per kind, on top of the per-body share. Elites and bikers are one
  *  body but hit like several. */
-const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3 };
+const BREACH_COST: Record<string, number> = { pack: 1, elite: 3, biker: 3, ogre: 10 };
 enemies.onBreached((_id, kind, _hp, bodies) => {
   // FREE while the squad is tiny, on the same threshold the gate mercy rule
   // uses. A pack is eight bodies and a two-troop army cannot kill any of them,
@@ -303,10 +315,160 @@ enemies.onBreached((_id, kind, _hp, bodies) => {
   payTroops(-Math.max(1, Math.round(world.troops * BREACH_SHARE * weight)));
 });
 
-// Placeholder boss pacing: the bar is a pure display, so something has to drive
-// it. Kills stand in until a real boss entity exists.
-bossBar.reset(80);
-enemies.onKilled(() => bossBar.damage(1));
+/* ── Bosses ───────────────────────────────────────────────────────────────
+ *
+ * The bar used to be driven by a kill counter because there was no boss to put
+ * in it — a red capsule counting down from 80 to nothing in particular. It
+ * shows an actual creature's hit points now, which is what the reference does
+ * (`clip1a/f_030` → `f_033`: 350 down to 46 in a second of sustained fire).
+ */
+
+/** The order bosses arrive in, cycled. Authored rather than rolled: the first
+ *  boss a player ever meets should be the one whose attack is easiest to read,
+ *  and the hive — which punishes slow killing with bodies you fight later —
+ *  should not be it. */
+const BOSS_ORDER: readonly BossKind[] = ["brute", "roller", "hive"];
+let bossIndex = 0;
+/** Whether the bar is currently up, so it is hidden exactly once when a fight
+ *  ends rather than poked every tick for the rest of the run. */
+let bossShowing = false;
+
+/**
+ * How many full passes of fire a boss is worth, per kind.
+ *
+ * A "pass" is EFFECTIVE_PASS_SECONDS (4.25 s) of the whole army firing into one
+ * target, so 1.5 means a brute takes six and a half seconds of undivided
+ * attention. Its patience is 9 s. That gap is the entire encounter design: an
+ * army that commits everything wins with room to spare, and an army that spends
+ * a third of the fight shooting barrels on the far kerb does not — which is
+ * exactly the decision the whole thing exists to pose.
+ *
+ * The roller is the firepower check, so it asks for the most; the hive asks for
+ * the least because failing to kill it fast has its own separate price.
+ */
+const BOSS_PASS_SHARE: Record<BossKind, number> = { brute: 1.65, roller: 2.1, hive: 1.3 };
+/**
+ * How each successive boss is scaled: `BASE + STEP × encounter`.
+ *
+ * The first is deliberately UNDER its nominal weight. Measured, at the troop
+ * counts a run actually reaches by the 168 m mark, a full-weight brute takes a
+ * bare thirty-strong army twelve seconds to kill against nine seconds of
+ * patience — an unwinnable first meeting, which teaches the wrong lesson about
+ * a mechanic the player has never seen before. At 0.7 the same army kills it
+ * with a second to spare if it commits everything, which is the lesson.
+ *
+ * By the third encounter the multiplier is 1.4, and a bare army cannot make it
+ * in time at all. That is the intended shape: the first boss teaches, the
+ * second tests, and the third one asks what you spent the run buying.
+ */
+const BOSS_RAMP_BASE = 0.7;
+const BOSS_RAMP_STEP = 0.35;
+
+/**
+ * How much of the army's weapon upgrades a boss's hit points take account of.
+ *
+ * EVERY OTHER HP MODEL IN THIS GAME IGNORES UPGRADES ENTIRELY, on purpose: a
+ * barrel that got tougher every time you picked up a launcher would make the
+ * launcher worthless (see the note on `firepower` in core/types.ts). A boss is
+ * the one exception, and it earns it by being the one piece of content whose
+ * whole job is to ask whether the army is strong enough. Measured, a kitted
+ * ninety-strong army kills an unadjusted brute in 2.5 s against a bare army's
+ * 7.5 s — a boss that evaporates in two seconds is not a check, it is a cutscene
+ * with a health bar.
+ *
+ * At 0.6 an upgrade is still worth roughly two fifths of its raw value against a
+ * boss and its full value against everything else on the road, which keeps the
+ * pickup a real prize without letting it delete the encounter.
+ */
+const BOSS_UPGRADE_BITE = 0.6;
+/** Floor, for a boss met by a very small army. Low enough to be killable at the
+ *  troop counts the first one actually arrives at. */
+const BOSS_HP_FLOOR = 45;
+
+function bossHp(kind: BossKind, encounter: number): number {
+  const share = BOSS_PASS_SHARE[kind] * (BOSS_RAMP_BASE + encounter * BOSS_RAMP_STEP);
+  // DAMAGE PER PASS, NOT enemyHp — and the difference is the whole calibration.
+  // `enemyHp` scales its answer by `laneCoverage`, the share of a curtain of
+  // fire that a 1.7 m barrel face intercepts, which for a wide crowd is under a
+  // third. A boss is six metres across and catches the whole curtain, so pricing
+  // one through that path made it four times cheaper than intended: the first
+  // build's brute died in a second and a half.
+  // Elites shoot like four soldiers each, so they go in as the head count the
+  // guns actually amount to rather than the number of bodies.
+  const guns = effectiveShooters(world.troops, world.elites);
+  const upgrade = 1 + (world.firepower * world.fireRate - 1) * BOSS_UPGRADE_BITE;
+  const raw = Math.max(
+    BOSS_HP_FLOOR,
+    Math.round(damagePerPass(tierFor(world.troops), guns, bullets.tuning) * share * upgrade),
+  );
+  // Two significant figures, because unlike a barrel's this number is READ: it
+  // is the biggest thing on the HUD and it counts down in front of the player
+  // for ten seconds. "5,400" is a boss's health; "5,449" is a spreadsheet cell.
+  // Deliberately NOT niceHp() from pacing.ts — that ladder tops out at 250,
+  // which is a barrel's world, and it would quietly cap every boss in the game
+  // at a quarter of what the first one is supposed to cost.
+  const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(raw)) - 1));
+  return Math.round(raw / mag) * mag;
+}
+
+/**
+ * What being caught by a boss attack costs, as a share of the army — and it is
+ * charged IN PROPORTION TO HOW MUCH OF THE CROWD WAS STANDING IN IT.
+ *
+ * A flat penalty for being clipped would be the wrong shape twice over: it would
+ * make a graze as bad as a direct hit, and it would let a 500-strong army — five
+ * metres wide, most of a carriageway — take the same hit as a squad of six that
+ * genuinely fitted in the gap. Charging by overlap means a big crowd cannot
+ * fully dodge anything, which is a real and welcome pressure at scale: growth
+ * buys firepower and costs agility.
+ */
+const BOSS_HIT_SHARE = 0.2;
+
+boss.onStrike((_kind, zx, half) => {
+  // Same mercy threshold breaches use: a tiny army cannot kill a boss and must
+  // not be put in a spiral by one.
+  if (world.troops < MERCY_TROOPS) return;
+  const crowd = Math.max(0.4, world.squadHalfWidth);
+  const lo = Math.max(zx - half, world.squadCenter.x - crowd);
+  const hi = Math.min(zx + half, world.squadCenter.x + crowd);
+  const covered = Math.max(0, hi - lo) / (crowd * 2);
+  if (covered <= 0) return;
+  payTroops(-Math.max(1, Math.round(world.troops * BOSS_HIT_SHARE * covered)));
+});
+
+/** A hive does not hit you; it hatches. The walkers are ordinary walkers, spawned
+ *  through the enemy module — two entity modules must not import each other, so
+ *  the boss asks and this file does it. */
+boss.onHatch((lane, z, count) => {
+  enemies.spawnPack(lane, z, count, walkerHp());
+});
+
+/**
+ * Killing a boss pays TROOPS AND A WEAPON, and the weapon is the point.
+ *
+ * Troops alone would make a boss a large barrel. A crew of rocketeers is a
+ * permanent change to what the army is, visible on the soldiers themselves and
+ * in the stream they fire, so the run is measurably different after the fight
+ * than before it — which is what an event is supposed to leave behind.
+ *
+ * Matched to the fight so the reward reads as spoils: the brute swings a club
+ * and leaves launchers, the roller is a machine and leaves miniguns, the hive
+ * leaves the bodies it was going to spawn.
+ */
+const BOSS_REWARD_SHARE = 0.3;
+const BOSS_REWARD_FLOOR = 12;
+const BOSS_CREW = 2;
+
+boss.onKilled((kind) => {
+  payTroops(Math.max(BOSS_REWARD_FLOOR, Math.round(world.troops * BOSS_REWARD_SHARE)));
+  if (kind === "brute") world.rocketeers += ROCKET_CREW * BOSS_CREW;
+  else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
+  else world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES * 3);
+  armCarriers();
+});
+
+// Nothing to show until one arrives.
+bossBar.hide();
 
 // ── Content pacing ─────────────────────────────────────────────────────────
 
@@ -417,6 +579,20 @@ function eliteHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
 }
 
+/** An OGRE soaks most of a whole approach — see OGRE_PASS_SHARE. The floor is
+ *  high because an ogre met early must still be a wall rather than a speed bump;
+ *  it is meant to be walked around at low strength, not shot down. */
+function ogreHp(): number {
+  return enemyHp(
+    world.troops,
+    tierFor(world.troops),
+    bullets.tuning,
+    squad.radiusX,
+    OGRE_PASS_SHARE,
+    90,
+  );
+}
+
 /** A biker arrives sooner, so it gets less of the approach to be shot at and is
  *  priced accordingly. Two thirds of a heavy. */
 function bikerHp(): number {
@@ -474,7 +650,31 @@ function fitCluster(
  * a guard gets lined up with the prize it is guarding — see mechanics/director.ts.
  */
 function place(what: Placement, z: number, side = 0, free?: { x: number; count: number }): void {
+  // WHILE A BOSS HOLDS ONE KERB, EVERYTHING ELSE GOES TO THE OTHER ONE. This is
+  // the line that turns a boss from an obstacle into a decision: the prizes keep
+  // coming, they are all on the side the boss is not standing on, and the guns
+  // only point one way. Without it the corridor would drop barrels inside the
+  // boss and the fight would be a shooting gallery with one target.
+  if (what !== "boss" && boss.fighting) {
+    side = -boss.side;
+    // A compound placement is itself an either/or spanning both kerbs, and the
+    // boss has already taken one of them — there is no road left for the second
+    // half. The prize half is what is worth keeping.
+    if (what === "blockade" || what === "crossroads") what = "barrels";
+  }
+
   switch (what) {
+    case "boss": {
+      // Never two at once. The director cannot produce that on its own, but a
+      // dev harness spawn during an encounter could.
+      if (boss.active) return;
+      const kind = BOSS_ORDER[bossIndex % BOSS_ORDER.length]!;
+      boss.spawn(kind, bossHp(kind, bossIndex), side !== 0 ? side : 1, z);
+      bossBar.reset(boss.maxHp);
+      bossIndex++;
+      return;
+    }
+
     case "gate": {
       const count = composeRow();
       gates.spawnRow(gateBuffer, z, rowPlacement(rowRng, count, side));
@@ -526,6 +726,14 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
         const x = cx + (i - (ELITE_SQUAD - 1) / 2) * ELITE_SPACING;
         enemies.spawnElite(x / CORRIDOR_HALF_WIDTH, z, eliteHp(), false);
       }
+      return;
+    }
+
+    case "ogres": {
+      // ONE BODY, and that is the design. A line of ogres is a wall, which the
+      // gate rows already do better; a single one standing in front of something
+      // you want is a question about whether the prize is worth the approach.
+      enemies.spawnOgre(clusterX(1.8, side) / CORRIDOR_HALF_WIDTH, z, ogreHp());
       return;
     }
 
@@ -645,8 +853,11 @@ function resetRun(): void {
   world.health = 1;
   barrels.clear();
   enemies.clear();
+  boss.clear();
+  bossBar.hide();
+  bossShowing = false;
+  bossIndex = 0;
   gates.reset();
-  bossBar.reset(80);
   director.reset();
   rowIndex = 0;
   pickups.clear();
@@ -723,6 +934,10 @@ const ENEMY_PAD = 0.32;
 function detonate(x: number, y: number, z: number, dmg: number): void {
   bullets.spawnImpact(x, y, z, SPLASH_FLASH);
   const splash = dmg * SPLASH_DAMAGE;
+  // Once, not once per pass: a boss is a single target, and letting the blast
+  // loop find it four times would quietly make rockets four times better
+  // against the one enemy the difficulty curve is built around.
+  boss.damageAt(x, z, SPLASH_RADIUS, splash);
   for (let i = 0; i < SPLASH_TARGETS; i++) {
     // Each pass takes the nearest remaining target; once both stop reporting a
     // hit there is nothing else in the blast and the rest of the passes are free.
@@ -748,6 +963,16 @@ function resolveHits(): void {
     const rocket = bullets.isRocket(id);
 
     if (gates.shootAt(x, z, GATE_PAD, dmg)) {
+      bullets.consume(id, x, y, z);
+      if (rocket) detonate(x, y, z, dmg);
+      continue;
+    }
+
+    // A BOSS IS A WALL OF MEAT and stops the stream exactly as a barrier does.
+    // Tested before barrels because it is the biggest thing on the road and the
+    // one the player is aiming at; a round that reaches it has already passed
+    // everything in front.
+    if (boss.damageAt(x, z, ENEMY_PAD, dmg)) {
       bullets.consume(id, x, y, z);
       if (rocket) detonate(x, y, z, dmg);
       continue;
@@ -829,6 +1054,13 @@ function tick(dt: number): void {
     //    not where it was last tick.
     barrels.update(dt, world);
     enemies.update(dt, world);
+    // With the other targets, and before the rounds are resolved against it, so
+    // a hit lands where the boss is now — it moves fast during a charge and a
+    // tick of lag there reads as rounds passing through it.
+    boss.update(dt, world);
+    if (boss.fighting) bossBar.set(boss.hp);
+    else if (!boss.active && bossShowing) bossBar.hide();
+    bossShowing = boss.active;
     // BEFORE the seating pass, and it has to be here: pickups was in
     // `renderables` (so it drew) but its update was never called, which is the
     // whole of the "floating objects" bug. Without a tick its clock never
@@ -938,6 +1170,9 @@ function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
   gates.reset();
   barrels.clear();
   enemies.clear();
+  // A boss mid-probe would eat the rounds being counted, and its patience clock
+  // would charge the probe troops halfway through the measurement.
+  boss.clear();
   world.troops = clamp(Math.round(troops), 1, MAX_TROOPS);
   touch.lane = clamp(lane, -1, 1);
 
@@ -1004,6 +1239,29 @@ function probeDamagePerPass(troops: number, lane = 0, barrelLane = lane): {
  * the content rather than of anybody's thumbs, so measuring them needs a hand
  * that plays the same way every time.
  */
+/**
+ * Push a wanted lane out of a boss's painted danger zone.
+ *
+ * `gates.bestLane()` scores gate rows and knows nothing about bosses, which is
+ * correct — the gate module must not learn about entities. But a bot that walks
+ * into every slam is the same class of measurement error as the one that scored
+ * an unfillable blue at face value: it reports a game that is harder than the
+ * one a player with eyes is playing. This is the smallest correction that fixes
+ * that, and no more — it dodges, it does not aim.
+ */
+function dodgeBoss(want: number): number {
+  if (!boss.dangerActive) return want;
+  const clear = boss.dangerHalf + Math.max(0.6, world.squadHalfWidth * 0.6);
+  const lo = (boss.dangerX - clear) / CORRIDOR_HALF_WIDTH;
+  const hi = (boss.dangerX + clear) / CORRIDOR_HALF_WIDTH;
+  if (want <= lo || want >= hi) return want;
+  // Out the nearer side, unless that side is off the road.
+  const outLeft = lo > -1 ? lo : Infinity;
+  const outRight = hi < 1 ? hi : Infinity;
+  if (outLeft === Infinity && outRight === Infinity) return want;
+  return Math.abs(want - outLeft) <= Math.abs(want - outRight) ? outLeft : outRight;
+}
+
 function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
   const dt = 1 / 60;
   const ticks = Math.round(seconds / dt);
@@ -1025,7 +1283,7 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
     if (sinceDecision >= reaction) {
       sinceDecision = 0;
       const want = gates.bestLane();
-      if (!Number.isNaN(want)) touch.lane = clamp(want, -1, 1);
+      if (!Number.isNaN(want)) touch.lane = clamp(dodgeBoss(want), -1, 1);
     }
     tick(dt);
     peak = Math.max(peak, world.troops);
@@ -1078,6 +1336,18 @@ if (import.meta.env.DEV) {
        *  to photograph one thing without the rest of the road in frame. */
       place(what: Placement, z = SPAWN_Z): void {
         place(what, z);
+      },
+      /** Put a named boss on the road at an exact distance, ignoring the
+       *  cadence. Screenshotting a boss otherwise means playing 28 seconds of
+       *  corridor first, and the pane cannot run 28 seconds. */
+      boss(kind: BossKind = "brute", z = SPAWN_Z, side = 1): void {
+        boss.clear();
+        boss.spawn(kind, bossHp(kind, bossIndex), side, z);
+        bossBar.reset(boss.maxHp);
+      },
+      /** What the live boss is doing, for grading a pose against a reference. */
+      bossStats() {
+        return { kind: boss.kind, hp: boss.hp, max: boss.maxHp, x: boss.x, z: boss.z, side: boss.side };
       },
       autopilot,
       /**

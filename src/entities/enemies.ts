@@ -62,11 +62,18 @@ const WALKER_SPEED = 1.6;
 /** Elites hold their ground more; they are cover, not a rush. */
 const ELITE_SPEED = 0.9;
 const BIKER_SPEED = 2.6;
+/** An ogre is the slowest thing on the road. It does not need to be fast: it is
+ *  a wall you either spend rounds on or walk around, and walking around it is
+ *  the whole point of putting one next to something you want. */
+const OGRE_SPEED = 0.55;
 
 /** Walker figure height. Deliberately under the player's ~1.65m — they read as
  *  rabble, and the size gap is what makes an elite feel like an elite. */
 const WALKER_HEIGHT = 1.12;
 const ELITE_SCALE = 1.24;
+/** Twice an elite, which puts an ogre at ~2.6 m against a 1.12 m walker. Big
+ *  enough that the silhouette answers "that is not a soldier" on its own. */
+const OGRE_SCALE = 2.0;
 
 /** Inverted-hull outline thickness, in metres of normal displacement. */
 const RIM_THICKNESS = 0.055;
@@ -131,6 +138,7 @@ const SHADOW_OPACITY = 0.3;
 const WALKER_SHADOW = 0.62;
 const ELITE_SHADOW = 0.85;
 const BIKER_SHADOW = 1.5;
+const OGRE_SHADOW = 1.5;
 
 /**
  * The camera never rotates (see core/renderer), so every billboard shares one
@@ -144,7 +152,7 @@ const BILLBOARD = new THREE.Quaternion().setFromEuler(new THREE.Euler(-CAMERA_PI
 /* Public shape                                                                */
 /* -------------------------------------------------------------------------- */
 
-export type EnemyKind = "pack" | "elite" | "biker";
+export type EnemyKind = "pack" | "elite" | "biker" | "ogre";
 
 /** Fired when a unit's hp hits zero. Primitives only — this runs inside update(). */
 export type EnemyKilled = (id: number, kind: EnemyKind, x: number, z: number) => void;
@@ -179,6 +187,14 @@ export interface EnemySystem extends System {
    * variant. Returns a unit id, or -1 if full.
    */
   spawnElite(lane: number, z: number, hp: number, mounted: boolean): number;
+  /**
+   * A single heavy body: slow, enormous, and expensive to shoot down.
+   *
+   * Separate from `spawnElite` rather than a third flag on it, because an ogre
+   * is not a variant of an elite — it moves differently, it is priced
+   * differently, and it costs a different amount when it reaches you.
+   */
+  spawnOgre(lane: number, z: number, hp: number): number;
 
   /**
    * Hold an elite at a world position. Call once per tick from `update()` (not
@@ -290,6 +306,7 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   const walkerGeo = buildWalker();
   const eliteGeo = buildElite();
   const bikerGeo = buildBiker();
+  const ogreGeo = buildOgre();
 
   const walkerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
   const eliteMat = new THREE.MeshLambertMaterial({ vertexColors: true });
@@ -309,12 +326,22 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   const MAX_ELITES = 20;
   const eliteRimGeo = buildElite(RIM_THICKNESS);
   const bikerRimGeo = buildBiker(RIM_THICKNESS);
+  const ogreRimGeo = buildOgre(RIM_THICKNESS);
 
   const eliteShells = new THREE.InstancedMesh(eliteRimGeo, rimMat, MAX_ELITES);
   const eliteBodies = new THREE.InstancedMesh(eliteGeo, eliteMat, MAX_ELITES);
   const bikerShells = new THREE.InstancedMesh(bikerRimGeo, rimMat, MAX_ELITES);
   const bikerBodies = new THREE.InstancedMesh(bikerGeo, eliteMat, MAX_ELITES);
-  for (const mesh of [eliteShells, eliteBodies, bikerShells, bikerBodies]) {
+  const ogreShells = new THREE.InstancedMesh(ogreRimGeo, rimMat, MAX_ELITES);
+  const ogreBodies = new THREE.InstancedMesh(ogreGeo, eliteMat, MAX_ELITES);
+  for (const mesh of [
+    eliteShells,
+    eliteBodies,
+    bikerShells,
+    bikerBodies,
+    ogreShells,
+    ogreBodies,
+  ]) {
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
     object.add(mesh);
@@ -323,12 +350,13 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   // keeps the gold strictly outside the silhouette instead of bleeding in.
   eliteShells.renderOrder = -1;
   bikerShells.renderOrder = -1;
+  ogreShells.renderOrder = -1;
 
   /* ---- contact shadows ------------------------------------------------ */
 
   // One pool for everything on the ground: walkers occupy [0, MAX_WALKERS) and
   // elites the tail, so an index is derivable and needs no cursor.
-  const SHADOW_CAPACITY = MAX_WALKERS + MAX_ELITES * 2;
+  const SHADOW_CAPACITY = MAX_WALKERS + MAX_ELITES * 3;
   const shadowGeo = new THREE.PlaneGeometry(1, 1);
   shadowGeo.rotateX(-Math.PI / 2);
   const shadowTex = makeShadowTexture();
@@ -435,9 +463,11 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   const eliteSlotOf = new Int16Array(MAX_UNITS).fill(-1);
   const eliteFree: number[] = [];
   const bikerFree: number[] = [];
+  const ogreFree: number[] = [];
   for (let i = MAX_ELITES - 1; i >= 0; i--) {
     eliteFree.push(i);
     bikerFree.push(i);
+    ogreFree.push(i);
   }
 
   const killedListeners: EnemyKilled[] = [];
@@ -456,6 +486,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   hideInstances(eliteBodies, MAX_ELITES);
   hideInstances(bikerShells, MAX_ELITES);
   hideInstances(bikerBodies, MAX_ELITES);
+  hideInstances(ogreShells, MAX_ELITES);
+  hideInstances(ogreBodies, MAX_ELITES);
   hideInstances(barBacks, MAX_BARS);
   hideInstances(barFills, MAX_BARS);
   hideInstances(shadows, SHADOW_CAPACITY);
@@ -463,6 +495,33 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   for (let i = 0; i < MAX_ELITES; i++) {
     eliteBodies.setColorAt(i, _col.setRGB(1, 1, 1));
     bikerBodies.setColorAt(i, _col.setRGB(1, 1, 1));
+    ogreBodies.setColorAt(i, _col.setRGB(1, 1, 1));
+  }
+
+  /**
+   * Per-kind lookups for the three single-body kinds.
+   *
+   * These replaced a chain of `kind === "biker" ? … : …` ternaries that appeared
+   * in six places. Two kinds is a ternary; three is a table, and the table is
+   * what makes adding a fourth a one-line change rather than a scavenger hunt.
+   */
+  function bodyMeshOf(kind: EnemyKind): THREE.InstancedMesh {
+    return kind === "biker" ? bikerBodies : kind === "ogre" ? ogreBodies : eliteBodies;
+  }
+  function shellMeshOf(kind: EnemyKind): THREE.InstancedMesh {
+    return kind === "biker" ? bikerShells : kind === "ogre" ? ogreShells : eliteShells;
+  }
+  function freeListOf(kind: EnemyKind): number[] {
+    return kind === "biker" ? bikerFree : kind === "ogre" ? ogreFree : eliteFree;
+  }
+  /** Shadow pool base index. Walkers own [0, MAX_WALKERS); each single-body kind
+   *  owns a MAX_ELITES-wide band after them. */
+  function shadowBaseOf(kind: EnemyKind): number {
+    return kind === "biker"
+      ? MAX_WALKERS + MAX_ELITES
+      : kind === "ogre"
+        ? MAX_WALKERS + MAX_ELITES * 2
+        : MAX_WALKERS;
   }
 
   /* ---- helpers -------------------------------------------------------- */
@@ -522,7 +581,7 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       u.crowdAlive = 0;
     } else {
       const slot = eliteSlotOf[id] ?? -1;
-      if (slot >= 0) (u.kind === "biker" ? bikerFree : eliteFree).push(slot);
+      if (slot >= 0) freeListOf(u.kind).push(slot);
       eliteSlotOf[id] = -1;
     }
     if (killed) for (const fn of killedListeners) fn(id, u.kind, u.x, u.z);
@@ -576,6 +635,30 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       u.phase = Math.random() * Math.PI * 2;
       u.bar = id;
       live++;
+      return id;
+    },
+
+    spawnOgre(lane, z, hp) {
+      const id = this.spawnElite(lane, z, hp, false);
+      const u = id >= 0 ? units[id] : undefined;
+      if (!u) return -1;
+      // Re-homed onto the ogre pool: spawnElite took an elite slot, which is a
+      // different instanced mesh. Handing the slot back and taking one from the
+      // right pool is cheaper than duplicating the whole spawn body, and there
+      // is exactly one place the two can drift apart, which is this line.
+      const slot = eliteSlotOf[id] ?? -1;
+      if (slot >= 0) eliteFree.push(slot);
+      const mine = ogreFree.pop();
+      if (mine === undefined) {
+        retire(id, u, false);
+        return -1;
+      }
+      eliteSlotOf[id] = mine;
+      u.kind = "ogre";
+      // An ogre carries its bar from the moment it appears. It is the one enemy
+      // whose hit points are the decision — "can I afford to kill that" is a
+      // question you cannot answer without seeing the number come down.
+      u.bar = id;
       return id;
     },
 
@@ -656,9 +739,10 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       for (let i = 0; i < MAX_UNITS; i++) {
         const u = units[i];
         if (!u || !u.alive) continue;
-        // Packs present a wide body; a single elite is a narrow one.
-        const rx = (u.kind === "pack" ? 1.05 : 0.34) + pad;
-        const rz = (u.kind === "pack" ? 0.7 : 0.34) + pad;
+        // Packs present a wide body, an ogre a wide one of a different kind,
+        // and a single elite a narrow one.
+        const rx = (u.kind === "pack" ? 1.05 : u.kind === "ogre" ? 0.8 : 0.34) + pad;
+        const rz = (u.kind === "pack" ? 0.7 : u.kind === "ogre" ? 0.6 : 0.34) + pad;
         const dx = x - u.x;
         const dz = z - u.z;
         if (dx > rx || dx < -rx || dz > rz || dz < -rz) continue;
@@ -769,7 +853,13 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
         }
 
         const speed =
-          u.kind === "pack" ? WALKER_SPEED : u.kind === "biker" ? BIKER_SPEED : ELITE_SPEED;
+          u.kind === "pack"
+            ? WALKER_SPEED
+            : u.kind === "biker"
+              ? BIKER_SPEED
+              : u.kind === "ogre"
+                ? OGRE_SPEED
+                : ELITE_SPEED;
         u.prevZ = u.z;
         u.z += (world.scrollSpeed + speed) * dt;
 
@@ -847,6 +937,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       hideInstances(eliteBodies, MAX_ELITES);
       hideInstances(bikerShells, MAX_ELITES);
       hideInstances(bikerBodies, MAX_ELITES);
+      hideInstances(ogreShells, MAX_ELITES);
+      hideInstances(ogreBodies, MAX_ELITES);
       _m.compose(_ZERO, _q.identity(), _NOSCALE);
       for (let i = MAX_WALKERS; i < SHADOW_CAPACITY; i++) shadows.setMatrixAt(i, _m);
 
@@ -865,11 +957,11 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
             _pos.set(u.x, u.y + bob, z);
             _e.set(0, 0, u.kind === "biker" ? 0 : Math.sin(t) * 0.06);
             _q.setFromEuler(_e);
-            _scl.setScalar(ELITE_SCALE);
+            _scl.setScalar(u.kind === "ogre" ? OGRE_SCALE : ELITE_SCALE);
             _m.compose(_pos, _q, _scl);
 
-            const body = u.kind === "biker" ? bikerBodies : eliteBodies;
-            const shell = u.kind === "biker" ? bikerShells : eliteShells;
+            const body = bodyMeshOf(u.kind);
+            const shell = shellMeshOf(u.kind);
             body.setMatrixAt(slot, _m);
             shell.setMatrixAt(slot, _m);
             const hot = u.flash > 0 ? 1 + (u.flash / HIT_FLASH) * 1.6 : 1;
@@ -878,8 +970,9 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
             // A rider standing on a barrel is not touching the road, and the
             // barrel already casts its own shadow there.
             if (!u.pinned) {
-              const size = u.kind === "biker" ? BIKER_SHADOW : ELITE_SHADOW;
-              const base = u.kind === "biker" ? MAX_WALKERS + MAX_ELITES : MAX_WALKERS;
+              const size =
+                u.kind === "biker" ? BIKER_SHADOW : u.kind === "ogre" ? OGRE_SHADOW : ELITE_SHADOW;
+              const base = shadowBaseOf(u.kind);
               _pos.set(u.x + SHADOW_OFF_X, SHADOW_Y, z + SHADOW_OFF_Z);
               _scl.set(size, 1, size * (u.kind === "biker" ? 0.55 : 1));
               _m.compose(_pos, _q.identity(), _scl);
@@ -909,8 +1002,11 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       eliteBodies.instanceMatrix.needsUpdate = true;
       bikerShells.instanceMatrix.needsUpdate = true;
       bikerBodies.instanceMatrix.needsUpdate = true;
+      ogreShells.instanceMatrix.needsUpdate = true;
+      ogreBodies.instanceMatrix.needsUpdate = true;
       if (eliteBodies.instanceColor) eliteBodies.instanceColor.needsUpdate = true;
       if (bikerBodies.instanceColor) bikerBodies.instanceColor.needsUpdate = true;
+      if (ogreBodies.instanceColor) ogreBodies.instanceColor.needsUpdate = true;
 
       // Only the bars actually in use are drawn; the rest of the pool is parked.
       _m.compose(_ZERO, _q.identity(), _NOSCALE);
@@ -1163,6 +1259,53 @@ function buildBiker(g = 0): THREE.BufferGeometry {
     { geo: place(box(0.34, 0.36, 0.3, g), 0, 0.86, -0.06), color: 0xd8c68a },
     { geo: place(new THREE.SphereGeometry(0.16 + g, 7, 5), 0, 1.12, 0.02), color: 0x4b3b28 },
     { geo: place(box(0.5, 0.07, 0.07, g), 0, 0.78, 0.42), color: 0xf0b429 },
+  ]);
+}
+
+/**
+ * THE OGRE — a heavy that is a decision rather than a target.
+ *
+ * A walker pack is eight bodies you mow down; an elite is one body you spend a
+ * second on. Neither ever makes you ask whether shooting is worth it, because
+ * the answer is always yes. An ogre is priced so that it is not: killing one
+ * costs most of an approach, and an approach spent here is an approach not spent
+ * on the barrel next to it. That is the same trade a boss poses, in the small.
+ *
+ * The read has to carry that at forty pixels, so: twice an elite's height, deep
+ * red like every other enemy in this game, and a slab of iron plate strapped
+ * across its front. The plate is the whole point of the silhouette — it says
+ * "this one soaks" before a single round has been fired at it, which is what
+ * gives the player the information in time to steer around it instead.
+ */
+function buildOgre(g = 0): THREE.BufferGeometry {
+  const h = 1.3;
+  const HIDE = 0xb3382c;
+  const HIDE_DARK = 0x8a2a22;
+  const PLATE = 0x6d757f;
+  const BONE = 0xe8dcc0;
+  return mergeParts([
+    // Legs, planted wide.
+    { geo: place(box(0.26, 0.5, 0.28, g), -0.2, h * 0.19, 0), color: HIDE_DARK },
+    { geo: place(box(0.26, 0.5, 0.28, g), 0.2, h * 0.19, 0), color: HIDE_DARK },
+    // Torso: broad and short, so the shoulders are the widest thing on it.
+    { geo: place(box(0.72, 0.62, 0.42, g), 0, h * 0.6, 0), color: HIDE },
+    // The plate, on +Z — the side the camera and the guns are on.
+    { geo: place(box(0.62, 0.5, 0.1, g), 0, h * 0.6, 0.24), color: PLATE },
+    { geo: place(box(0.68, 0.09, 0.13, g), 0, h * 0.78, 0.25), color: 0x4c535c },
+    // Shoulders, with a bone spike out of each.
+    { geo: place(new THREE.SphereGeometry(0.25 + g, 8, 6), -0.46, h * 0.83, 0), color: HIDE },
+    { geo: place(new THREE.SphereGeometry(0.25 + g, 8, 6), 0.46, h * 0.83, 0), color: HIDE },
+    { geo: place(new THREE.ConeGeometry(0.12 + g, 0.34, 6), -0.5, h * 1.02, 0), color: BONE },
+    { geo: place(new THREE.ConeGeometry(0.12 + g, 0.34, 6), 0.5, h * 1.02, 0), color: BONE },
+    // Arms, hanging heavy.
+    { geo: place(box(0.22, 0.62, 0.24, g), -0.5, h * 0.5, 0.04), color: HIDE },
+    { geo: place(box(0.22, 0.62, 0.24, g), 0.5, h * 0.5, 0.04), color: HIDE },
+    { geo: place(new THREE.SphereGeometry(0.18 + g, 7, 5), -0.52, h * 0.24, 0.06), color: HIDE_DARK },
+    { geo: place(new THREE.SphereGeometry(0.18 + g, 7, 5), 0.52, h * 0.24, 0.06), color: HIDE_DARK },
+    // Head: small, sunk between the shoulders, with two tusks so it is a face.
+    { geo: place(box(0.3, 0.28, 0.28, g), 0, h * 0.96, 0.02), color: 0xd86a4a },
+    { geo: place(new THREE.ConeGeometry(0.06 + g, 0.2, 5), -0.09, h * 0.96, 0.17), color: BONE },
+    { geo: place(new THREE.ConeGeometry(0.06 + g, 0.2, 5), 0.09, h * 0.96, 0.17), color: BONE },
   ]);
 }
 

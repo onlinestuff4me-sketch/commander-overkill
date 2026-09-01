@@ -170,6 +170,17 @@ export const WALKER_PASS_SHARE = 0.1;
 export const ELITE_PASS_SHARE = 0.3;
 
 /**
+ * An OGRE, and it is deliberately most of a whole approach.
+ *
+ * Everything else on the road is priced so that shooting it is obviously worth
+ * doing. This one is priced so that it is a question: 0.8 of a pass means an
+ * ogre standing in front of a barrel cluster costs you the cluster, because
+ * there is not enough approach left to kill both. That is the point of having
+ * it — a guard that can simply be shot through is scenery.
+ */
+export const OGRE_PASS_SHARE = 0.8;
+
+/**
  * Hit points for one enemy, derived from what the army can actually deliver.
  *
  * Floored at 1 so a single soldier can still kill something, and floored again
