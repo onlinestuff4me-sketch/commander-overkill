@@ -94,9 +94,31 @@ const REST_DISTANCE = CAMERA_POS.distanceTo(CAMERA_LOOK);
  *  scaled; see the note at the top about why it must be exactly this. */
 const VIEW_AXIS = new THREE.Vector3().subVectors(CAMERA_POS, CAMERA_LOOK).normalize();
 
+/**
+ * SHAKE — decay rate and the two frequencies the offset is built from.
+ *
+ * A camera that shakes on a single sine reads as a wobble; two incommensurate
+ * frequencies on the two axes read as an impact. The decay is fast on purpose:
+ * a shake that outlasts the thing that caused it is nausea, not weight, and this
+ * is a game held at arm's length on a phone.
+ *
+ * The offset is applied to the camera's POSITION AND ITS LOOK-AT TOGETHER, so
+ * like every other camera move in this project it is a pure translation and
+ * every billboard basis baked at module load stays valid.
+ */
+const SHAKE_DECAY = 8.5;
+const SHAKE_FREQ_X = 41;
+const SHAKE_FREQ_Y = 53;
+
 export interface ZoomController {
   /** Multiple of the resting distance the camera is currently at. */
   readonly distance: number;
+  /**
+   * Knock the camera, in metres of peak offset. Takes the LARGER of the current
+   * shake and this one rather than summing, so three things landing in the same
+   * frame cannot stack into a seizure.
+   */
+  shake(metres: number): void;
   /** The step the troop count alone would put it at, ignoring the ease. */
   readonly target: number;
   /** World X the camera has panned to. Read for diagnostics; never written. */
@@ -138,12 +160,18 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
   let distance = 1;
   let target = 1;
   let panX = 0;
+  let shakeMag = 0;
+  let shakeClock = 0;
   /** Scratch for the panned look-at point, so apply() never allocates. */
   const lookAt = new THREE.Vector3();
 
   function apply(): void {
     lookAt.copy(CAMERA_LOOK);
     lookAt.x += panX;
+    if (shakeMag > 0) {
+      lookAt.x += Math.sin(shakeClock * SHAKE_FREQ_X) * shakeMag;
+      lookAt.y += Math.sin(shakeClock * SHAKE_FREQ_Y) * shakeMag * 0.75;
+    }
     camera.position.copy(lookAt).addScaledVector(VIEW_AXIS, REST_DISTANCE * distance);
     // Position and target move by the same vector, so this is a translation and
     // the view basis is unchanged — see the note at the top of the file.
@@ -171,13 +199,23 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
       return panX;
     },
 
+    shake(metres) {
+      if (metres > shakeMag) shakeMag = metres;
+    },
+
     update(dt, troops, centerX) {
       target = stepFor(troops, target);
       const wantPan = centerX * PAN_GAIN;
       const nextPan = panX + (wantPan - panX) * Math.min(1, PAN_FOLLOW * dt);
       const moved = Math.abs(nextPan - panX) > 1e-5;
       panX = nextPan;
-      if (distance === target && !moved) return;
+      const shaking = shakeMag > 0;
+      if (shaking) {
+        shakeClock += dt;
+        shakeMag *= Math.exp(-SHAKE_DECAY * dt);
+        if (shakeMag < 0.004) shakeMag = 0;
+      }
+      if (distance === target && !moved && !shaking) return;
       // Exponential approach: covers ~95% of the remaining gap in EASE_TIME,
       // whatever the size of the step, so a two-step jump does not take twice
       // as long as a one-step one. Snapped at the end so `distance === target`
@@ -193,6 +231,7 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
       target = stepFor(troops, ZOOM_STEPS[0]![1]);
       distance = target;
       panX = 0;
+      shakeMag = 0;
       apply();
     },
   };

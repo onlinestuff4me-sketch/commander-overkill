@@ -908,8 +908,8 @@ function rigFrom(
 
 /* Colours. Deliberately outside the player's cream-and-blue and outside the
  * enemy walkers' flat red, so a boss reads as its own faction at forty pixels. */
-const FLESH = 0xe8a184;
-const FLESH_DARK = 0xc07a60;
+const FLESH = 0xdb8c6c;
+const FLESH_DARK = 0xb06a50;
 const LEATHER = 0x6b4230;
 const IRON = 0x8d97a4;
 const IRON_DARK = 0x5c646f;
