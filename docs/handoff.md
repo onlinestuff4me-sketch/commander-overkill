@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-01, session 3 (tenth pass)._
+_Last updated: 2026-09-01, session 3 (eleventh pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -128,6 +128,29 @@ The lever the level system most needs is already in place and unused:
 row's width is now literally how avoidable it is (2 segments leave 6.5 m of clear
 road, 4 leave 1.8 m). It is currently indexed by the `elapsed` tier. Point it at
 a level number and the failure-rate bands become tunable in one table.
+
+### 1a. Second-to-second play — the plan is written and unbuilt
+
+[`docs/dynamism-proposal.md`](dynamism-proposal.md) measures what the run
+currently asks of the player and proposes seven changes, ordered. The measurement
+is the part to keep: over a two-minute run the conductor places 39 things, 27 of
+them decisions, a median 3.2 s apart, and the decision is "choose a lane and
+watch it resolve". Two seconds in every three have no input in them.
+
+The diagnosis in one line: **nothing in this game creates tension between moving
+and staying.** Moving is free, staying is free, so between rows the correct play
+is to do nothing.
+
+Two things already in the tree that the proposal builds on, and that are worth
+knowing regardless:
+
+- **`input:tap` is emitted and nothing listens.** `input/touch.ts` already
+  separates a tap from a drag and puts it on the bus; its own header says
+  "skills fire on tap". The entire input side of an active ability is built.
+- **Crowd WIDTH is the hidden variable of the whole combat model** —
+  `laneCoverage()` decides what share of the curtain lands on a target and
+  `squadHalfWidth` decides how many gate segments a row charges for — and the
+  player has no control over which side of that trade they are on.
 
 ### 1b. Nothing on the road punishes you for being big
 
