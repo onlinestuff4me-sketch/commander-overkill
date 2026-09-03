@@ -362,6 +362,23 @@ const CENTER_FOLLOW = 30;
  * played by committing early rather than by darting. Kept mild — this is meant
  * to add weight, not to take the controls away.
  */
+/**
+ * How far TIGHTEN squeezes the crowd, and where the squeezed bodies go.
+ *
+ * 0.44 takes a five-metre army down to just over two, which is narrow enough to
+ * thread a two-segment gap that would otherwise be unavoidable — the whole point
+ * of the ability. Anything much tighter and a big crowd's own units start
+ * fighting the per-unit spacing and the blob reads as a scale animation rather
+ * than as men crowding together.
+ *
+ * The depth grows to match, because a crowd squeezed sideways has to go
+ * somewhere and a column is what that looks like. It is still capped by the
+ * framing budget (`RADIUS_Z_MAX`), or the rear rank walks off the bottom of the
+ * screen.
+ */
+const TIGHTEN_SQUEEZE = 0.44;
+const TIGHTEN_DEEPEN = 0.4;
+
 const LATERAL_SPEED = 7;
 const MASS_TROOPS = 400;
 const MASS_SPEED = 5;
@@ -541,6 +558,22 @@ export interface SquadSystem extends System {
   readonly center: THREE.Vector3;
   /** Half-width of the clump ellipse, world units. */
   readonly radiusX: number;
+  /**
+   * The crowd's half-width WITHOUT the player's squeeze.
+   *
+   * Content is priced against this rather than against `radiusX`, and that is
+   * not a detail: barrel and enemy hit points are derived from how much of the
+   * curtain a target intercepts, so pricing them against the live width would
+   * mean a barrel that spawned while the army was tight came out TOUGHER, and
+   * the optimal play would be to release before every spawn and re-squeeze
+   * after. Pricing against the resting shape makes TIGHTEN a pure skill bonus
+   * with nothing to game.
+   */
+  readonly naturalRadiusX: number;
+  /** Metres/second the crowd's CENTRE is currently sliding sideways, unsigned.
+   *  The orchestrator reads it to decide whether the army is holding a line —
+   *  see `focus` in core/types.ts. */
+  readonly lateralSpeed: number;
   /** Half-depth of the clump ellipse, world units. */
   readonly radiusZ: number;
   /** Whichever of the two is larger, for callers that want a single number. */
@@ -611,6 +644,10 @@ class Squad implements SquadSystem {
 
   // --- clump shape, recomputed only when the count changes ---
   #radiusX = 0;
+  /** Shape before TIGHTEN is applied. `#reshape` is cached on the troop count,
+   *  so the squeeze cannot live in it — it changes every tick. */
+  #naturalRadiusX = 0;
+  #naturalRadiusZ = 0;
   #radiusZ = 0;
   #shapedFor = -1;
   #shapedAtZoom = 1;
@@ -816,6 +853,14 @@ class Squad implements SquadSystem {
     return this.#radiusX;
   }
 
+  get naturalRadiusX(): number {
+    return this.#naturalRadiusX;
+  }
+
+  get lateralSpeed(): number {
+    return Math.abs(this.#centerVel);
+  }
+
   get radiusZ(): number {
     return this.#radiusZ;
   }
@@ -925,6 +970,8 @@ class Squad implements SquadSystem {
     this.#time += dt;
     this.setCount(world.troops);
     this.#reshape(world.zoom);
+    // Every tick, and after the cached reshape: the squeeze is a live value.
+    this.#applyTighten(world.tighten, world.zoom);
     // Clamped here rather than trusted: an elite is a slot index, and a slot
     // index past the live count would paint a body that is already falling.
     // One job per soldier: each kind takes what is left after the ones before
@@ -1308,19 +1355,33 @@ class Squad implements SquadSystem {
 
     const root = Math.sqrt(this.#count);
     const idealX = SPREAD * root * (1 + SMALL_SQUAD_FLARE / Math.max(1, this.#count));
-    this.#radiusX = Math.min(RADIUS_X_MAX, idealX);
+    this.#naturalRadiusX = Math.min(RADIUS_X_MAX, idealX);
 
     // Once the road stops the clump getting wider, the area it wanted has to go
     // somewhere — so it goes backwards, and density only starts climbing after
     // the depth cap too. This is the reference's behaviour past ~50 units.
-    const squeeze = idealX > 0 ? idealX / Math.max(this.#radiusX, 1e-4) : 1;
+    const squeeze = idealX > 0 ? idealX / Math.max(this.#naturalRadiusX, 1e-4) : 1;
     // The depth cap is a FRAMING budget, not a road one — it is where the rear
     // rank reaches the bottom of the screen. Pulling the camera back is exactly
     // the thing that buys more of it, so it scales with the zoom. Width does
     // not: the road does not get wider just because you are looking from
     // further away, and letting the crowd widen with the zoom would walk it out
     // over the water.
-    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
+    this.#naturalRadiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
+  }
+
+  /**
+   * Apply the player's squeeze on top of the cached natural shape.
+   *
+   * Runs every tick, after `#reshape`. The slot layout below reads `#radiusX`
+   * and `#radiusZ` directly, so narrowing them moves every slot inward and the
+   * per-unit springs carry the bodies there — the crowd physically crowds in
+   * rather than being scaled.
+   */
+  #applyTighten(tighten: number, zoom: number): void {
+    const k = tighten <= 0 ? 0 : tighten >= 1 ? 1 : tighten;
+    this.#radiusX = this.#naturalRadiusX * (1 - TIGHTEN_SQUEEZE * k);
+    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, this.#naturalRadiusZ * (1 + TIGHTEN_DEEPEN * k));
   }
 }
 
