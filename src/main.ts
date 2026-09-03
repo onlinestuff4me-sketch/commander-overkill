@@ -57,6 +57,7 @@ import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
 import { createTroopCount } from "./ui/troopcount";
 import { createLoadout } from "./ui/loadout";
+import { createSkills } from "./ui/skills";
 import { createNetPop } from "./ui/netpop";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
@@ -97,6 +98,9 @@ const troopCount = createTroopCount(ui);
 // Crowd size is one axis; what the crowd is CARRYING is the other, and until
 // this existed the second one was invisible — see ui/loadout.ts.
 const loadout = createLoadout(ui);
+// The state of the player's own controls. Not "show, don't tell" territory — a
+// control whose availability you cannot see is a control you do not use.
+const skills = createSkills(ui);
 // The per-unit +1s say WHICH soldiers; they are bad at saying HOW MANY when a
 // row resolves three segments at once. This is the running total on top.
 const netPop = createNetPop(ui, stage.camera);
@@ -114,6 +118,7 @@ const renderables: System[] = [
   bossBar,
   troopCount,
   loadout,
+  skills,
   netPop,
 ];
 
@@ -507,6 +512,96 @@ boss.onKilled((kind) => {
 // Nothing to show until one arrives.
 bossBar.hide();
 
+/* ── The player's two live decisions ──────────────────────────────────────
+ *
+ * The corridor asks the player something every three seconds; between those
+ * questions there was nothing to do, because moving was free and staying was
+ * free. These two are the tension that fills the gap: one is a reason to move,
+ * the other a reason not to, and they are two halves of one idea.
+ *
+ * See docs/dynamism-proposal.md for the measurement that produced them.
+ */
+
+/* --- TIGHTEN: a reason to move ---------------------------------------- */
+
+/** Seconds the squeeze holds once triggered. About the width of one gate row's
+ *  approach, so it is spent ON something rather than held. */
+const TIGHTEN_TIME = 1.6;
+/** Seconds before it can be used again, counted from the moment it releases.
+ *  The cycle is ~4.8 s against a decision every ~3.2 s, so it is available for
+ *  roughly two rows in three — often enough to plan around, rare enough to be
+ *  worth saving. */
+const TIGHTEN_COOLDOWN = 3.2;
+/** How fast the squeeze itself eases in and out. Fast enough to feel like a
+ *  command, slow enough that the crowd's own springs do the crowding rather
+ *  than the value snapping. */
+const TIGHTEN_EASE = 9;
+
+let tightenHold = 0;
+let tightenCool = 0;
+
+/** True when the ability is ready. Read by the HUD. */
+function tightenReady(): boolean {
+  return tightenHold <= 0 && tightenCool <= 0;
+}
+
+bus.on("input:tap", () => {
+  if (state.state !== "running" || !tightenReady()) return;
+  tightenHold = TIGHTEN_TIME;
+});
+
+/* --- FOCUS: a reason to stay ------------------------------------------- */
+
+/**
+ * The lateral speed at which focus stops building, in m/s, and the times to
+ * fill and drain it.
+ *
+ * PROPORTIONAL, NOT A THRESHOLD, and that is a correction. The first build
+ * filled at a flat rate below 1.2 m/s and drained above it, and the autopilot —
+ * which re-decides five times a second — measured out holding a mean focus of
+ * 0.83 and sitting at FULL for four fifths of the run. A buff you have four
+ * fifths of the time is not a decision, it is a constant, and it took two wipes
+ * out of the run's expected four.
+ *
+ * Filling now scales with how still the crowd actually is: dead still fills at
+ * the full rate, half speed fills at half, and past the threshold it drains
+ * faster the harder you are steering. Small corrections still cost you almost
+ * nothing; a committed crossing costs you the meter.
+ */
+const FOCUS_STILL_SPEED = 1.6;
+/** Seconds of perfect stillness to reach full focus, and seconds of a hard
+ *  crossing to lose it. Asymmetric on purpose: earned slowly, spent quickly,
+ *  which is what makes giving it up feel like a decision. */
+const FOCUS_FILL_TIME = 1.3;
+const FOCUS_DRAIN_TIME = 0.45;
+/** Ceiling on how much faster than the base rate a very fast dodge drains. */
+const FOCUS_DRAIN_MAX = 3;
+
+function updateAbilities(dt: number): void {
+  // Tighten: hold, then cool down, then ready.
+  if (tightenHold > 0) {
+    tightenHold -= dt;
+    if (tightenHold <= 0) {
+      tightenHold = 0;
+      tightenCool = TIGHTEN_COOLDOWN;
+    }
+  } else if (tightenCool > 0) {
+    tightenCool = Math.max(0, tightenCool - dt);
+  }
+  const want = tightenHold > 0 ? 1 : 0;
+  world.tighten += (want - world.tighten) * Math.min(1, TIGHTEN_EASE * dt);
+  if (Math.abs(want - world.tighten) < 0.002) world.tighten = want;
+
+  // Focus: the squad reports how fast its centre is actually sliding, which is
+  // the honest measure — a thumb held against the road edge is not steering.
+  const speed = squad.lateralSpeed / FOCUS_STILL_SPEED;
+  const rate =
+    speed <= 1
+      ? (1 - speed) * (dt / FOCUS_FILL_TIME)
+      : -Math.min(FOCUS_DRAIN_MAX, speed - 1) * (dt / FOCUS_DRAIN_TIME);
+  world.focus = clamp(world.focus + rate, 0, 1);
+}
+
 // ── Content pacing ─────────────────────────────────────────────────────────
 
 /**
@@ -607,13 +702,13 @@ function pickForRow(): PickupKind {
  *  floor is the old fixed value, so the opening is unchanged. Barrels no longer
  *  carry elites at all — they carry pickups — so only walkers need this. */
 function walkerHp(): number {
-  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX, WALKER_PASS_SHARE, 4);
 }
 
 /** Heavies and bikers are single bodies rather than a pack of eight, so each one
  *  soaks a much larger share of a pass — see ELITE_PASS_SHARE in pacing.ts. */
 function eliteHp(): number {
-  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX, ELITE_PASS_SHARE, 30);
 }
 
 /** An OGRE soaks most of a whole approach — see OGRE_PASS_SHARE. The floor is
@@ -624,7 +719,7 @@ function ogreHp(): number {
     world.troops,
     tierFor(world.troops),
     bullets.tuning,
-    squad.radiusX,
+    squad.naturalRadiusX,
     OGRE_PASS_SHARE,
     90,
   );
@@ -725,7 +820,7 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
         world.troops,
         tierFor(world.troops),
         bullets.tuning,
-        squad.radiusX,
+        squad.naturalRadiusX,
       );
       const width = (BARREL_CLUSTER - 1) * BARREL_SPACING + BARREL_FACE;
       const cx = free ? free.x : clusterX(width, side);
@@ -904,6 +999,10 @@ function resetRun(): void {
   world.elites = 0;
   world.gunners = 0;
   world.rocketeers = 0;
+  world.tighten = 0;
+  world.focus = 0;
+  tightenHold = 0;
+  tightenCool = 0;
   armCarriers();
   primeCorridor();
   zoom.reset(world.troops);
@@ -1056,7 +1155,7 @@ function tick(dt: number): void {
     // Before anything spawns: the gate module sizes a reward's target off what
     // the guns can actually deliver, and only this file knows the weapon model.
     gates.reportFirepower(
-      damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX),
+      damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX),
     );
 
     if (contentSpawning) {
@@ -1065,6 +1164,11 @@ function tick(dt: number): void {
       const due = director.advance(world.scrollSpeed * dt);
       if (due) place(due.what, SPAWN_Z, due.side);
     }
+
+    // 0. The player's two abilities, BEFORE the squad: `world.tighten` is what
+    //    the squad reshapes against this tick, so setting it afterwards would
+    //    put the squeeze one frame behind the tap.
+    updateAbilities(dt);
 
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
     squad.update(dt, world);
@@ -1077,7 +1181,7 @@ function tick(dt: number): void {
       squad.center.x,
       squad.center.y + 1,
       squad.center.z - squad.radiusZ,
-      squad.radiusX,
+      squad.naturalRadiusX,
     );
     // setMuzzle still supplies the blob centre and width for aim; setShooters
     // is what gives each soldier its own stream origin.
@@ -1136,6 +1240,8 @@ function tick(dt: number): void {
     // Last of the readouts, so it reports the count this tick actually ended on.
     troopCount.update(dt, world);
     loadout.update(dt, world);
+    skills.setTightenCooldown(tightenCool / TIGHTEN_COOLDOWN, tightenHold > 0);
+    skills.update(dt, world);
     netPop.update(dt, world);
 
     // The bridge scrolls too, so its towers sweep past and their shadows move
@@ -1324,6 +1430,11 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
   let peak = world.troops;
   let worstDrop = 0;
   let prev = world.troops;
+  // Focus is sampled EVERY TICK, not at the end of a slice. Sampling it between
+  // autopilot calls reported a mean of 0.83 because the bot always ends a slice
+  // settled — the measurement was of the pauses, not of the run.
+  let focusSum = 0;
+  let focusFull = 0;
   // REACTION TIME, because a bot that re-decides sixty times a second is not a
   // measurement of the game — it is a measurement of the game played perfectly.
   // At reaction 0 the autopilot wiped 0 runs in 16 while a human playtester was
@@ -1340,6 +1451,8 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
       if (!Number.isNaN(want)) touch.lane = clamp(dodgeBoss(want), -1, 1);
     }
     tick(dt);
+    focusSum += world.focus;
+    if (world.focus > 0.95) focusFull++;
     peak = Math.max(peak, world.troops);
     // Biggest single-tick loss as a share of what was standing. A wipe is the
     // tail of this distribution, so watching it is how a change to the penalty
@@ -1356,6 +1469,8 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
     peak,
     worstDrop: Number(worstDrop.toFixed(3)),
     final: world.troops,
+    meanFocus: Number((focusSum / Math.max(1, ticks)).toFixed(3)),
+    fullFocusShare: Number((focusFull / Math.max(1, ticks)).toFixed(3)),
   };
 }
 
@@ -1402,6 +1517,16 @@ if (import.meta.env.DEV) {
       /** What the live boss is doing, for grading a pose against a reference. */
       bossStats() {
         return { kind: boss.kind, hp: boss.hp, max: boss.maxHp, x: boss.x, z: boss.z, side: boss.side };
+      },
+      /** Fire TIGHTEN, ignoring readiness. For posing the squeeze. */
+      tighten(): void {
+        tightenHold = TIGHTEN_TIME;
+        tightenCool = 0;
+      },
+      /** Force the focus meter, so a screenshot can hold a value the autopilot
+       *  would never sit still long enough to reach. */
+      setFocus(v: number): void {
+        world.focus = clamp(v, 0, 1);
       },
       autopilot,
       /**
@@ -1505,6 +1630,7 @@ if (import.meta.env.DEV) {
         elapsed: Number(world.elapsed.toFixed(2)),
         squadX: Number(squad.center.x.toFixed(2)),
         radiusX: Number(squad.radiusX.toFixed(2)),
+        naturalRadiusX: Number(squad.naturalRadiusX.toFixed(2)),
         calls: stage.renderer.info.render.calls,
         zoom: Number(world.zoom.toFixed(3)),
         radiusZ: Number(squad.radiusZ.toFixed(2)),

@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-01, session 3 (eleventh pass)._
+_Last updated: 2026-09-03, session 3 (twelfth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -14,10 +14,14 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`,
-three consecutive samples with no gameplay change between them: medians **301,
-445, 254** against a 300–500 target, and **4, 4, 5 of 32 wiped** — one in seven,
-which is the failure rate the brief asks for at levels 1–2.
+**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`.
+Before FOCUS landed, three consecutive samples of an unchanged build gave medians
+of **301, 445, 254** and **4, 4, 5 of 32 wiped**. With focus at 1.4× it is **3
+and 3 of 32** — a real softening, and the right kind, because a skill multiplier
+is supposed to make a well-played run stronger. Restore the difficulty with
+CONTENT (levels, item #1) rather than by nerfing it further. Every one of these
+numbers is a FLOOR: the autopilot never taps, so it gets none of TIGHTEN's upside
+and pays none of its cost.
 
 **TRUST THE WIPE RATE, NOT THE MEDIAN.** Those three samples are the same build
 measured three times, and the median moved 75% while the wipe count moved by one.
@@ -129,7 +133,7 @@ row's width is now literally how avoidable it is (2 segments leave 6.5 m of clea
 road, 4 leave 1.8 m). It is currently indexed by the `elapsed` tier. Point it at
 a level number and the failure-rate bands become tunable in one table.
 
-### 1a. Second-to-second play — the plan is written and unbuilt
+### 1a. Second-to-second play — the first two are BUILT; five remain
 
 [`docs/dynamism-proposal.md`](dynamism-proposal.md) measures what the run
 currently asks of the player and proposes seven changes, ordered. The measurement
@@ -137,20 +141,16 @@ is the part to keep: over a two-minute run the conductor places 39 things, 27 of
 them decisions, a median 3.2 s apart, and the decision is "choose a lane and
 watch it resolve". Two seconds in every three have no input in them.
 
-The diagnosis in one line: **nothing in this game creates tension between moving
-and staying.** Moving is free, staying is free, so between rows the correct play
-is to do nothing.
+The diagnosis in one line: **nothing in this game created tension between moving
+and staying.** Moving was free, staying was free, so between rows the correct
+play was to do nothing.
 
-Two things already in the tree that the proposal builds on, and that are worth
-knowing regardless:
-
-- **`input:tap` is emitted and nothing listens.** `input/touch.ts` already
-  separates a tap from a drag and puts it on the bus; its own header says
-  "skills fire on tap". The entire input side of an active ability is built.
-- **Crowd WIDTH is the hidden variable of the whole combat model** —
-  `laneCoverage()` decides what share of the curtain lands on a target and
-  `squadHalfWidth` decides how many gate segments a row charges for — and the
-  player has no control over which side of that trade they are on.
+**TIGHTEN and FOCUS are the answer to that and they are shipped** (see the
+decisions below). What is still open from the proposal, in its order: compound
+placements as the default rather than 5 of 39, a streak multiplier, drifting
+motes to chase in the dead seconds, hazards that move sideways, and the
+Commander — who is the entire premise of the game per the PRD and does not exist
+in the build.
 
 ### 1b. Nothing on the road punishes you for being big
 
@@ -264,6 +264,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
+| `ui/skills.ts` | The focus meter and the tighten pill, bottom-centre. The state of the player's own controls — not "show, don't tell" territory, since a control whose availability you cannot see is one you do not use. |
 | `core/look.ts` | The house material. One place that decides everything in the game is made of shiny plastic. Objects use it; the road, water and bridge do not. |
 | `entities/boss.ts` | The three bosses, one alive at a time. Owns its own figures, name plate, attack label, danger decal and death. Reports that a strike landed; never touches `world.troops`. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
@@ -639,6 +640,55 @@ game's existing word for "this takes troops off you", so a red silhouette is
 legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
+
+**THE PLAYER HAS TWO VERBS NOW, AND THEY ARE TWO HALVES OF ONE IDEA.** Tighten
+is a reason to move; focus is a reason not to. Neither adds anything to the road.
+
+**TIGHTEN (tap) squeezes the crowd, and crowd width was always the hidden
+variable.** `laneCoverage()` decides what share of the curtain lands on a target
+and `squadHalfWidth` decides how many gate segments a row charges for, so
+narrowing the army threads a gap a wide one cannot, puts every round on one lane,
+and gives up the rest of the road while it lasts. Measured: a 200-strong army
+goes from 4.19 m half-width to 2.39 m, and the same red pair that costs it four
+troops wide costs it nothing tight.
+
+`input:tap` was already emitted by `input/touch.ts` with no listener anywhere —
+its own header said "skills fire on tap" — so the input side cost nothing.
+
+**CONTENT IS PRICED AGAINST `squad.naturalRadiusX`, NOT `squad.radiusX`.** Every
+hit-point model derives from how much of the curtain a target intercepts, so
+pricing against the LIVE width would mean a barrel that spawned while the army
+was squeezed came out tougher — and the optimal play would be to release before
+every spawn and re-squeeze after. Pricing against the resting shape leaves
+tighten a pure skill bonus with nothing to game. The squad exposes both.
+
+**FOCUS FILLS PROPORTIONALLY TO STILLNESS, AND THE FIRST VERSION DID NOT.** A
+flat "below 1.2 m/s it fills, above it drains" measured out at a mean focus of
+0.83 with the autopilot sitting at FULL for four fifths of the run: a buff you
+have four fifths of the time is a constant, not a decision, and it took the wipe
+rate from 4 in 32 to 2. Filling now scales with how still the crowd actually is
+and draining scales with how hard it is steering.
+
+**SAMPLE FOCUS EVERY TICK, NOT BETWEEN AUTOPILOT CALLS.** The first measurement
+sampled `world.focus` after each 1.5 s slice and reported 0.83 — but the bot
+always ends a slice settled, so it was measuring the pauses rather than the run.
+`autopilot()` accumulates `meanFocus` and `fullFocusShare` itself now. The honest
+figures: 0.88 mean over the first quiet minute, 0.50 once the corridor is busy,
+at full 85% of the time early and 39% late.
+
+**FOCUS IS 1.4×, MEASURED DOWN FROM 1.55×.** At 1.55 the wipe rate fell to 2 in
+32; at 1.4 it sits at 3 in 32 across two samples, against 4–5 before. That is a
+real softening and it is the right kind: a skill multiplier should make a
+well-played run stronger. Restore the difficulty with CONTENT (levels, item #1),
+not by nerfing the mechanic into irrelevance. Note also that the autopilot never
+taps, so every number here is the floor — a player who uses tighten does better
+still, and the bot pays none of its cost.
+
+**FOCUS IS READ OFF THE ROUNDS, NOT OFF THE METER.** Narrowing the spread turned
+out to be nearly invisible — the stream's width is dominated by the crowd's own
+width, since every soldier fires from where he is standing, so the aim jitter
+focus scales is a small share of it and full focus measured only 17% narrower.
+Size is what the eye reads at forty pixels, so focus fattens the round instead.
 
 **EVERY OBJECT IS PHONG, EVERY SURFACE IS LAMBERT.** `core/look.ts` owns it.
 Lambert has no specular term at all, and that single fact was most of the

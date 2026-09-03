@@ -91,6 +91,31 @@ export interface WorldState {
    */
   elites: number;
   /**
+   * HOW HARD THE CROWD IS SQUEEZED, 0..1. Owned by the game; the squad reads it
+   * and reshapes.
+   *
+   * The player's second verb. Crowd WIDTH is the hidden variable the whole
+   * combat model runs on — `laneCoverage()` decides what share of the curtain
+   * lands on a target, and `squadHalfWidth` decides how many gate segments a row
+   * charges for — and until this existed the player had no say in which side of
+   * that trade they were on. A wide army covers the road and pays every toll; a
+   * narrow one drills one hole and threads a gap.
+   */
+  tighten: number;
+  /**
+   * HOW STEADY THE CROWD HAS BEEN, 0..1. Owned by the game; bullets read it.
+   *
+   * The other half of the same idea. Tighten is a reason to move; this is a
+   * reason not to. It fills while the crowd holds a line and drains when it
+   * dodges, and it makes the fire harder and narrower — so every second carries
+   * the question "do I break off for that, or hold and melt this?".
+   *
+   * Deliberately NOT fed into any hit-point model, for the same reason
+   * `firepower` is not: it is a skill multiplier, and content that got tougher
+   * whenever the player played well would make playing well pointless.
+   */
+  focus: number;
+  /**
    * How far back the camera has stepped, as a multiple of its resting distance.
    * 1 at every troop count the crowd still fits on screen at. Owned by the game
    * (see core/zoom.ts); the squad reads it because the extra room the camera
@@ -130,6 +155,8 @@ export function createWorld(center: THREE.Vector3): WorldState {
     elites: 0,
     gunners: 0,
     rocketeers: 0,
+    tighten: 0,
+    focus: 0,
     zoom: 1,
   };
 }
