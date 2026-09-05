@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-03, session 3 (twelfth pass)._
+_Last updated: 2026-09-03, session 3 (thirteenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -145,12 +145,10 @@ The diagnosis in one line: **nothing in this game created tension between moving
 and staying.** Moving was free, staying was free, so between rows the correct
 play was to do nothing.
 
-**TIGHTEN and FOCUS are the answer to that and they are shipped** (see the
+**TIGHTEN, FOCUS, the STREAK and the COMMANDER are all shipped** (see the
 decisions below). What is still open from the proposal, in its order: compound
-placements as the default rather than 5 of 39, a streak multiplier, drifting
-motes to chase in the dead seconds, hazards that move sideways, and the
-Commander — who is the entire premise of the game per the PRD and does not exist
-in the build.
+placements as the default rather than 5 of 39, drifting motes to chase in the
+dead seconds, and hazards that move sideways.
 
 ### 1b. Nothing on the road punishes you for being big
 
@@ -264,6 +262,8 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
+| `ui/streak.ts` | The multiplier chip, top right. Counts rows the player came out ahead on; one bad row resets it. |
+| `ui/commander.ts` | The Commander. Files reports after things resolve, never during, and never twice running. |
 | `ui/skills.ts` | The focus meter and the tighten pill, bottom-centre. The state of the player's own controls — not "show, don't tell" territory, since a control whose availability you cannot see is one you do not use. |
 | `core/look.ts` | The house material. One place that decides everything in the game is made of shiny plastic. Objects use it; the road, water and bridge do not. |
 | `entities/boss.ts` | The three bosses, one alive at a time. Owns its own figures, name plate, attack label, danger decal and death. Reports that a strike landed; never touches `world.troops`. |
@@ -640,6 +640,61 @@ game's existing word for "this takes troops off you", so a red silhouette is
 legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
+
+**THE AUTOPILOT HAS NEVER CROSSED A GATE ROW. NOT ONCE.** Measured while wiring
+the streak: `clearPayouts()` then a 40-second `autopilot()` run produces **zero**
+resolve events. Going around a row is free by design — that is what turned a gate
+from a toll into a decision — and the bot exploits it perfectly, so it takes its
+entire economy from barrels, pickups and bosses.
+
+Every economy number this project has ever quoted therefore EXCLUDES gate rows.
+That does not make them wrong (they are a real measurement of a real strategy)
+but it does mean:
+
+- Anything whose value comes from crossing rows — the streak most obviously — is
+  invisible to `sample()` and has to be verified by hand.
+- The wipe rate measures deaths by boss, breach and failed blue only.
+- "Go around everything" being an optimal-looking line is itself worth a look.
+  It is not obviously wrong — a player who dodges everything grows slowly and
+  stalls — but nobody has checked whether it is the best line or merely the
+  safest one the bot knows.
+
+**THE STREAK COUNTS ROWS YOU CAME OUT AHEAD ON, NOT ROWS WITH NO RED IN THEM.**
+"Cross without touching a red" is the version that reads best in a sentence and
+it measured out at a flat 1× for an entire run: the raw count reached 1 on 14
+samples out of 400 and 2 on none. The reason is structural — a segment is crossed
+when the crowd covers a fraction of its width, so past a few dozen troops the
+army is wider than a whole row and takes every segment in it whatever it aims at.
+A no-red streak is unavailable by construction to any army big enough to want
+one. Net-positive is achievable at every size, is broken by a bad row rather than
+by geometry, and makes TIGHTEN the tool that turns a bad row into a good one.
+
+The ladder tops out at **2×**, not 3×. On an economy whose failure mode is a run
+that catches fire, a 3× on gate rewards is not a thread, it is a second economy.
+
+Rows are totalled across one `gates.update` and judged immediately after it in
+`tick()` — `onResolve` fires once per SEGMENT, so a row's verdict cannot be
+decided inside the handler.
+
+**THE COMMANDER'S THREE RULES.** He is the joke the game is named after and the
+last piece of it to get built (`ui/commander.ts`):
+
+1. **After, never during.** Every trigger is a resolution — a boss died, a row
+   paid, the army crossed a threshold. Nothing calls him while a decision is on
+   the road, because a player reading a joke is a player not reading the corridor.
+2. **Walked, not rolled.** Lines advance a cursor per topic, so the second boss
+   gets the second boss line. A random table on a two-minute run repeats itself
+   and stops being a character.
+3. **He shuts up.** One line at a time, a hard cooldown, and a priority so a boss
+   dying cuts off a remark about head count.
+
+His line cursors deliberately survive `resetRun()` — a run ending is exactly when
+a player should NOT hear the same casualty line for the fourth time.
+
+**A HUD CHIP CANNOT SIT AT A FIXED OFFSET FROM THE TROOP BADGE.** The streak chip
+was placed 124px in, beside the badge; that reads well at "12" and collides at
+"1200", which is the run where it matters most. The badge grows with the number.
+It is in the opposite corner now.
 
 **THE PLAYER HAS TWO VERBS NOW, AND THEY ARE TWO HALVES OF ONE IDEA.** Tighten
 is a reason to move; focus is a reason not to. Neither adds anything to the road.
