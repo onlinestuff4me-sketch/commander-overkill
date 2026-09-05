@@ -58,6 +58,8 @@ import { createBossBar } from "./ui/bossbar";
 import { createTroopCount } from "./ui/troopcount";
 import { createLoadout } from "./ui/loadout";
 import { createSkills } from "./ui/skills";
+import { createStreak } from "./ui/streak";
+import { createCommander } from "./ui/commander";
 import { createNetPop } from "./ui/netpop";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
@@ -101,6 +103,11 @@ const loadout = createLoadout(ui);
 // The state of the player's own controls. Not "show, don't tell" territory — a
 // control whose availability you cannot see is a control you do not use.
 const skills = createSkills(ui);
+// Going around a row is free, which left the safe line with nothing at stake.
+// This is what prices it — see ui/streak.ts.
+const streak = createStreak(ui);
+// The joke the game is named after. Files reports; never breaks.
+const commander = createCommander(ui);
 // The per-unit +1s say WHICH soldiers; they are bad at saying HOW MANY when a
 // row resolves three segments at once. This is the running total on top.
 const netPop = createNetPop(ui, stage.camera);
@@ -119,6 +126,8 @@ const renderables: System[] = [
   troopCount,
   loadout,
   skills,
+  streak,
+  commander,
   netPop,
 ];
 
@@ -140,8 +149,17 @@ function payTroops(amount: number): void {
   // a handful of veterans and gunners, not a random survivor.
   armCarriers();
   if (delta === 0) return;
+
+  // He does not remark on every scratch: a tenth of the army in one payout is a
+  // report, two men is not. The STREAK is not broken here — see the gate handler
+  // and the note on why it is a barrier streak rather than a casualty one.
+  if (delta < 0 && before > 0 && -delta / before >= LOSS_REMARK_SHARE) commander.say("loss");
+
   netPop.add(delta);
-  if (delta > 0) growthFx.play(squad.center, squad.radius);
+  if (delta > 0) {
+    growthFx.play(squad.center, squad.radius);
+    noteGrowth();
+  }
   // The floaters are NOT spawned here any more. A `+1` has to sit over the
   // soldier it is counting, and that soldier does not exist yet — the squad
   // creates him on its next update. `drainSquadEvents()` runs after that and
@@ -172,6 +190,40 @@ function drainSquadEvents(): void {
 /** Dev-only record of what each segment paid. Empty and untouched in production. */
 const payoutLog: { troops: number; value: number; share: number; reward: boolean }[] = [];
 
+/**
+ * Streak length at which the Commander notices. Four clean segments is about a
+ * minute of not putting a foot wrong, which is worth a remark; two is luck.
+ */
+const STREAK_REMARK = 4;
+/** Share of the army lost in one payout that the Commander will remark on. */
+const LOSS_REMARK_SHARE = 0.1;
+
+/**
+ * A STREAK COUNTS ROWS YOU CAME OUT AHEAD ON, NOT ROWS WITH NO RED IN THEM.
+ *
+ * "Cross without touching a red" is the version that reads best in a sentence
+ * and it measured out at a flat 1× for an entire run — the raw count reached 1
+ * on 14 samples out of 400 and 2 on none of them. The reason is structural: a
+ * segment is crossed if the crowd covers a fraction of it (`CROSS_FRACTION` in
+ * mechanics/gates.ts), and past a few dozen troops the army is wider than a
+ * whole row, so it takes every segment in the row whatever it aims at. A no-red
+ * streak is unavailable by construction to any army big enough to want one.
+ *
+ * Net-positive is the rule that survives that, and it is a better rule anyway:
+ * it is achievable at every size, it is broken by a genuinely bad row rather
+ * than by geometry, and TIGHTEN is the thing that makes a bad row into a good
+ * one — squeeze onto the blue and the red goes past you. The multiplier is what
+ * pays for learning that.
+ *
+ * A row's segments all resolve inside one `gates.update`, so they are totalled
+ * here and judged in `tick()` immediately after it.
+ */
+let rowNet = 0;
+let rowHits = 0;
+/** Dev-only tally of how rows are landing, for tuning the ladder. */
+let rowsWon = 0;
+let rowsLost = 0;
+
 gates.onResolve((hit) => {
   if (import.meta.env.DEV) {
     payoutLog.push({
@@ -181,8 +233,33 @@ gates.onResolve((hit) => {
       reward: hit.reward,
     });
   }
-  payTroops(hit.troops);
+  rowHits++;
+  rowNet += hit.troops;
+  // The multiplier a row pays is the one carried INTO it. Growing it on the
+  // strength of the row it is being applied to would pay the bonus before it
+  // was earned.
+  payTroops(hit.troops > 0 ? Math.round(hit.troops * streak.multiplier) : hit.troops);
 });
+
+/** Judge the row that just resolved, if one did. Called from `tick()` straight
+ *  after `gates.update()`, which is where segments resolve. */
+function settleRow(): void {
+  if (rowHits === 0) return;
+  const net = rowNet;
+  rowHits = 0;
+  rowNet = 0;
+  if (import.meta.env.DEV) {
+    if (net > 0) rowsWon++;
+    else rowsLost++;
+  }
+  if (net > 0) {
+    const before = streak.count;
+    streak.bank();
+    if (before + 1 === STREAK_REMARK) commander.say("streak");
+  } else if (streak.breakStreak()) {
+    commander.say("loss");
+  }
+}
 
 /**
  * A DESTROYED BARREL RECRUITS ITS RIDER.
@@ -503,6 +580,7 @@ boss.onKilled((kind) => {
   blastX = boss.x;
   blastZ = boss.z;
   payTroops(Math.max(BOSS_REWARD_FLOOR, Math.round(world.troops * BOSS_REWARD_SHARE)));
+  commander.say("boss");
   if (kind === "brute") world.rocketeers += ROCKET_CREW * BOSS_CREW;
   else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
   else world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES * 3);
@@ -980,6 +1058,22 @@ let wipes = 0;
  * empty road) keeps the prototype iterable — there is no debrief screen yet,
  * and a frozen screen teaches nobody anything.
  */
+/**
+ * Army sizes the Commander files a report on. Powers-of-ish rather than round
+ * hundreds, so the remarks thin out as the run goes on instead of arriving at a
+ * constant rate through the part of the run that is already loudest.
+ */
+const GROWTH_MARKS: readonly number[] = [25, 80, 200, 450, 900];
+let growthMark = 0;
+
+/** Called after every payout. Cheap: an integer compare in the common frame. */
+function noteGrowth(): void {
+  while (growthMark < GROWTH_MARKS.length && world.troops >= GROWTH_MARKS[growthMark]!) {
+    growthMark++;
+    commander.say("growth");
+  }
+}
+
 function resetRun(): void {
   world.troops = START_TROOPS;
   world.health = 1;
@@ -1003,6 +1097,12 @@ function resetRun(): void {
   world.focus = 0;
   tightenHold = 0;
   tightenCool = 0;
+  streak.reset();
+  growthMark = 0;
+  // Not `reset()` on the commander: his line cursors are the only thing that
+  // stops a player hearing "Casualties acceptable" four runs running, and a run
+  // ending is exactly when they should NOT be rewound.
+  commander.say("wipe");
   armCarriers();
   primeCorridor();
   zoom.reset(world.troops);
@@ -1232,6 +1332,9 @@ function tick(dt: number): void {
 
     // 4. Gates resolve against the settled squad position.
     gates.update(dt, world);
+    // Immediately after, while this row's segments are the only ones in the
+    // accumulator — see the note on the streak rule above.
+    settleRow();
 
     // 5. Feedback last: it reacts to everything above, within the same tick.
     floaters.update(dt, world);
@@ -1242,6 +1345,8 @@ function tick(dt: number): void {
     loadout.update(dt, world);
     skills.setTightenCooldown(tightenCool / TIGHTEN_COOLDOWN, tightenHold > 0);
     skills.update(dt, world);
+    streak.update(dt, world);
+    commander.update(dt, world);
     netPop.update(dt, world);
 
     // The bridge scrolls too, so its towers sweep past and their shadows move
@@ -1279,6 +1384,7 @@ mountPerfOverlay(ui, stage.renderer);
 
 state.transition("briefing");
 state.transition("running");
+commander.say("opening");
 world.troops = START_TROOPS;
 // The corridor has to be stocked before the first frame, or the run opens on an
 // empty road and the player waits three seconds for anything to happen.
@@ -1629,6 +1735,10 @@ if (import.meta.env.DEV) {
         tier: world.weaponTier,
         elapsed: Number(world.elapsed.toFixed(2)),
         squadX: Number(squad.center.x.toFixed(2)),
+        streak: streak.count,
+        rowsWon,
+        rowsLost,
+        streakMult: streak.multiplier,
         radiusX: Number(squad.radiusX.toFixed(2)),
         naturalRadiusX: Number(squad.naturalRadiusX.toFixed(2)),
         calls: stage.renderer.info.render.calls,
