@@ -531,6 +531,18 @@ boss.onStrike((_kind, zx, half) => {
 /** A hive does not hit you; it hatches. The walkers are ordinary walkers, spawned
  *  through the enemy module — two entity modules must not import each other, so
  *  the boss asks and this file does it. */
+/**
+ * A BOSS THAT BREAKS THROUGH STILL COUNTS AGAINST THE RUSH.
+ *
+ * It cost the army a fifth of itself on the way past, which is payment enough.
+ * Requiring a kill would let a weak army stall forever in front of a boss it
+ * cannot beat, on a level it can then never finish — the level has to terminate
+ * whatever happens, and the punishment is the blood, not the deadlock.
+ */
+boss.onEscaped(() => {
+  rushBossFinished();
+});
+
 boss.onHatch((lane, z, count) => {
   enemies.spawnPack(lane, z, count, walkerHp());
 });
@@ -589,7 +601,7 @@ boss.onKilled((kind) => {
   payTroops(Math.max(BOSS_REWARD_FLOOR, Math.round(world.troops * BOSS_REWARD_SHARE)));
   commander.say("boss");
   bossesKilled++;
-  if (bossesKilled >= BOSSES_PER_LEVEL) clearLevel();
+  rushBossFinished();
   if (kind === "brute") world.rocketeers += ROCKET_CREW * BOSS_CREW;
   else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
   else world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES * 3);
@@ -689,31 +701,62 @@ function updateAbilities(dt: number): void {
   world.focus = clamp(world.focus + rate, 0, 1);
 }
 
-/* ── Levels and the upgrade path ──────────────────────────────────────────
+/* ── Levels: an approach, then a boss rush ────────────────────────────────
  *
- * A LEVEL IS A NUMBER OF BOSSES, not a distance or a clock.
+ * A LEVEL BUILDS TO SOMETHING. The first version counted two boss kills and let
+ * the conductor scatter the bosses through the level on a distance cadence,
+ * which made them punctuation rather than a destination — Mischa's note was
+ * exact: "it doesn't look like we have a big boss and horde moment that you have
+ * to beat that culminates the level."
  *
- * The alternative — a level is N metres or N seconds — was what `elapsed`
- * already did, and it is why the handoff has said for weeks that a long level
- * and a hard level were the same thing. Ending a level on a boss kill instead
- * gives the run a shape the player can feel arriving (the corridor goes quiet,
- * a giant walks on, you beat it, the screen stops) and it makes "how far in am
- * I" a thing you can answer by looking at the road rather than at a clock.
+ * So a level is two phases:
  *
- * Two, because that is what the reference's clear screen reports, and because at
- * the boss cadence it works out at roughly 80 seconds a level — inside the
- * 90-second-to-two-minute run the brief asks for.
+ *   APPROACH  `levelDistance()` metres of corridor. Gates, barrels and whatever
+ *             enemies this level has unlocked. No bosses at all. This is where
+ *             the army is built, and it is the only place it can be built.
+ *   RUSH      The corridor stops. A warning fires, the road empties, and then
+ *             the level's bosses arrive back to back, each with a horde, with
+ *             only a couple of seconds between them. Beat them and the level is
+ *             over.
+ *
+ * Then the card, an upgrade, and the next level from scratch — a bigger start,
+ * a harder corridor, an enemy you have not seen, and one more boss at the end.
  */
-const BOSSES_PER_LEVEL = 2;
 
-/** The escort that walks in with a boss. One more pack per level, capped, so a
- *  late boss arrives with a wall of bodies in front of it and an early one does
- *  not bury a twenty-strong army. */
-const HORDE_PACKS = 3;
+/**
+ * The escort that walks in with every boss of the rush.
+ *
+ * THE HORDE IS THE SHARPEST DIFFICULTY LEVER IN THE GAME and it is worth saying
+ * so where it is defined: four packs at level one measured 5 wipes in 32 with
+ * under a third of runs clearing a level; two packs measured 2 wipes with nearly
+ * half clearing. Three, growing to six by level four. Re-measure after touching
+ * it — nothing else moves the rate this far this fast.
+ */
+const HORDE_PACKS = 4;
 const HORDE_PACK_SIZE = 12;
 /** Metres behind the boss the escort forms up. Far enough that they are visible
  *  around it rather than inside it. */
 const HORDE_DEPTH = 5;
+
+/** Metres of approach before the rush, and how much each level adds. At 6 m/s
+ *  level one builds for about fifty seconds before the horns. */
+const LEVEL_DISTANCE = 300;
+const LEVEL_DISTANCE_STEP = 40;
+
+/** Seconds of empty road between the warning and the first boss, and between
+ *  one boss and the next. The first is a breath; the second is barely one. */
+const RUSH_LEAD = 2.6;
+const RUSH_BETWEEN = 1.4;
+
+function levelDistance(): number {
+  return LEVEL_DISTANCE + (world.level - 1) * LEVEL_DISTANCE_STEP;
+}
+
+/** How many bosses end this level. One on level one — the level that teaches
+ *  what a boss is — then two, then three, capped at four. */
+function rushSize(): number {
+  return Math.min(4, 1 + Math.floor(world.level / 2));
+}
 
 /**
  * Seconds of difficulty a completed level is worth.
@@ -722,15 +765,14 @@ const HORDE_DEPTH = 5;
  * time in 25-second tiers. Rather than rewrite both tables to take a level — a
  * change that would invalidate every measurement this project has made — a level
  * ADDS to the elapsed time the composer is told about. Level 3 therefore opens
- * at the difficulty level 1 reached after a minute and a half, which is the
- * "harder from its first second" property that was missing, with none of the
- * tuning thrown away.
+ * at the difficulty level 1 reached after a minute, which is the "harder from
+ * its first second" property that was missing, with none of the tuning thrown
+ * away. The BEAT table gates itself separately, by `unlock` (director.ts).
  */
 const LEVEL_DIFFICULTY_SECONDS = 25;
 /** Troops a level hands you for each one already cleared. */
 const LEVEL_START_TROOPS = 8;
 
-/** What a level's worth of difficulty looks like to the row composer. */
 function difficultyClock(): number {
   return world.elapsed + (world.level - 1) * LEVEL_DIFFICULTY_SECONDS;
 }
@@ -738,54 +780,98 @@ function difficultyClock(): number {
 /* --- perks: the upgrade path ------------------------------------------- */
 
 /**
- * PERKS ARE PERMANENT AND THEY STACK. One is chosen at the end of every level,
- * so by level five the army is measurably a different army — which is the whole
- * point of a level structure over an endless run.
- *
- * They deliberately buy the three things the game already models separately:
- * bodies, rate and power. Nothing here invents a fourth axis; the interesting
- * part is which of the three you are lopsided in, and that is a decision the
- * player now makes five times a run rather than one the barrels make for them.
+ * PERKS ARE PERMANENT AND THEY STACK, and the POOL GROWS. Three ranks of the
+ * same three things is a clear upgrade path and a shallow one; a level that
+ * offers something you have not been offered before is the other half of "each
+ * level introduces new upgrades". Two of the five change how the game is played
+ * rather than how big it starts, and they unlock late enough that the player has
+ * met the ability they modify.
  */
-type PerkId = "men" | "rate" | "power";
-const perks: Record<PerkId, number> = { men: 0, rate: 0, power: 0 };
+type PerkId = "men" | "rate" | "power" | "focus" | "squeeze";
+const perks: Record<PerkId, number> = { men: 0, rate: 0, power: 0, focus: 0, squeeze: 0 };
 
-/** Troops carried into a level, per rank of the `men` perk. */
 const PERK_MEN_TROOPS = 6;
-/** Extra gunners and rocketeers granted at the start of a level, per rank. */
 const PERK_RATE_CREW = 3;
 const PERK_POWER_CREW = 2;
+/** Share of the focus fill time each rank removes, and seconds each rank adds
+ *  to the squeeze. */
+const PERK_FOCUS_SPEED = 0.22;
+const PERK_SQUEEZE_TIME = 0.35;
 
 const ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 
+interface PerkSpec {
+  id: PerkId;
+  icon: string;
+  title: string;
+  unlock: number;
+  detail: (rank: number) => string;
+}
+
+const PERK_SPECS: readonly PerkSpec[] = [
+  {
+    id: "men",
+    icon: "🎖",
+    title: "REINFORCEMENTS",
+    unlock: 1,
+    detail: (r) => `Start each level with ${r * PERK_MEN_TROOPS} extra troops`,
+  },
+  {
+    id: "rate",
+    icon: "🔫",
+    title: "MINIGUN CREW",
+    unlock: 1,
+    detail: (r) => `Start each level with ${r * PERK_RATE_CREW} gunners`,
+  },
+  {
+    id: "power",
+    icon: "🚀",
+    title: "ROCKET CREW",
+    unlock: 1,
+    detail: (r) => `Start each level with ${r * PERK_POWER_CREW} rocketeers`,
+  },
+  {
+    id: "focus",
+    icon: "🎯",
+    title: "STEADY HANDS",
+    unlock: 3,
+    detail: (r) => `Focus builds ${Math.round(r * PERK_FOCUS_SPEED * 100)}% faster`,
+  },
+  {
+    id: "squeeze",
+    icon: "🪗",
+    title: "CLOSE RANKS",
+    unlock: 4,
+    detail: (r) => `Tighten holds ${(r * PERK_SQUEEZE_TIME).toFixed(1)}s longer`,
+  },
+];
+
+/** Which three to offer. The unlocked pool rotated by level, so a new perk is
+ *  always on the card the level it unlocks rather than whenever the dice say. */
 function perkOffers(): PerkOffer[] {
-  return [
-    {
-      id: "men",
-      icon: "🎖",
-      title: "REINFORCEMENTS",
-      rank: ROMAN[Math.min(perks.men + 1, ROMAN.length - 1)] ?? "",
-      detail: `Start each level with ${(perks.men + 1) * PERK_MEN_TROOPS} extra troops`,
-    },
-    {
-      id: "rate",
-      icon: "🔫",
-      title: "MINIGUN CREW",
-      rank: ROMAN[Math.min(perks.rate + 1, ROMAN.length - 1)] ?? "",
-      detail: `Start each level with ${(perks.rate + 1) * PERK_RATE_CREW} gunners`,
-    },
-    {
-      id: "power",
-      icon: "🚀",
-      title: "ROCKET CREW",
-      rank: ROMAN[Math.min(perks.power + 1, ROMAN.length - 1)] ?? "",
-      detail: `Start each level with ${(perks.power + 1) * PERK_POWER_CREW} rocketeers`,
-    },
-  ];
+  const pool = PERK_SPECS.filter((p) => p.unlock <= world.level);
+  const fresh = pool.filter((p) => p.unlock === world.level);
+  const rest = pool.filter((p) => p.unlock !== world.level);
+  const chosen = [...fresh, ...rest].slice(0, 3);
+  return chosen.map((p) => {
+    const rank = perks[p.id] + 1;
+    return {
+      id: p.id,
+      icon: p.icon,
+      title: p.title,
+      rank: ROMAN[Math.min(rank, ROMAN.length - 1)] ?? "",
+      detail: p.detail(rank),
+    };
+  });
 }
 
 /* --- level state -------------------------------------------------------- */
 
+type LevelPhase = "approach" | "rush";
+let phase: LevelPhase = "approach";
+let approached = 0;
+let rushLeft = 0;
+let rushTimer = 0;
 let bossesKilled = 0;
 let biggestCrowd = 0;
 /** Suspends the corridor while a card is up. The state machine stops `tick()`,
@@ -801,6 +887,24 @@ const TEASERS: readonly string[] = [
   "Level %L brings heavier company",
   "Level %L. The bridge does not get shorter",
 ];
+
+/** The approach is over. Clear the road and sound the horns. */
+function beginRush(): void {
+  phase = "rush";
+  rushLeft = rushSize();
+  rushTimer = RUSH_LEAD;
+  gates.reset();
+  barrels.clear();
+  commander.say("rush");
+  levelCard.banner(rushLeft > 1 ? "BOSS RUSH" : "BOSS INCOMING");
+}
+
+/** One boss of the rush is done with — killed or broken through. */
+function rushBossFinished(): void {
+  if (phase !== "rush") return;
+  if (rushLeft > 0) rushTimer = RUSH_BETWEEN;
+  else clearLevel();
+}
 
 function clearLevel(): void {
   // The harness plays whole runs with nobody to press a button. It takes the
@@ -847,9 +951,7 @@ levelCard.onChoice((choice) => {
     if (id in perks) perks[id]++;
     world.level++;
   } else if (choice.kind === "restart") {
-    perks.men = 0;
-    perks.rate = 0;
-    perks.power = 0;
+    for (const k of Object.keys(perks) as PerkId[]) perks[k] = 0;
     world.level = 1;
   }
   // "retry" keeps both the level and the perks: losing a level should cost the
@@ -1291,6 +1393,11 @@ function resetRun(): void {
   world.troops = START_TROOPS + perks.men * PERK_MEN_TROOPS + (world.level - 1) * LEVEL_START_TROOPS;
   bossesKilled = 0;
   biggestCrowd = world.troops;
+  phase = "approach";
+  approached = 0;
+  rushLeft = 0;
+  rushTimer = 0;
+  director.setLevel(world.level);
   // The difficulty clock is per LEVEL, not per session: `difficultyClock()` adds
   // the level's own offset on top, so leaving elapsed running would compound the
   // two and make level 3 open where level 6 should.
@@ -1477,11 +1584,24 @@ function tick(dt: number): void {
       damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX),
     );
 
-    if (contentSpawning) {
-      // Distance, not time. Spacing is authored in metres of road, so it holds
-      // even if the world speeds up or slows down.
-      const due = director.advance(world.scrollSpeed * dt);
-      if (due) place(due.what, SPAWN_Z, due.side);
+    // THE APPROACH BUILDS THE ARMY; THE RUSH ENDS THE LEVEL. The corridor only
+    // runs during the approach — once the horns go the road is the player's and
+    // whatever walks onto it.
+    if (phase === "approach") {
+      approached += world.scrollSpeed * dt;
+      if (contentSpawning) {
+        // Distance, not time. Spacing is authored in metres of road, so it holds
+        // even if the world speeds up or slows down.
+        const due = director.advance(world.scrollSpeed * dt);
+        if (due) place(due.what, SPAWN_Z, due.side);
+      }
+      if (approached >= levelDistance()) beginRush();
+    } else if (rushLeft > 0 && !boss.active) {
+      rushTimer -= dt;
+      if (rushTimer <= 0) {
+        rushLeft--;
+        place("boss", SPAWN_Z, rushLeft % 2 === 0 ? 1 : -1);
+      }
     }
 
     // 0. The player's two abilities, BEFORE the squad: `world.tighten` is what
@@ -1867,7 +1987,7 @@ if (import.meta.env.DEV) {
       /** Pose either level card without having to play a level to it. */
       showCleared(): void {
         biggestCrowd = Math.max(biggestCrowd, world.troops);
-        bossesKilled = BOSSES_PER_LEVEL;
+        bossesKilled = rushSize();
         clearLevel();
       },
       showFailed(): void {

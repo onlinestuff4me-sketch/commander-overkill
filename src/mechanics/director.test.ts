@@ -22,8 +22,10 @@ function run(
   metres: number,
   seed = 1,
   step = 0.1,
+  level = 9,
 ): { at: number; what: Placement; side: number }[] {
   const director = createDirector(seed);
+  director.setLevel(level);
   const out: { at: number; what: Placement; side: number }[] = [];
   for (let d = 0; d < metres; d += step) {
     const due = director.advance(step);
@@ -111,37 +113,25 @@ describe("content mix", () => {
     }
   });
 
-  it("punctuates the run with bosses, on a cadence rather than a roll", () => {
-    // The whole reason bosses are not in the beat table. A run of a given
-    // length must meet a predictable number of them, or "shape" is back to
-    // being whatever the dice did.
-    const placed = run(1400, 3);
-    const bosses = placed.filter((p) => p.what === "boss");
-    expect(bosses.length).toBeGreaterThanOrEqual(6);
-    for (let i = 1; i < bosses.length; i++) {
-      const apart = bosses[i]!.at - bosses[i - 1]!.at;
-      // The cadence is in metres of road, and the only slack is the placement
-      // grid it has to land on.
-      expect(apart).toBeGreaterThan(180);
-      expect(apart).toBeLessThan(260);
-    }
+  it("never schedules a boss — the level owns its own finale", () => {
+    // A boss used to be placed every 210 m, which made it punctuation scattered
+    // through a level rather than the thing the level builds toward. The
+    // orchestrator owns the boss rush now; this module conducts the approach.
+    const placed = run(4000, 3);
+    expect(placed.some((p) => p.what === "boss")).toBe(false);
   });
 
-  it("opens clear road in front of every boss", () => {
-    // The silence before the arrival is most of what makes it read as one.
-    const placed = run(1400, 2);
-    for (let i = 1; i < placed.length; i++) {
-      if (placed[i]!.what !== "boss") continue;
-      expect(placed[i]!.at - placed[i - 1]!.at).toBeGreaterThan(20);
+  it("holds back the harder beats until their level", () => {
+    // A level that plays the same as the one before it is a level in name only.
+    const opening = new Set(run(3000, 3, 0.1, 1).map((p) => p.what));
+    expect(opening.has("gate")).toBe(true);
+    expect(opening.has("barrels")).toBe(true);
+    for (const late of ["elites", "bikers", "ogres", "crossroads"] as const) {
+      expect(opening.has(late), `level 1 should not place ${late}`).toBe(false);
     }
-  });
-
-  it("alternates which kerb a boss holds", () => {
-    // Bosses take a side and the orchestrator pushes everything else to the
-    // other one, so a run of same-side bosses would teach one thumb position.
-    const bosses = run(1400, 3).filter((p) => p.what === "boss");
-    for (let i = 1; i < bosses.length; i++) {
-      expect(bosses[i]!.side).toBe(-bosses[i - 1]!.side);
+    const late = new Set(run(3000, 3, 0.1, 5).map((p) => p.what));
+    for (const kind of ["elites", "bikers", "ogres", "crossroads"] as const) {
+      expect(late.has(kind), `level 5 should place ${kind}`).toBe(true);
     }
   });
 

@@ -43,7 +43,14 @@ const STYLE_ID = "cok-commander-style";
 const HOLD_TIME = 2.6;
 const COOLDOWN = 5.5;
 
-export type CommanderTopic = "opening" | "growth" | "boss" | "streak" | "loss" | "wipe";
+export type CommanderTopic =
+  | "opening"
+  | "growth"
+  | "boss"
+  | "streak"
+  | "loss"
+  | "wipe"
+  | "rush";
 
 /** Higher cuts off lower. A boss dying outranks a remark about head count. */
 const PRIORITY: Record<CommanderTopic, number> = {
@@ -52,7 +59,8 @@ const PRIORITY: Record<CommanderTopic, number> = {
   streak: 1,
   loss: 2,
   boss: 3,
-  wipe: 4,
+  rush: 4,
+  wipe: 5,
 };
 
 export interface CommanderSystem extends System {
@@ -156,6 +164,12 @@ const LINES: Record<CommanderTopic, readonly string[]> = {
     "We have taken losses. We will take fewer next time.",
     "Regrettable. Press on.",
     "Those men knew the risks. They did not, but they do now.",
+  ],
+  rush: [
+    "Approach complete. Whatever is next is what we came for.",
+    "Form up. The road ends and the work begins.",
+    "Heavy contact ahead. Nobody has to enjoy this.",
+    "This is the part the briefing was vague about.",
   ],
   wipe: [
     "Company destroyed. Filing paperwork. Beginning again.",

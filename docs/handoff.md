@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-05, session 3 (fourteenth pass)._
+_Last updated: 2026-09-05, session 3 (fifteenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -14,33 +14,43 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**THERE ARE LEVELS NOW, AND THAT CHANGED WHAT THE NUMBERS MEAN.** A level is
-**two boss kills**, it starts the army small again, and it ends on a card that
-offers one of three permanent upgrades. The old headline measure — median troops
-at the 110-second mark — is meaningless under that: the army resets every level,
-so it reports whatever point of whatever level the clock stopped in.
+**A LEVEL IS AN APPROACH AND THEN A BOSS RUSH.** It builds to something:
 
-**The measures that replaced it**, from `__overkill.sample(32, 110, 0.3)`:
+- **APPROACH** — `300 + 40×(level−1)` metres of corridor, about fifty seconds at
+  level one. Gates, barrels and whatever enemies this level has unlocked. **No
+  bosses at all.** This is where the army is built and the only place it can be.
+- **RUSH** — the corridor stops, the road empties, a banner fires, and the
+  level's bosses arrive back to back with a horde each, 1.4 s apart. One boss at
+  level one, two by level two, four by level six.
+- Then the card, one permanent upgrade, and the next level from scratch.
 
-| | |
-|---|---|
-| Runs wiped | **2 of 32** |
-| Runs clearing at least one level in 110 s | **13 of 32** |
+The first version counted two boss kills while the conductor scattered bosses on
+a 210 m cadence, which made them punctuation rather than a destination. Mischa's
+note was exact and the restructure came from it: *"it doesn't look like we have a
+big boss and horde moment that you have to beat that culminates the level."*
 
-`sample()` now resets the level AND the perks between runs — without that, run 30
-was played at level 30 by an army carrying thirty upgrades, and the sample
-measured a difficulty ramp rather than thirty-two comparable runs.
+**A BOSS THAT BREAKS THROUGH STILL COUNTS AGAINST THE RUSH.** It cost the army a
+fifth of itself on the way past; requiring a kill would let a weak army stall
+forever on a level it can then never finish. The level must terminate whatever
+happens, and the punishment is the blood, not the deadlock.
 
-**A level currently takes longer than 110 seconds at bot skill**, which is why
-only 13 in 32 clear one. That is the number to tune against next, and the brief's
-90-second-to-two-minute target now applies to a LEVEL rather than to a run.
+**EACH LEVEL UNLOCKS SOMETHING.** `Beat.unlock` in `mechanics/director.ts` gates
+the roster: level 1 is gates, barrels and walkers and nothing else; elites and
+blockades arrive on 2, bikers and forks on 3, ogres and crossroads on 4, `surge`
+on 5. The perk pool grows the same way — three ranks of three things is a shallow
+upgrade path, so STEADY HANDS (focus) unlocks on 3 and CLOSE RANKS (tighten) on
+4, and a newly-unlocked perk is always on the card the level it unlocks.
 
-**THE HORDE IS THE DOMINANT DIFFICULTY LEVER AND IT IS A SHARP ONE.** Bosses
-arrive with an escort of walker packs, and the size of that escort moves the wipe
-rate further and faster than anything else in the game: four packs at level one
-measured 5 wipes in 32 with under a third of runs clearing a level; two packs
-measured 2 wipes with nearly half clearing. It sits at three, scaling to six by
-level four. Re-measure after touching it.
+**Measured**, `__overkill.sample(32, 110, 0.3)`: **32 of 32 runs clear exactly
+one level** in 110 seconds, and **0–2 of 32 wipe** across samples.
+
+**THE WIPE RATE IS BELOW THE BRIEF AND I CANNOT RESOLVE IT AT n=32.** The target
+is 1 in 8 for levels 1–2. Consecutive samples of the same build gave 2 and then
+0; earlier the horde looked like a sharp lever (5 wipes at four packs against 2
+at two packs) and then four packs measured 0. Counts this small carry more noise
+than the effect being chased. Either sample much larger, or — better — get this
+in front of a person, because the bot never crosses a gate row and never taps
+TIGHTEN, so it is playing a materially easier game than a player does.
 
 **The failure mode is a STALL, not a wipe.** `min` is 1 in most samples: a run
 that never grew, because filling a reward needs committed fire and a squad that
@@ -114,17 +124,15 @@ to diverge from the clock.
 
 What needs doing, in order:
 
-1. **A level takes longer than 110 seconds at bot skill** — only 13 runs in 32
-   clear one. The brief's 90-second-to-two-minute target now applies to a level,
-   so either the boss cadence tightens or `BOSSES_PER_LEVEL` drops to one for the
-   first few levels.
+1. **The wipe rate is too low and the instrument cannot see it.** See the note at
+   the top: 0–2 in 32 against a target of 4, on samples that disagree with each
+   other. This wants a human, not another sample.
 2. **The per-level failure bands are unmeasured.** The brief wants 1 in 8 at
-   levels 1–2 easing to 1 in 3 by 16–21; `sample()` currently reports one blended
-   rate. It needs a per-level breakdown before those bands can be said to be hit.
-3. **Perks are three ranks of the same three things.** That is a clear upgrade
-   path and a shallow one. The interesting version adds perks that change how the
-   game is played rather than how big it starts — a longer TIGHTEN, focus that
-   drains slower, a shield that eats one red row.
+   levels 1–2 easing to 1 in 3 by 16–21; `sample()` reports one blended rate and
+   every run clears exactly one level, so levels 3+ are untested by anything.
+3. **Level one is 57 seconds.** Later levels are longer by construction (more
+   approach, more bosses) — level six works out around 133 s — but the early
+   ones sit under the brief's 90-second floor.
 
 ### 1a. Second-to-second play — the first two are BUILT; five remain
 
