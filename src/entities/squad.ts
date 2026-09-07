@@ -365,18 +365,19 @@ const CENTER_FOLLOW = 30;
 /**
  * How far TIGHTEN squeezes the crowd, and where the squeezed bodies go.
  *
- * 0.44 takes a five-metre army down to just over two, which is narrow enough to
- * thread a two-segment gap that would otherwise be unavoidable — the whole point
- * of the ability. Anything much tighter and a big crowd's own units start
- * fighting the per-unit spacing and the blob reads as a scale animation rather
- * than as men crowding together.
+ * 0.55 takes an eight-metre army down to three and a half, which is the
+ * difference between smashing three segments of a four-wide row and smashing
+ * one and a half. That is the number the ability is sized against: not "narrower"
+ * in the abstract, but "how many of those do I have to pay for". Anything much
+ * tighter and a big crowd's own units start fighting the per-unit spacing and
+ * the blob reads as a scale animation rather than as men crowding together.
  *
  * The depth grows to match, because a crowd squeezed sideways has to go
  * somewhere and a column is what that looks like. It is still capped by the
  * framing budget (`RADIUS_Z_MAX`), or the rear rank walks off the bottom of the
  * screen.
  */
-const TIGHTEN_SQUEEZE = 0.44;
+const TIGHTEN_SQUEEZE = 0.55;
 const TIGHTEN_DEEPEN = 0.4;
 
 const LATERAL_SPEED = 7;
@@ -971,7 +972,7 @@ class Squad implements SquadSystem {
     this.setCount(world.troops);
     this.#reshape(world.zoom);
     // Every tick, and after the cached reshape: the squeeze is a live value.
-    this.#applyTighten(world.tighten, world.zoom);
+    this.#applyTighten(world.focus, world.zoom);
     // Clamped here rather than trusted: an elite is a slot index, and a slot
     // index past the live count would paint a body that is already falling.
     // One job per soldier: each kind takes what is left after the ones before

@@ -365,13 +365,28 @@ const COMMIT_Z = -22;
  * Chance of a 2-wide and a 3-wide row, per difficulty tier; the remainder is
  * 4-wide. Indexed by the same tier that selects `PENALTY_BANDS`.
  *
- * Read down the table and it is the whole difficulty curve in one place: at tier
- * 0 nearly every row can be walked around, at tier 2 four in ten cannot.
+ * READ DOWN THE TABLE AND IT IS THE WHOLE DIFFICULTY CURVE — and it used to say
+ * something the game could not afford. At tier 0 nineteen rows in twenty could
+ * be walked around and at tier 2 six in ten still could, which measured out
+ * exactly as you would expect once there was an autopilot to check with: it
+ * crossed ZERO rows in forty seconds of play. Every row was optional, so the
+ * optimal line was to ignore all of them, and Mischa's read of the build was the
+ * same one — "the barrier gates don't really lead to much clear decision
+ * making".
+ *
+ * A row you can walk around is not a decision, it is scenery with a number on
+ * it. A FOUR-WIDE row leaves 1.8 m of an 11.2 m road, so it is a fork: you are
+ * going through one of these, and which one is the question. That is what the
+ * PRD asked for in the first place — "gates chain so you cannot take them all;
+ * which one you commit to is the run."
+ *
+ * Level one still teaches on narrow rows. By tier 1 half of them are forks and
+ * by tier 2 three quarters are.
  */
 const ROW_WIDTHS: readonly (readonly [two: number, three: number])[] = [
-  [0.45, 0.5],
-  [0.25, 0.55],
-  [0.1, 0.5],
+  [0.4, 0.45],
+  [0.14, 0.36],
+  [0.05, 0.2],
 ];
 
 /**

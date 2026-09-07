@@ -611,94 +611,61 @@ boss.onKilled((kind) => {
 // Nothing to show until one arrives.
 bossBar.hide();
 
-/* ── The player's two live decisions ──────────────────────────────────────
+/* ── FOCUS: the player's one active ability ───────────────────────────────
  *
- * The corridor asks the player something every three seconds; between those
- * questions there was nothing to do, because moving was free and staying was
- * free. These two are the tension that fills the gap: one is a reason to move,
- * the other a reason not to, and they are two halves of one idea.
+ * Tap and the army compresses into a column for a second and a half: narrower,
+ * and firing harder. Then a cooldown.
  *
- * See docs/dynamism-proposal.md for the measurement that produced them.
+ * THIS WAS TWO THINGS AND THEY WERE THE SAME THING. A TIGHTEN on the tap that
+ * squeezed the crowd, and a passive FOCUS that filled while the player held a
+ * line. Mischa's question was the review: "what's the difference?" Both
+ * concentrated fire, neither read as its own idea, and the passive one rewarded
+ * not steering — which is the only input the game has. Measured, the autopilot
+ * held it at full for 85% of the opening minute without trying, because the
+ * opening minute is empty.
+ *
+ * What makes it worth pressing is the four-wide gate row (see ROW_WIDTHS in
+ * mechanics/gates.ts). A row you cannot walk around charges you for every
+ * segment your crowd covers, and a two-hundred-strong army covers three of them.
+ * Focused, it covers one and a half. That is the ability's entire reason to
+ * exist, and before the rows spanned the road there was not one.
  */
 
-/* --- TIGHTEN: a reason to move ---------------------------------------- */
+/** Seconds the squeeze holds, and seconds before it can be used again. The cycle
+ *  is ~4.8 s against a gate row every ~3.2 s, so it is available for roughly two
+ *  rows in three — often enough to plan around, rare enough to be worth saving. */
+const FOCUS_TIME = 1.6;
+const FOCUS_COOLDOWN = 3.2;
+/** How fast the squeeze eases in and out. Fast enough to feel like a command,
+ *  slow enough that the crowd's own springs do the crowding. */
+const FOCUS_EASE = 9;
 
-/** Seconds the squeeze holds once triggered. About the width of one gate row's
- *  approach, so it is spent ON something rather than held. */
-const TIGHTEN_TIME = 1.6;
-/** Seconds before it can be used again, counted from the moment it releases.
- *  The cycle is ~4.8 s against a decision every ~3.2 s, so it is available for
- *  roughly two rows in three — often enough to plan around, rare enough to be
- *  worth saving. */
-const TIGHTEN_COOLDOWN = 3.2;
-/** How fast the squeeze itself eases in and out. Fast enough to feel like a
- *  command, slow enough that the crowd's own springs do the crowding rather
- *  than the value snapping. */
-const TIGHTEN_EASE = 9;
-
-let tightenHold = 0;
-let tightenCool = 0;
+let focusHold = 0;
+let focusCool = 0;
 
 /** True when the ability is ready. Read by the HUD. */
-function tightenReady(): boolean {
-  return tightenHold <= 0 && tightenCool <= 0;
+function focusReady(): boolean {
+  return focusHold <= 0 && focusCool <= 0;
 }
 
 bus.on("input:tap", () => {
-  if (state.state !== "running" || betweenLevels || !tightenReady()) return;
-  tightenHold = TIGHTEN_TIME;
+  if (state.state !== "running" || betweenLevels || !focusReady()) return;
+  focusHold = FOCUS_TIME;
 });
 
-/* --- FOCUS: a reason to stay ------------------------------------------- */
-
-/**
- * The lateral speed at which focus stops building, in m/s, and the times to
- * fill and drain it.
- *
- * PROPORTIONAL, NOT A THRESHOLD, and that is a correction. The first build
- * filled at a flat rate below 1.2 m/s and drained above it, and the autopilot —
- * which re-decides five times a second — measured out holding a mean focus of
- * 0.83 and sitting at FULL for four fifths of the run. A buff you have four
- * fifths of the time is not a decision, it is a constant, and it took two wipes
- * out of the run's expected four.
- *
- * Filling now scales with how still the crowd actually is: dead still fills at
- * the full rate, half speed fills at half, and past the threshold it drains
- * faster the harder you are steering. Small corrections still cost you almost
- * nothing; a committed crossing costs you the meter.
- */
-const FOCUS_STILL_SPEED = 1.6;
-/** Seconds of perfect stillness to reach full focus, and seconds of a hard
- *  crossing to lose it. Asymmetric on purpose: earned slowly, spent quickly,
- *  which is what makes giving it up feel like a decision. */
-const FOCUS_FILL_TIME = 1.3;
-const FOCUS_DRAIN_TIME = 0.45;
-/** Ceiling on how much faster than the base rate a very fast dodge drains. */
-const FOCUS_DRAIN_MAX = 3;
-
 function updateAbilities(dt: number): void {
-  // Tighten: hold, then cool down, then ready.
-  if (tightenHold > 0) {
-    tightenHold -= dt;
-    if (tightenHold <= 0) {
-      tightenHold = 0;
-      tightenCool = TIGHTEN_COOLDOWN;
+  if (focusHold > 0) {
+    focusHold -= dt;
+    if (focusHold <= 0) {
+      focusHold = 0;
+      focusCool = FOCUS_COOLDOWN;
     }
-  } else if (tightenCool > 0) {
-    tightenCool = Math.max(0, tightenCool - dt);
+  } else if (focusCool > 0) {
+    focusCool = Math.max(0, focusCool - dt);
   }
-  const want = tightenHold > 0 ? 1 : 0;
-  world.tighten += (want - world.tighten) * Math.min(1, TIGHTEN_EASE * dt);
-  if (Math.abs(want - world.tighten) < 0.002) world.tighten = want;
-
-  // Focus: the squad reports how fast its centre is actually sliding, which is
-  // the honest measure — a thumb held against the road edge is not steering.
-  const speed = squad.lateralSpeed / FOCUS_STILL_SPEED;
-  const rate =
-    speed <= 1
-      ? (1 - speed) * (dt / FOCUS_FILL_TIME)
-      : -Math.min(FOCUS_DRAIN_MAX, speed - 1) * (dt / FOCUS_DRAIN_TIME);
-  world.focus = clamp(world.focus + rate, 0, 1);
+  const want = focusHold > 0 ? 1 : 0;
+  world.focus += (want - world.focus) * Math.min(1, FOCUS_EASE * dt);
+  if (Math.abs(want - world.focus) < 0.002) world.focus = want;
 }
 
 /* ── Levels: an approach, then a boss rush ────────────────────────────────
@@ -1419,10 +1386,9 @@ function resetRun(): void {
   world.elites = 0;
   world.gunners = perks.rate * PERK_RATE_CREW;
   world.rocketeers = perks.power * PERK_POWER_CREW;
-  world.tighten = 0;
   world.focus = 0;
-  tightenHold = 0;
-  tightenCool = 0;
+  focusHold = 0;
+  focusCool = 0;
   streak.reset();
   growthMark = 0;
   // Not `reset()` on the commander: his line cursors are the only thing that
@@ -1682,7 +1648,7 @@ function tick(dt: number): void {
     // Last of the readouts, so it reports the count this tick actually ended on.
     troopCount.update(dt, world);
     loadout.update(dt, world);
-    skills.setTightenCooldown(tightenCool / TIGHTEN_COOLDOWN, tightenHold > 0);
+    skills.setCooldown(focusCool / FOCUS_COOLDOWN, focusHold > 0);
     skills.update(dt, world);
     streak.update(dt, world);
     commander.update(dt, world);
@@ -1974,13 +1940,12 @@ if (import.meta.env.DEV) {
       bossStats() {
         return { kind: boss.kind, hp: boss.hp, max: boss.maxHp, x: boss.x, z: boss.z, side: boss.side };
       },
-      /** Fire TIGHTEN, ignoring readiness. For posing the squeeze. */
-      tighten(): void {
-        tightenHold = TIGHTEN_TIME;
-        tightenCool = 0;
+      /** Fire FOCUS, ignoring readiness. For posing the squeeze. */
+      focus(): void {
+        focusHold = FOCUS_TIME;
+        focusCool = 0;
       },
-      /** Force the focus meter, so a screenshot can hold a value the autopilot
-       *  would never sit still long enough to reach. */
+      /** Hold the squeeze at an exact value, for a screenshot. */
       setFocus(v: number): void {
         world.focus = clamp(v, 0, 1);
       },

@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-05, session 3 (fifteenth pass)._
+_Last updated: 2026-09-07, session 3 (sixteenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -664,6 +664,95 @@ the duration of `autopilot()`, and both the wipe and the level-clear check it: a
 bot that hits a card sits on a paused game for the rest of its sample and reports
 it as a run that stalled. Anything that stops the world from now on needs the
 same treatment.
+
+**THE AUTOPILOT USED TO CROSS NO GATE ROWS AT ALL, AND THAT WAS THE ALARM.**
+Measured while wiring the streak: `clearPayouts()` then a 40-second `autopilot()`
+run produced **zero** resolve events. Going around was free and every row was
+narrow enough to go around, so the bot took its entire economy from barrels,
+pickups and bosses. Widening the rows fixed it — it crosses ten segments in a
+hundred seconds now — but the lesson stands and is worth keeping: **if the bot
+ignores a whole content type, that content type is optional, and optional content
+is not a decision.** Check for it whenever something new goes on the road.
+
+Every economy number this project has ever quoted therefore EXCLUDES gate rows.
+That does not make them wrong (they are a real measurement of a real strategy)
+but it does mean:
+
+- Anything whose value comes from crossing rows — the streak most obviously — is
+  invisible to `sample()` and has to be verified by hand.
+- The wipe rate measures deaths by boss, breach and failed blue only.
+- "Go around everything" being an optimal-looking line is itself worth a look.
+  It is not obviously wrong — a player who dodges everything grows slowly and
+  stalls — but nobody has checked whether it is the best line or merely the
+  safest one the bot knows.
+
+**THE STREAK COUNTS ROWS YOU CAME OUT AHEAD ON, NOT ROWS WITH NO RED IN THEM.**
+"Cross without touching a red" is the version that reads best in a sentence and
+it measured out at a flat 1× for an entire run: the raw count reached 1 on 14
+samples out of 400 and 2 on none. The reason is structural — a segment is crossed
+when the crowd covers a fraction of its width, so past a few dozen troops the
+army is wider than a whole row and takes every segment in it whatever it aims at.
+A no-red streak is unavailable by construction to any army big enough to want
+one. Net-positive is achievable at every size, is broken by a bad row rather than
+by geometry, and makes TIGHTEN the tool that turns a bad row into a good one.
+
+The ladder tops out at **2×**, not 3×. On an economy whose failure mode is a run
+that catches fire, a 3× on gate rewards is not a thread, it is a second economy.
+
+Rows are totalled across one `gates.update` and judged immediately after it in
+`tick()` — `onResolve` fires once per SEGMENT, so a row's verdict cannot be
+decided inside the handler.
+
+**THE COMMANDER'S THREE RULES.** He is the joke the game is named after and the
+last piece of it to get built (`ui/commander.ts`):
+
+1. **After, never during.** Every trigger is a resolution — a boss died, a row
+   paid, the army crossed a threshold. Nothing calls him while a decision is on
+   the road, because a player reading a joke is a player not reading the corridor.
+2. **Walked, not rolled.** Lines advance a cursor per topic, so the second boss
+   gets the second boss line. A random table on a two-minute run repeats itself
+   and stops being a character.
+3. **He shuts up.** One line at a time, a hard cooldown, and a priority so a boss
+   dying cuts off a remark about head count.
+
+His line cursors deliberately survive `resetRun()` — a run ending is exactly when
+a player should NOT hear the same casualty line for the fourth time.
+
+**A HUD CHIP CANNOT SIT AT A FIXED OFFSET FROM THE TROOP BADGE.** The streak chip
+was placed 124px in, beside the badge; that reads well at "12" and collides at
+"1200", which is the run where it matters most. The badge grows with the number.
+It is in the opposite corner now.
+
+**THE PLAYER HAS ONE ACTIVE ABILITY: FOCUS.** Tap and the army compresses into a
+column for a second and a half — narrower, and firing harder — then a cooldown.
+
+**IT WAS TWO ABILITIES AND THEY WERE THE SAME ABILITY.** A TIGHTEN on the tap
+that squeezed the crowd, and a passive FOCUS that filled while the player held a
+line. Mischa's question was the entire review: *"what's the difference?"* Both
+concentrated fire, neither read as its own idea, and the passive one rewarded NOT
+STEERING — the game's only input. Measured, the autopilot held it at full for 85%
+of the opening minute without trying, because the opening minute is empty. A
+bonus you hold most of the time for doing nothing is a constant, not a mechanic.
+
+**AND IT HAD NO REASON TO BE PRESSED, BECAUSE NO ROW MADE YOU PAY FOR BEING
+WIDE.** That is the same root cause as the second half of the review — "the
+barrier gates don't really lead to much clear decision making". `ROW_WIDTHS` had
+nineteen rows in twenty walkable-around at tier 0 and six in ten at tier 2, and
+the autopilot crossed **zero rows in forty seconds**: every row was optional, so
+the optimal line was to ignore all of them. A row you can walk around is not a
+decision, it is scenery with a number on it.
+
+Four-wide rows leave 1.8 m of an 11.2 m road, so they are a fork — you are going
+through one of these and which one is the question, which is what the PRD asked
+for in the first place. Level one still teaches on narrow rows; half the rows are
+forks by tier 1 and three quarters by tier 2.
+
+**The two changes measure each other.** After them the autopilot crosses **10
+segments in 100 seconds** where it crossed none, and a 200-strong army meeting a
+four-wide row takes **4 of 4 segments unfocused and 1 of 4 focused**. That gap is
+the ability's whole reason to exist and there was not one before. The wipe rate
+went from 0–2 in 32 to **5 in 32**, which is the brief's early band — reached by
+giving the game decisions rather than by tuning a penalty number.
 
 **THE AUTOPILOT HAS NEVER CROSSED A GATE ROW. NOT ONCE.** Measured while wiring
 the streak: `clearPayouts()` then a 40-second `autopilot()` run produces **zero**
