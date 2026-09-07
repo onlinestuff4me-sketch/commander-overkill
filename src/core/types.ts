@@ -91,6 +91,15 @@ export interface WorldState {
    */
   elites: number;
   /**
+   * WHICH LEVEL IS BEING PLAYED, 1-based. Owned by the game.
+   *
+   * A level is a fixed number of boss kills, and it is the difficulty axis the
+   * whole game hangs on. Before it existed the only axis was `elapsed`, which
+   * cannot express "level 7 is harder than level 3 from its first second" — a
+   * long level and a hard level were the same thing.
+   */
+  level: number;
+  /**
    * HOW HARD THE CROWD IS SQUEEZED, 0..1. Owned by the game; the squad reads it
    * and reshapes.
    *
@@ -155,6 +164,7 @@ export function createWorld(center: THREE.Vector3): WorldState {
     elites: 0,
     gunners: 0,
     rocketeers: 0,
+    level: 1,
     tighten: 0,
     focus: 0,
     zoom: 1,

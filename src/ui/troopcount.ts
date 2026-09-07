@@ -115,16 +115,21 @@ function injectStyle(): void {
 const CSS = `
 .cok-troops {
   position: absolute;
-  top: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 10px);
-  left: calc(var(--safe-left, env(safe-area-inset-left, 0px)) + 12px);
+  /* TOP CENTRE, not top left. The reference puts the crowd count dead centre in
+     a blue pill with the level to its left and the sound toggle to its right,
+     and that is a better read for the one number the whole game is about: it is
+     where the eye already is, halfway between the road and the sky. */
+  top: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
   pointer-events: none;
   padding: 5px 12px 5px 7px;
   border-radius: 999px;
-  background: rgba(12, 20, 34, 0.55);
-  transform: translate3d(0, 0, 0);
+  background: rgba(38, 104, 232, 0.92);
+  box-shadow: 0 2px 0 rgba(10, 30, 70, 0.5);
   transition: transform 120ms ease-out;
 }
 .cok-troops__icon {

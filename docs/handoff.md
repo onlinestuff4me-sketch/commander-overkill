@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-03, session 3 (thirteenth pass)._
+_Last updated: 2026-09-05, session 3 (fourteenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -14,35 +14,33 @@ on every push to `main` via `.github/workflows/deploy.yml`.
 `npm run build` succeeds; the page loads with no console errors. 93 draw calls
 and 105k triangles at 280 troops with the camera stepped back to 1.45.
 
-**The economy is measured, not guessed.** `__overkill.sample(32, 110, 0.3)`.
-Before FOCUS landed, three consecutive samples of an unchanged build gave medians
-of **301, 445, 254** and **4, 4, 5 of 32 wiped**. With focus at 1.4× it is **3
-and 3 of 32** — a real softening, and the right kind, because a skill multiplier
-is supposed to make a well-played run stronger. Restore the difficulty with
-CONTENT (levels, item #1) rather than by nerfing it further. Every one of these
-numbers is a FLOOR: the autopilot never taps, so it gets none of TIGHTEN's upside
-and pays none of its cost.
+**THERE ARE LEVELS NOW, AND THAT CHANGED WHAT THE NUMBERS MEAN.** A level is
+**two boss kills**, it starts the army small again, and it ends on a card that
+offers one of three permanent upgrades. The old headline measure — median troops
+at the 110-second mark — is meaningless under that: the army resets every level,
+so it reports whatever point of whatever level the clock stopped in.
 
-**TRUST THE WIPE RATE, NOT THE MEDIAN.** Those three samples are the same build
-measured three times, and the median moved 75% while the wipe count moved by one.
-The distribution has a long tail — a good run hits the 1200 cap and a stalled one
-never leaves single figures — so the median is dominated by how many runs happen
-to catch fire, and at n=32 that is still a coin toss. The wipe rate is a count of
-tail events and it is steady. Tune against it; quote the median as a range.
+**The measures that replaced it**, from `__overkill.sample(32, 110, 0.3)`:
 
-**This is the closest the economy has ever been to the brief, and it got there by
-adding content rather than by tuning numbers.** The median had fallen to 230 when
-a missed blue started costing you the number you had reached; bosses and ogres
-brought it back to 301 without touching a single reward constant. Do not "fix"
-the median by raising `REWARD_SPAN_BASE` — that lever was deliberately left alone
-and the number came right on its own.
+| | |
+|---|---|
+| Runs wiped | **2 of 32** |
+| Runs clearing at least one level in 110 s | **13 of 32** |
 
-**The noise band is much wider than n=32.** This was first written as "±25% at
-n=16" and the three samples above show it is worse than that: 254 to 445 at n=32
-on an unchanged build. A sixteen-run sample cannot resolve a 12% tuning change
-and a thirty-two-run one cannot resolve a 50% one. Do not chase a median inside
-that band; measure a change by what it does to the wipe count, and if the median
-is genuinely the question, run several samples and quote the spread.
+`sample()` now resets the level AND the perks between runs — without that, run 30
+was played at level 30 by an army carrying thirty upgrades, and the sample
+measured a difficulty ramp rather than thirty-two comparable runs.
+
+**A level currently takes longer than 110 seconds at bot skill**, which is why
+only 13 in 32 clear one. That is the number to tune against next, and the brief's
+90-second-to-two-minute target now applies to a LEVEL rather than to a run.
+
+**THE HORDE IS THE DOMINANT DIFFICULTY LEVER AND IT IS A SHARP ONE.** Bosses
+arrive with an escort of walker packs, and the size of that escort moves the wipe
+rate further and faster than anything else in the game: four packs at level one
+measured 5 wipes in 32 with under a third of runs clearing a level; two packs
+measured 2 wipes with nearly half clearing. It sits at three, scaling to six by
+level four. Re-measure after touching it.
 
 **The failure mode is a STALL, not a wipe.** `min` is 1 in most samples: a run
 that never grew, because filling a reward needs committed fire and a squad that
@@ -100,38 +98,33 @@ guardrails, the architecture invariants, and how to verify work.
 Ranked. Nothing here is blocked on Mischa except items 3 and 4, which are
 product calls rather than engineering ones.
 
-### 1. LEVELS, and the difficulty they are supposed to carry
+### 1. Tune the level ramp — the structure is built, the numbers are not
 
-The pacing plan in [`docs/pacing-proposal.md`](pacing-proposal.md) is done except
-for its last piece. The conductor owns the corridor (`mechanics/director.ts`),
-penalties are proportional and capped per row, the reward span is sub-linear, and
-`__overkill.sample()` measures a failure rate instead of arguing about one.
+A level is **two boss kills**; it starts the army at `1 + 8×(level−1)` plus perks,
+and it runs the row composer at a difficulty clock of `elapsed + 25×(level−1)`
+seconds, so level 3 opens where level 1 was a minute in. Clearing one puts up a
+card with the run's stats and three permanent upgrades; losing one offers RETRY
+(keeps the level and the perks) or START OVER.
 
-What is missing is the **level** itself. Mischa's answer specced failure rates in
-plateauing bands — 1 in 8 at levels 1–2, easing to 1 in 3 by 16–21, implying a
-~21-level game — and there is no level concept in the code to hang those on. The
-only difficulty axis is `elapsed`, which drives `PENALTY_BANDS` in tiers of 25
-seconds. That accidentally produces the right SHAPE (a run ramps through the
-bands) but it cannot express "level 7 is harder than level 3 from its first
-second", and it means a long level and a hard level are the same thing.
+Rather than rewrite `PENALTY_BANDS` and `ROW_WIDTHS` to take a level — a change
+that would have invalidated every measurement this project has made — a level
+ADDS to the elapsed time the composer is told about. Same tables, same tuning, a
+new axis. `ROW_WIDTHS` is still the strongest untouched lever if the bands need
+to diverge from the clock.
 
-Concretely, this wants: a level number on `WorldState`, `PENALTY_BANDS` and the
-director's beat weights selected by it rather than by `elapsed`, an end-of-level
-boundary (the boss bar is the obvious place), and the retry/start-over choice
-Mischa asked for. `sample()` is already the instrument that says whether each
-band lands on its target rate.
+What needs doing, in order:
 
-Read `director.ts`'s header before changing the beat cycle: the old three-timer
-schedule was over-subscribed by ~50% against any legible gap, so content density
-had to drop, and the gap between two placements depends on the PAIR (16 m
-gate-to-gate, 11 m otherwise) because what needs separating is decisions, not
-objects.
-
-The lever the level system most needs is already in place and unused:
-`ROW_WIDTHS` in `mechanics/gates.ts` decides how many segments a row has, and a
-row's width is now literally how avoidable it is (2 segments leave 6.5 m of clear
-road, 4 leave 1.8 m). It is currently indexed by the `elapsed` tier. Point it at
-a level number and the failure-rate bands become tunable in one table.
+1. **A level takes longer than 110 seconds at bot skill** — only 13 runs in 32
+   clear one. The brief's 90-second-to-two-minute target now applies to a level,
+   so either the boss cadence tightens or `BOSSES_PER_LEVEL` drops to one for the
+   first few levels.
+2. **The per-level failure bands are unmeasured.** The brief wants 1 in 8 at
+   levels 1–2 easing to 1 in 3 by 16–21; `sample()` currently reports one blended
+   rate. It needs a per-level breakdown before those bands can be said to be hit.
+3. **Perks are three ranks of the same three things.** That is a clear upgrade
+   path and a shallow one. The interesting version adds perks that change how the
+   game is played rather than how big it starts — a longer TIGHTEN, focus that
+   drains slower, a shield that eats one red row.
 
 ### 1a. Second-to-second play — the first two are BUILT; five remain
 
@@ -262,6 +255,7 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
+| `ui/levelcard.ts` | The level pill, the cleared/failed screen, and the three upgrade cards. Reports which button was pressed; owns none of the run. |
 | `ui/streak.ts` | The multiplier chip, top right. Counts rows the player came out ahead on; one bad row resets it. |
 | `ui/commander.ts` | The Commander. Files reports after things resolve, never during, and never twice running. |
 | `ui/skills.ts` | The focus meter and the tighten pill, bottom-centre. The state of the player's own controls — not "show, don't tell" territory, since a control whose availability you cannot see is one you do not use. |
@@ -640,6 +634,28 @@ game's existing word for "this takes troops off you", so a red silhouette is
 legible before any detail resolves, and it is the maximum separation from the
 player's own cream-and-blue crowd. An enemy the player cannot recognise cannot
 create a trade-off.
+
+**THE HUD IS THREE THINGS AGAIN.** Mischa's reference screenshots have a level
+pill, a crowd count and a mute button, and nothing else, ever. Ours had grown to
+nine permanent elements. It is now a level pill (top left) and the crowd count
+(top centre, blue, matching the reference), with everything else transient: the
+loadout chips appear when a value changes and leave after 3.4 s, the streak chip
+is invisible at 1×, the boss bar only exists during a boss, and the Commander is
+already a passing line. `#ui.is-carded` clears the lot in one switch while a
+level card is up — that rule spans five modules and lives in `ui/levelcard.ts`,
+because the card is the only thing that knows the state it applies to.
+
+**A CARD IS A SCENE CHANGE, SO THE HUD CUTS RATHER THAN FADES.** It is also the
+only version this project can verify: an offscreen browser pane starves CSS
+transitions exactly as it starves `requestAnimationFrame`, so a faded HUD
+photographs at whatever opacity the transition happened to reach — measured at
+0.22 four hundred milliseconds in.
+
+**THE HARNESS NEEDS ITS OWN PATH THROUGH EVERY SCREEN.** `harnessMode` is set for
+the duration of `autopilot()`, and both the wipe and the level-clear check it: a
+bot that hits a card sits on a paused game for the rest of its sample and reports
+it as a run that stalled. Anything that stops the world from now on needs the
+same treatment.
 
 **THE AUTOPILOT HAS NEVER CROSSED A GATE ROW. NOT ONCE.** Measured while wiring
 the streak: `clearPayouts()` then a 40-second `autopilot()` run produces **zero**

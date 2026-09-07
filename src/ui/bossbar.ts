@@ -226,7 +226,11 @@ function injectStyle(): void {
 const CSS = `
 .cok-boss {
   position: absolute;
-  top: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 10px);
+  /* SECOND ROW, not the first. The crowd count moved to top centre to match the
+     reference's HUD, and two things cannot own the same piece of screen — the
+     army's size is the number the player reads every second and the boss's is
+     the one they read for ten. */
+  top: calc(var(--safe-top, env(safe-area-inset-top, 0px)) + 52px);
   left: 50%;
   display: flex;
   align-items: center;

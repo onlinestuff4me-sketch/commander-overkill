@@ -60,6 +60,8 @@ import { createLoadout } from "./ui/loadout";
 import { createSkills } from "./ui/skills";
 import { createStreak } from "./ui/streak";
 import { createCommander } from "./ui/commander";
+import { createLevelCard } from "./ui/levelcard";
+import type { PerkOffer } from "./ui/levelcard";
 import { createNetPop } from "./ui/netpop";
 import { mountPerfOverlay } from "./ui/perf";
 import type { CanvasTexture, Mesh, MeshLambertMaterial } from "three";
@@ -108,6 +110,9 @@ const skills = createSkills(ui);
 const streak = createStreak(ui);
 // The joke the game is named after. Files reports; never breaks.
 const commander = createCommander(ui);
+// The level pill, the screen between levels, and the upgrade that screen exists
+// to offer — see ui/levelcard.ts.
+const levelCard = createLevelCard(ui);
 // The per-unit +1s say WHICH soldiers; they are bad at saying HOW MANY when a
 // row resolves three segments at once. This is the running total on top.
 const netPop = createNetPop(ui, stage.camera);
@@ -128,6 +133,7 @@ const renderables: System[] = [
   skills,
   streak,
   commander,
+  levelCard,
   netPop,
 ];
 
@@ -155,6 +161,7 @@ function payTroops(amount: number): void {
   // and the note on why it is a barrier streak rather than a casualty one.
   if (delta < 0 && before > 0 && -delta / before >= LOSS_REMARK_SHARE) commander.say("loss");
 
+  if (world.troops > biggestCrowd) biggestCrowd = world.troops;
   netPop.add(delta);
   if (delta > 0) {
     growthFx.play(squad.center, squad.radius);
@@ -581,6 +588,8 @@ boss.onKilled((kind) => {
   blastZ = boss.z;
   payTroops(Math.max(BOSS_REWARD_FLOOR, Math.round(world.troops * BOSS_REWARD_SHARE)));
   commander.say("boss");
+  bossesKilled++;
+  if (bossesKilled >= BOSSES_PER_LEVEL) clearLevel();
   if (kind === "brute") world.rocketeers += ROCKET_CREW * BOSS_CREW;
   else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
   else world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES * 3);
@@ -624,7 +633,7 @@ function tightenReady(): boolean {
 }
 
 bus.on("input:tap", () => {
-  if (state.state !== "running" || !tightenReady()) return;
+  if (state.state !== "running" || betweenLevels || !tightenReady()) return;
   tightenHold = TIGHTEN_TIME;
 });
 
@@ -679,6 +688,178 @@ function updateAbilities(dt: number): void {
       : -Math.min(FOCUS_DRAIN_MAX, speed - 1) * (dt / FOCUS_DRAIN_TIME);
   world.focus = clamp(world.focus + rate, 0, 1);
 }
+
+/* ── Levels and the upgrade path ──────────────────────────────────────────
+ *
+ * A LEVEL IS A NUMBER OF BOSSES, not a distance or a clock.
+ *
+ * The alternative — a level is N metres or N seconds — was what `elapsed`
+ * already did, and it is why the handoff has said for weeks that a long level
+ * and a hard level were the same thing. Ending a level on a boss kill instead
+ * gives the run a shape the player can feel arriving (the corridor goes quiet,
+ * a giant walks on, you beat it, the screen stops) and it makes "how far in am
+ * I" a thing you can answer by looking at the road rather than at a clock.
+ *
+ * Two, because that is what the reference's clear screen reports, and because at
+ * the boss cadence it works out at roughly 80 seconds a level — inside the
+ * 90-second-to-two-minute run the brief asks for.
+ */
+const BOSSES_PER_LEVEL = 2;
+
+/** The escort that walks in with a boss. One more pack per level, capped, so a
+ *  late boss arrives with a wall of bodies in front of it and an early one does
+ *  not bury a twenty-strong army. */
+const HORDE_PACKS = 3;
+const HORDE_PACK_SIZE = 12;
+/** Metres behind the boss the escort forms up. Far enough that they are visible
+ *  around it rather than inside it. */
+const HORDE_DEPTH = 5;
+
+/**
+ * Seconds of difficulty a completed level is worth.
+ *
+ * `PENALTY_BANDS` and `ROW_WIDTHS` in mechanics/gates.ts are indexed off elapsed
+ * time in 25-second tiers. Rather than rewrite both tables to take a level — a
+ * change that would invalidate every measurement this project has made — a level
+ * ADDS to the elapsed time the composer is told about. Level 3 therefore opens
+ * at the difficulty level 1 reached after a minute and a half, which is the
+ * "harder from its first second" property that was missing, with none of the
+ * tuning thrown away.
+ */
+const LEVEL_DIFFICULTY_SECONDS = 25;
+/** Troops a level hands you for each one already cleared. */
+const LEVEL_START_TROOPS = 8;
+
+/** What a level's worth of difficulty looks like to the row composer. */
+function difficultyClock(): number {
+  return world.elapsed + (world.level - 1) * LEVEL_DIFFICULTY_SECONDS;
+}
+
+/* --- perks: the upgrade path ------------------------------------------- */
+
+/**
+ * PERKS ARE PERMANENT AND THEY STACK. One is chosen at the end of every level,
+ * so by level five the army is measurably a different army — which is the whole
+ * point of a level structure over an endless run.
+ *
+ * They deliberately buy the three things the game already models separately:
+ * bodies, rate and power. Nothing here invents a fourth axis; the interesting
+ * part is which of the three you are lopsided in, and that is a decision the
+ * player now makes five times a run rather than one the barrels make for them.
+ */
+type PerkId = "men" | "rate" | "power";
+const perks: Record<PerkId, number> = { men: 0, rate: 0, power: 0 };
+
+/** Troops carried into a level, per rank of the `men` perk. */
+const PERK_MEN_TROOPS = 6;
+/** Extra gunners and rocketeers granted at the start of a level, per rank. */
+const PERK_RATE_CREW = 3;
+const PERK_POWER_CREW = 2;
+
+const ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+
+function perkOffers(): PerkOffer[] {
+  return [
+    {
+      id: "men",
+      icon: "🎖",
+      title: "REINFORCEMENTS",
+      rank: ROMAN[Math.min(perks.men + 1, ROMAN.length - 1)] ?? "",
+      detail: `Start each level with ${(perks.men + 1) * PERK_MEN_TROOPS} extra troops`,
+    },
+    {
+      id: "rate",
+      icon: "🔫",
+      title: "MINIGUN CREW",
+      rank: ROMAN[Math.min(perks.rate + 1, ROMAN.length - 1)] ?? "",
+      detail: `Start each level with ${(perks.rate + 1) * PERK_RATE_CREW} gunners`,
+    },
+    {
+      id: "power",
+      icon: "🚀",
+      title: "ROCKET CREW",
+      rank: ROMAN[Math.min(perks.power + 1, ROMAN.length - 1)] ?? "",
+      detail: `Start each level with ${(perks.power + 1) * PERK_POWER_CREW} rocketeers`,
+    },
+  ];
+}
+
+/* --- level state -------------------------------------------------------- */
+
+let bossesKilled = 0;
+let biggestCrowd = 0;
+/** Suspends the corridor while a card is up. The state machine stops `tick()`,
+ *  but the level has to remember it is between levels rather than paused. */
+let betweenLevels = false;
+/** True while the autopilot is driving. A wipe then restarts silently instead of
+ *  putting up a screen that nothing is going to press. */
+let harnessMode = false;
+
+const TEASERS: readonly string[] = [
+  "Level %L brings a bigger horde",
+  "Level %L: they have been waiting for you",
+  "Level %L brings heavier company",
+  "Level %L. The bridge does not get shorter",
+];
+
+function clearLevel(): void {
+  // The harness plays whole runs with nobody to press a button. It takes the
+  // level and the perk it would most likely have picked, and carries on — a
+  // paused game would otherwise silently eat the rest of a 110-second sample and
+  // report it as a run that stalled.
+  if (harnessMode) {
+    world.level++;
+    perks.men++;
+    resetRun();
+    return;
+  }
+  betweenLevels = true;
+  state.transition("paused");
+  // The bar belongs to a boss that is now dead, and the tick that would have
+  // hidden it does not run while the game is paused.
+  bossBar.hide();
+  bossShowing = false;
+  ui.classList.add("is-carded");
+  const next = world.level + 1;
+  levelCard.showCleared(
+    {
+      level: world.level,
+      biggestCrowd,
+      bosses: bossesKilled,
+      teaser: (TEASERS[(next - 2) % TEASERS.length] ?? "").replace("%L", String(next)),
+    },
+    perkOffers(),
+  );
+}
+
+function failLevel(): void {
+  betweenLevels = true;
+  state.transition("paused");
+  bossBar.hide();
+  bossShowing = false;
+  ui.classList.add("is-carded");
+  levelCard.showFailed(world.level);
+}
+
+levelCard.onChoice((choice) => {
+  if (choice.kind === "perk") {
+    const id = choice.id as PerkId;
+    if (id in perks) perks[id]++;
+    world.level++;
+  } else if (choice.kind === "restart") {
+    perks.men = 0;
+    perks.rate = 0;
+    perks.power = 0;
+    world.level = 1;
+  }
+  // "retry" keeps both the level and the perks: losing a level should cost the
+  // level, not the run's whole investment. That is the difference between a
+  // setback and a punishment.
+  betweenLevels = false;
+  ui.classList.remove("is-carded");
+  state.transition("running");
+  resetRun();
+});
 
 // ── Content pacing ─────────────────────────────────────────────────────────
 
@@ -740,7 +921,7 @@ let lastRowWasDry = false;
 function composeRow(maxCount?: number): number {
   const count = composeAutoRow(
     rowRng,
-    world.elapsed,
+    difficultyClock(),
     world.troops,
     gateBuffer,
     maxCount,
@@ -879,9 +1060,32 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
       // dev harness spawn during an encounter could.
       if (boss.active) return;
       const kind = BOSS_ORDER[bossIndex % BOSS_ORDER.length]!;
-      boss.spawn(kind, bossHp(kind, bossIndex), side !== 0 ? side : 1, z);
+      const dir = side !== 0 ? Math.sign(side) : 1;
+      boss.spawn(kind, bossHp(kind, bossIndex), dir, z);
       bossBar.reset(boss.maxHp);
       bossIndex++;
+
+      // A BOSS ARRIVES WITH A HORDE. In the reference the giant is backed by a
+      // mass of small enemies filling the road behind it, and that is most of
+      // why the moment reads as an army meeting an army rather than as one big
+      // health bar. They spawn BEHIND the boss so they walk out from around it,
+      // and on the kerb it is not holding — the boss owns one side, its escort
+      // owns the rest, and between them the road is genuinely contested.
+      const packs = HORDE_PACKS + Math.min(3, world.level - 1);
+      // Three packs at level one, six by level four. THE HORDE IS NOW THE
+      // DOMINANT DIFFICULTY LEVER and it is a sharp one: four packs at level one
+      // measured 5 wipes in 32 with under a third of runs clearing a level, and
+      // two packs measured 2 wipes with nearly half clearing. Re-measure after
+      // touching it; nothing else in the game moves the rate this far this fast.
+      for (let i = 0; i < packs; i++) {
+        const spread = ((i + 0.5) / packs) * 2 - 1;
+        enemies.spawnPack(
+          clamp(-dir * 0.35 + spread * 0.65, -0.9, 0.9),
+          z - HORDE_DEPTH - i * 1.6,
+          HORDE_PACK_SIZE,
+          walkerHp(),
+        );
+      }
       return;
     }
 
@@ -1075,7 +1279,22 @@ function noteGrowth(): void {
 }
 
 function resetRun(): void {
-  world.troops = START_TROOPS;
+  // A level STARTS here, so this is where the upgrade path is spent: perks are
+  // permanent and they are applied fresh every level rather than accumulated on
+  // the army, which keeps "what do I start with" a single readable expression.
+  // LEVEL 1 STILL OPENS ON ONE MAN. That beat is the reference's and it is the
+  // best thirty seconds the game has; it survives untouched at level 1 with no
+  // perks. Every level after it starts bigger, because the difficulty bands do
+  // too — and because a crew perk is worthless at one troop, where `armCarriers`
+  // correctly clamps three gunners down to one. The upgrade path needs bodies to
+  // hand the equipment to.
+  world.troops = START_TROOPS + perks.men * PERK_MEN_TROOPS + (world.level - 1) * LEVEL_START_TROOPS;
+  bossesKilled = 0;
+  biggestCrowd = world.troops;
+  // The difficulty clock is per LEVEL, not per session: `difficultyClock()` adds
+  // the level's own offset on top, so leaving elapsed running would compound the
+  // two and make level 3 open where level 6 should.
+  world.elapsed = 0;
   world.health = 1;
   barrels.clear();
   enemies.clear();
@@ -1091,8 +1310,8 @@ function resetRun(): void {
   pickupCursor = 0;
   lastRowWasDry = false;
   world.elites = 0;
-  world.gunners = 0;
-  world.rocketeers = 0;
+  world.gunners = perks.rate * PERK_RATE_CREW;
+  world.rocketeers = perks.power * PERK_POWER_CREW;
   world.tighten = 0;
   world.focus = 0;
   tightenHold = 0;
@@ -1362,7 +1581,10 @@ function tick(dt: number): void {
 
     if (world.troops <= 0) {
       wipes++;
-      resetRun();
+      // The calibration harness drives thousands of runs and must not stop on a
+      // card nobody is there to press. A real player gets the screen.
+      if (harnessMode) resetRun();
+      else failLevel();
     }
 }
 
@@ -1529,6 +1751,7 @@ function dodgeBoss(want: number): number {
 }
 
 function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
+  harnessMode = true;
   const dt = 1 / 60;
   const ticks = Math.round(seconds / dt);
   const samples: { t: number; troops: number }[] = [];
@@ -1541,6 +1764,7 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
   // settled — the measurement was of the pauses, not of the run.
   let focusSum = 0;
   let focusFull = 0;
+  const levelAtStart = world.level;
   // REACTION TIME, because a bot that re-decides sixty times a second is not a
   // measurement of the game — it is a measurement of the game played perfectly.
   // At reaction 0 the autopilot wiped 0 runs in 16 while a human playtester was
@@ -1569,12 +1793,18 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
       samples.push({ t: Number((i * dt).toFixed(1)), troops: world.troops });
     }
   }
+  harnessMode = false;
   return {
     samples,
     wipes: wipes - before,
     peak,
     worstDrop: Number(worstDrop.toFixed(3)),
     final: world.troops,
+    // THE MEASURE THAT REPLACED THE MEDIAN. With levels, the army resets every
+    // level, so "troops at the 110-second mark" is whatever point of whatever
+    // level the clock happened to stop in — a number with no meaning. How far
+    // the run GOT is the honest one.
+    levelsCleared: world.level - levelAtStart,
     meanFocus: Number((focusSum / Math.max(1, ticks)).toFixed(3)),
     fullFocusShare: Number((focusFull / Math.max(1, ticks)).toFixed(3)),
   };
@@ -1634,6 +1864,15 @@ if (import.meta.env.DEV) {
       setFocus(v: number): void {
         world.focus = clamp(v, 0, 1);
       },
+      /** Pose either level card without having to play a level to it. */
+      showCleared(): void {
+        biggestCrowd = Math.max(biggestCrowd, world.troops);
+        bossesKilled = BOSSES_PER_LEVEL;
+        clearLevel();
+      },
+      showFailed(): void {
+        failLevel();
+      },
       autopilot,
       /**
        * Play `runs` fresh runs of `seconds` each and report the distribution.
@@ -1644,18 +1883,34 @@ if (import.meta.env.DEV) {
        * economy was wrong; this is what replaces that with a number.
        */
       sample(runs = 12, seconds = 110, reaction = 0.3) {
-        const out: { final: number; peak: number; wiped: boolean }[] = [];
+        const out: { final: number; peak: number; wiped: boolean; levels: number }[] = [];
         for (let r = 0; r < runs; r++) {
           const before = wipes;
+          // BACK TO LEVEL 1 WITH NOTHING, every run. Without this the level and
+          // the perks carried between samples, so run 30 was played at level 30
+          // by an army with thirty upgrades — the sample measured a difficulty
+          // ramp rather than thirty-two comparable runs.
+          world.level = 1;
+          perks.men = 0;
+          perks.rate = 0;
+          perks.power = 0;
           resetRun();
           world.elapsed = 0;
           const run = autopilot(seconds, seconds, reaction);
-          out.push({ final: run.final, peak: run.peak, wiped: wipes - before > 0 });
+          out.push({
+            final: run.final,
+            peak: run.peak,
+            wiped: wipes - before > 0,
+            levels: run.levelsCleared,
+          });
         }
         const finals = out.map((r) => r.final).sort((a, b) => a - b);
+        const levels = out.map((r) => r.levels).sort((a, b) => a - b);
         return {
           runs: out.length,
           wiped: out.filter((r) => r.wiped).length,
+          medianLevels: levels[Math.floor(levels.length / 2)],
+          levels,
           median: finals[Math.floor(finals.length / 2)],
           min: finals[0],
           max: finals[finals.length - 1],
