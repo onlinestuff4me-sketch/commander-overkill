@@ -128,8 +128,16 @@ export function createStreak(parent: HTMLElement): StreakSystem {
         shown = text;
         value.textContent = text;
       }
+      // HIDDEN AT 1×, not dimmed. A dormant chip was the right call when it was
+      // the only new thing on the HUD; against a HUD being cut back to a level,
+      // a count and a mute button it is one more permanent object competing with
+      // the road. It appears when it is worth something.
       const cls =
-        broke > 0 ? "cok-streak is-broke" : m > 1 ? `cok-streak is-live${pop > 0 ? " is-pop" : ""}` : "cok-streak";
+        broke > 0
+          ? "cok-streak is-broke"
+          : m > 1
+            ? `cok-streak is-live${pop > 0 ? " is-pop" : ""}`
+            : "cok-streak is-idle";
       if (cls !== shownClass) {
         shownClass = cls;
         root.className = cls;
@@ -176,9 +184,10 @@ const CSS = `
   /* At 1× it is dormant rather than absent: a chip that appears out of nowhere
      on the second blue reads as a bug, and one that is always there teaches the
      player what it is before it matters. */
-  opacity: 0.45;
+  opacity: 0;
   transition: opacity 140ms ease-out, transform 140ms ease-out, color 140ms ease-out;
 }
+.cok-streak.is-idle { opacity: 0; }
 .cok-streak__x { font-size: 12px; opacity: 0.8; }
 .cok-streak.is-live {
   opacity: 1;

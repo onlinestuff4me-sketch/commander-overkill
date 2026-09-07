@@ -29,6 +29,17 @@ const STYLE_ID = "cok-loadout-style";
 /** Seconds a chip stays popped after its value changes. Matches the troop
  *  count's pulse so a barrel that pays both reads as one event. */
 const PULSE_TIME = 0.5;
+/**
+ * Seconds a chip stays on screen after its value last changed.
+ *
+ * THEY USED TO BE PERMANENT. Three chips down the left edge for the whole run is
+ * three things competing with the road for attention, and the reference's HUD is
+ * a level, a count and a mute button — nothing else, ever. Inventory is a thing
+ * you check when it changes, so it now appears when it changes and leaves. What
+ * you are carrying is legible in the world anyway: the men are visibly holding
+ * the weapons.
+ */
+const LINGER_TIME = 3.4;
 
 type Axis = "elites" | "rate" | "power";
 
@@ -38,6 +49,9 @@ interface Chip {
   shown: string;
   pulse: number;
   visible: boolean;
+  /** Seconds left on screen. A chip whose value has not moved lately goes away
+   *  — see LINGER_TIME. */
+  linger: number;
 }
 
 export interface LoadoutSystem extends System {
@@ -63,6 +77,7 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
       shown: "",
       pulse: 0,
       visible: false,
+      linger: 0,
     };
   }
 
@@ -85,10 +100,11 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
       if (chip.shown !== "") chip.pulse = PULSE_TIME;
       chip.shown = text;
       chip.value.textContent = text;
-    }
-    if (!chip.visible) {
-      chip.visible = true;
-      chip.root.classList.add("is-live");
+      chip.linger = LINGER_TIME;
+      if (!chip.visible) {
+        chip.visible = true;
+        chip.root.classList.add("is-live");
+      }
     }
   }
 
@@ -109,6 +125,13 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
       for (const axis of ["elites", "rate", "power"] as const) {
         const chip = chips[axis];
         if (chip.pulse > 0) chip.pulse -= dt;
+        if (chip.linger > 0) {
+          chip.linger -= dt;
+          if (chip.linger <= 0 && chip.visible) {
+            chip.visible = false;
+            chip.root.classList.remove("is-live");
+          }
+        }
       }
     },
 
