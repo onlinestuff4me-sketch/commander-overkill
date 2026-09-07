@@ -100,24 +100,29 @@ export interface WorldState {
    */
   level: number;
   /**
-   * HOW HARD THE CROWD IS SQUEEZED, 0..1. Owned by the game; the squad reads it
-   * and reshapes.
+   * FOCUS, 0..1. The player's one active ability. Owned by the game; the squad
+   * narrows by it and bullets harden by it.
    *
-   * The player's second verb. Crowd WIDTH is the hidden variable the whole
-   * combat model runs on — `laneCoverage()` decides what share of the curtain
-   * lands on a target, and `squadHalfWidth` decides how many gate segments a row
-   * charges for — and until this existed the player had no say in which side of
-   * that trade they were on. A wide army covers the road and pays every toll; a
-   * narrow one drills one hole and threads a gap.
-   */
-  tighten: number;
-  /**
-   * HOW STEADY THE CROWD HAS BEEN, 0..1. Owned by the game; bullets read it.
+   * IT USED TO BE TWO THINGS AND THAT WAS A MISTAKE. There was a TIGHTEN on the
+   * tap that squeezed the crowd, and a separate passive FOCUS that filled while
+   * the player held a line. Mischa's question was the whole review: "what's the
+   * difference?" — and the honest answer was that both concentrated fire and
+   * neither was legible as its own idea.
    *
-   * The other half of the same idea. Tighten is a reason to move; this is a
-   * reason not to. It fills while the crowd holds a line and drains when it
-   * dodges, and it makes the fire harder and narrower — so every second carries
-   * the question "do I break off for that, or hold and melt this?".
+   * Worse, the passive one rewarded NOT STEERING, which is the game's only
+   * input. Measured, the autopilot sat at full focus for 85% of the opening
+   * minute without trying, because the opening minute is empty. A bonus you hold
+   * most of the time for doing nothing is not a mechanic, it is a constant.
+   *
+   * So there is one: tap and the army compresses into a column AND its fire
+   * concentrates and hits harder, for a second and a half, on a cooldown. The
+   * narrowing IS the focusing, which is why it needs no second name.
+   *
+   * Crowd width is the hidden variable the whole combat model runs on —
+   * `laneCoverage()` decides what share of the curtain lands on a target and
+   * `squadHalfWidth` decides how many gate segments a row charges for — so this
+   * is the only thing in the game that lets the player choose which side of that
+   * trade to be on.
    *
    * Deliberately NOT fed into any hit-point model, for the same reason
    * `firepower` is not: it is a skill multiplier, and content that got tougher
@@ -165,7 +170,6 @@ export function createWorld(center: THREE.Vector3): WorldState {
     gunners: 0,
     rocketeers: 0,
     level: 1,
-    tighten: 0,
     focus: 0,
     zoom: 1,
   };

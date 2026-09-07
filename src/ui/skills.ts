@@ -30,7 +30,7 @@ const READY_FLASH = 0.45;
 export interface SkillsSystem extends System {
   /** Cooldown state, pushed in by the orchestrator each tick: 0 ready, 1 just
    *  spent. The HUD does not own the ability, only its picture. */
-  setTightenCooldown(fraction: number, active: boolean): void;
+  setCooldown(fraction: number, active: boolean): void;
   dispose(): void;
 }
 
@@ -42,8 +42,6 @@ export function createSkills(parent: HTMLElement): SkillsSystem {
   root.innerHTML = MARKUP;
   parent.appendChild(root);
 
-  const focusFill = root.querySelector<HTMLElement>(".cok-focus__fill")!;
-  const focusRoot = root.querySelector<HTMLElement>(".cok-focus")!;
   const pill = root.querySelector<HTMLElement>(".cok-tight")!;
   const sweep = root.querySelector<HTMLElement>(".cok-tight__sweep")!;
 
@@ -53,12 +51,11 @@ export function createSkills(parent: HTMLElement): SkillsSystem {
   let flash = 0;
   /** Last values written to the DOM, so a frame that changed nothing touches
    *  nothing — layout is the expensive part of a HUD, not the arithmetic. */
-  let shownFocus = -1;
   let shownCooldown = -1;
   let shownState = "";
 
   return {
-    setTightenCooldown(fraction, isActive) {
+    setCooldown(fraction, isActive) {
       cooldown = fraction;
       active = isActive;
     },
@@ -70,16 +67,7 @@ export function createSkills(parent: HTMLElement): SkillsSystem {
       if (flash > 0) flash = Math.max(0, flash - dt);
     },
 
-    render(_alpha, world: WorldState) {
-      const f = Math.round(world.focus * 100);
-      if (f !== shownFocus) {
-        shownFocus = f;
-        focusFill.style.width = `${f}%`;
-        // Full focus is the state worth noticing; anything short of it is just
-        // progress, so only the top of the meter gets to glow.
-        focusRoot.classList.toggle("is-full", f >= 99);
-      }
-
+    render(_alpha, _world: WorldState) {
       const c = Math.round(cooldown * 100);
       if (c !== shownCooldown) {
         shownCooldown = c;
@@ -99,9 +87,10 @@ export function createSkills(parent: HTMLElement): SkillsSystem {
   };
 }
 
+/** ONE CONTROL. There was a meter above this reading out a second, passive
+ *  ability; both it and the ability are gone — see `focus` in core/types.ts. */
 const MARKUP = `
-<div class="cok-focus"><div class="cok-focus__fill"></div><span class="cok-focus__label">FOCUS</span></div>
-<div class="cok-tight is-ready"><div class="cok-tight__sweep"></div><span>TIGHTEN</span></div>
+<div class="cok-tight is-ready"><div class="cok-tight__sweep"></div><span>FOCUS</span></div>
 `;
 
 function injectStyle(): void {
@@ -131,33 +120,6 @@ const CSS = `
   pointer-events: none;
   font: 800 11px/1 "Arial Black", "Helvetica Neue", Helvetica, Arial, sans-serif;
   letter-spacing: 0.08em;
-}
-.cok-focus {
-  position: relative;
-  width: 132px;
-  height: 14px;
-  border-radius: 999px;
-  background: rgba(10, 18, 30, 0.55);
-  overflow: hidden;
-}
-.cok-focus__fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 0%;
-  background: linear-gradient(90deg, #2f7fd6, #7fd0ff);
-  transition: width 60ms linear;
-}
-.cok-focus.is-full .cok-focus__fill {
-  background: linear-gradient(90deg, #ffd447, #fff3b0);
-  box-shadow: 0 0 10px rgba(255, 212, 71, 0.85);
-}
-.cok-focus__label {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: rgba(255, 255, 255, 0.85);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 .cok-tight {
   position: relative;
