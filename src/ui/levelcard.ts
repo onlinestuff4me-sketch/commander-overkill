@@ -22,6 +22,10 @@ import type { System } from "../core/types";
 
 const STYLE_ID = "cok-level-style";
 
+/** Seconds the boss-rush banner holds. Long enough to read two words at arm's
+ *  length, short enough to be gone before the first boss is in range. */
+const BANNER_TIME = 1.9;
+
 /** What a finished level is summarised by. Deliberately two numbers — the
  *  reference shows exactly two, and a debrief that needs reading is a debrief
  *  nobody reads. */
@@ -53,6 +57,11 @@ export interface LevelCardSystem extends System {
   showCleared(summary: LevelSummary, perks: readonly PerkOffer[]): void;
   /** Show the failed screen: retry this level, or start over from level 1. */
   showFailed(level: number): void;
+  /** Flash a headline over the road WITHOUT pausing anything. The boss rush
+   *  announces itself this way: the corridor keeps moving under it, because the
+   *  point of the warning is that something is coming, not that the game has
+   *  stopped. */
+  banner(text: string): void;
   hide(): void;
   readonly visible: boolean;
   onChoice(fn: (choice: LevelChoice) => void): void;
@@ -70,6 +79,11 @@ export function createLevelCard(parent: HTMLElement): LevelCardSystem {
   const card = document.createElement("div");
   card.className = "cok-card";
   parent.appendChild(card);
+
+  const bannerEl = document.createElement("div");
+  bannerEl.className = "cok-banner";
+  parent.appendChild(bannerEl);
+  let bannerLeft = 0;
 
   let visible = false;
   let choiceFn: ((choice: LevelChoice) => void) | null = null;
@@ -135,6 +149,12 @@ export function createLevelCard(parent: HTMLElement): LevelCardSystem {
       visible = true;
     },
 
+    banner(text) {
+      bannerEl.textContent = text;
+      bannerEl.classList.add("is-live");
+      bannerLeft = BANNER_TIME;
+    },
+
     hide() {
       visible = false;
       card.classList.remove("is-live");
@@ -144,7 +164,12 @@ export function createLevelCard(parent: HTMLElement): LevelCardSystem {
       choiceFn = fn;
     },
 
-    update(_dt, _world) {},
+    update(dt, _world) {
+      if (bannerLeft > 0) {
+        bannerLeft -= dt;
+        if (bannerLeft <= 0) bannerEl.classList.remove("is-live");
+      }
+    },
 
     render(_alpha, world) {
       if (world.level !== shownLevel) {
@@ -156,6 +181,7 @@ export function createLevelCard(parent: HTMLElement): LevelCardSystem {
     dispose() {
       pill.remove();
       card.remove();
+      bannerEl.remove();
     },
   };
 }
@@ -204,6 +230,25 @@ const CSS = `
      whatever opacity the transition happened to reach. */
   visibility: hidden;
   opacity: 0;
+}
+.cok-banner {
+  position: absolute;
+  top: 26%;
+  left: 50%;
+  transform: translate(-50%, 8px) scale(0.9);
+  font: 900 34px/1 "Arial Black", "Helvetica Neue", Impact, sans-serif;
+  color: #ff5a45;
+  -webkit-text-stroke: 5px #180a0a;
+  paint-order: stroke fill;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 15;
+}
+.cok-banner.is-live {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
 }
 .cok-card {
   position: absolute;

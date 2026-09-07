@@ -118,24 +118,34 @@ export interface Beat {
   readonly trail: number;
   /** Relative likelihood of being picked. Not a probability — normalised. */
   readonly weight: number;
+  /**
+   * First level this beat may appear on.
+   *
+   * THIS IS HOW A LEVEL INTRODUCES SOMETHING NEW. Level one is gates, barrels
+   * and walkers and nothing else — a player learning the game meets one idea at
+   * a time. Elites arrive on level two, bikers on three, ogres on four, and the
+   * loudest phrases last. A level that plays the same as the one before it is a
+   * level in name only.
+   */
+  readonly unlock: number;
 }
 
 export const BEATS: readonly Beat[] = [
   // The choice is the whole game, so it gets to happen on clear road with
   // nothing competing for the eye. The most common beat, deliberately.
-  { name: "decision", places: ["gate"], trail: 0, weight: 4 },
+  { name: "decision", places: ["gate"], trail: 0, weight: 4 , unlock: 1 },
 
   // Somewhere for the guns to matter, with no decision on top of it.
-  { name: "combat", places: ["barrels", "walkers"], sides: [1, 1], trail: 4, weight: 2 },
+  { name: "combat", places: ["barrels", "walkers"], sides: [1, 1], trail: 4, weight: 2 , unlock: 1 },
 
   // Gold-rimmed heavies. They advance slowly and soak, so they are the beat
   // that asks whether you invested in firepower rather than in bodies.
-  { name: "heavies", places: ["elites"], trail: 5, weight: 2 },
+  { name: "heavies", places: ["elites"], trail: 5, weight: 2 , unlock: 2 },
 
   // Motorbikes, which close much faster than anything else on the road. The
   // only enemy that punishes reading the board late rather than reading it
   // wrong — which is a different mistake, and worth having one of.
-  { name: "charge", places: ["bikers", "gate"], sides: [1, -1], trail: 4, weight: 1 },
+  { name: "charge", places: ["bikers", "gate"], sides: [1, -1], trail: 4, weight: 1 , unlock: 3 },
 
   // An ogre standing squarely in front of a barrel cluster. It soaks most of an
   // approach, so shooting through it costs the barrels behind it and going
@@ -147,37 +157,37 @@ export const BEATS: readonly Beat[] = [
   // the run's failure rate, from 4 wipes in 32 to 0. An enemy that soaks fire
   // should make a run harder; putting one in place of a decision made it
   // easier, which is a thing worth knowing before adding the next beat.
-  { name: "heavyguard", places: ["ogres", "barrels"], sides: [1, 1], trail: 5, weight: 1 },
+  { name: "heavyguard", places: ["ogres", "barrels"], sides: [1, 1], trail: 5, weight: 1 , unlock: 4 },
 
   // The same body used the other way: a heavy on one kerb and a decision on the
   // other, so the cost of taking the row is walking past something you did not
   // kill.
-  { name: "bulwark", places: ["ogres", "gate"], sides: [1, -1], trail: 4, weight: 1 },
+  { name: "bulwark", places: ["ogres", "gate"], sides: [1, -1], trail: 4, weight: 1 , unlock: 4 },
 
   // The two mechanics interacting: shoot through the cover, then immediately
   // choose. This is the beat a fixed cycle could only produce by accident.
-  { name: "gauntlet", places: ["barrels", "gate"], sides: [1, 1], trail: 2, weight: 2 },
+  { name: "gauntlet", places: ["barrels", "gate"], sides: [1, 1], trail: 2, weight: 2 , unlock: 1 },
 
   // Two decisions on OPPOSITE kerbs. Taking both is not physically available —
   // a full crossing eats the whole gap — so this is the beat that asks the
   // player to give one of them up on purpose.
-  { name: "fork", places: ["gate", "gate"], sides: [1, -1], trail: 3, weight: 2 },
+  { name: "fork", places: ["gate", "gate"], sides: [1, -1], trail: 3, weight: 2 , unlock: 3 },
 
   // Nothing at all. Cheap to build, and it is what makes the rest read.
-  { name: "rest", places: [], trail: 16, weight: 1 },
+  { name: "rest", places: [], trail: 16, weight: 1 , unlock: 1 },
 
   // The either/or, on one plane: a gate row on one side and a pack of walkers
   // standing in the gap beside it. Threading the gap means fighting through
   // bodies; taking the row means paying whatever the row asks.
-  { name: "blockade", places: ["blockade"], trail: 5, weight: 2 },
+  { name: "blockade", places: ["blockade"], trail: 5, weight: 2 , unlock: 2 },
 
   // Growth or firepower, and only one of them. The barrels carry a pickup and
   // the row carries troops, on the same plane, on opposite kerbs.
-  { name: "crossroads", places: ["crossroads"], trail: 6, weight: 2 },
+  { name: "crossroads", places: ["crossroads"], trail: 6, weight: 2 , unlock: 4 },
 
   // Loud on purpose: cover, a wave, and a decision in quick succession, with
   // the wave planted where the cover was so the guns are already pointed at it.
-  { name: "surge", places: ["walkers", "barrels", "gate"], sides: [1, 1, -1], trail: 6, weight: 1 },
+  { name: "surge", places: ["walkers", "barrels", "gate"], sides: [1, 1, -1], trail: 6, weight: 1 , unlock: 5 },
 ];
 
 /**
@@ -252,35 +262,21 @@ const GATE_TO_GATE_SPACING = 16;
 const SPACING_JITTER = 3;
 
 /**
- * Metres of road between bosses, and before the first one.
+ * THE DIRECTOR NO LONGER SCHEDULES BOSSES, AND THAT IS THE POINT.
  *
- * BOSSES ARE PUNCTUATION, WHICH IS WHY THEY ARE NOT IN THE BEAT TABLE. Every
- * other placement is a weighted roll, and that is right for texture — but a
- * shape you can feel needs events that arrive when the run says so, not when
- * the dice say so. At the default 6 m/s these work out to a boss at ~28 s and
- * then one every ~35 s, so a 90 s run meets two and a two-minute run meets
- * three, each one harder than the last.
+ * It used to place one every 210 m, which made a boss punctuation scattered
+ * through a level rather than the thing a level is BUILDING TOWARD. Mischa's
+ * note was exact: "it doesn't look like we have a big boss and horde moment that
+ * you have to beat that culminates the level."
  *
- * The first is deliberately later than the interval: the opening is where the
- * army is built, and a boss before there is anything to fight it with is not a
- * decision, it is a wall.
+ * So a level now has two phases and the orchestrator owns them. This module
+ * conducts the APPROACH — the corridor of gates, barrels and enemies where the
+ * army is built — and stops placing entirely when the finale begins. The boss
+ * rush is not content on a schedule; it is the end of the level.
+ *
+ * `"boss"` stays in the Placement union because `place()` still knows how to put
+ * one on the road and the debug harness still poses them. Nothing here emits it.
  */
-const FIRST_BOSS = 168;
-const BOSS_INTERVAL = 210;
-
-/**
- * Clear road BEFORE a boss, and only a little after it.
- *
- * The silence in front is most of what makes an arrival read as one: 22 m is
- * nearly four seconds of empty bridge with the boss already visible at the far
- * end of it. Almost nothing follows it, and that is deliberate and load-bearing
- * — the corridor keeps delivering prizes THROUGHOUT the fight, onto the kerb the
- * boss is not standing on. An empty road during a boss would turn the encounter
- * into a shooting gallery with one target; a road still offering barrels is what
- * makes every second of fire poured into the boss a second of greed given up.
- */
-const BOSS_APPROACH = 22;
-const BOSS_TRAIL = 6;
 
 export interface DirectorState {
   /**
@@ -293,6 +289,9 @@ export interface DirectorState {
    * bug this module exists to prevent.
    */
   advance(metres: number): Cue | null;
+  /** Which level's roster to draw from. Beats unlock as levels rise — see the
+   *  `unlock` field on Beat. */
+  setLevel(level: number): void;
   /** Back to the start of the cycle. For a run restart. */
   reset(): void;
   /** Placements made since the last reset. Diagnostics and tests. */
@@ -321,7 +320,9 @@ export function createRng(seed: number): () => number {
 
 export function createDirector(seed = 0x5eed): DirectorState {
   const rng = createRng(seed);
-  const totalWeight = BEATS.reduce((a, b) => a + b.weight, 0);
+  let level = 1;
+  let roster: readonly Beat[] = BEATS.filter((b) => b.unlock <= level);
+  let totalWeight = roster.reduce((a, b) => a + b.weight, 0);
 
   let beat: Beat = BEATS[0]!;
   let step = 0;
@@ -336,16 +337,6 @@ export function createDirector(seed = 0x5eed): DirectorState {
   let trail = 0;
   /** Placements since the last gate. Gates are the game; see DRY_LIMIT. */
   let sinceGate = 0;
-  /** Metres since the last boss. Counts road, not placements, so the boss
-   *  cadence is immune to whatever the beat table happens to be rolling. */
-  let sinceBoss = 0;
-  let bossDue = FIRST_BOSS;
-  /** Which kerb the next boss takes. Alternated rather than rolled, so a run
-   *  cannot put three bosses in a row on the same side and teach the player to
-   *  hold one thumb position. */
-  let bossSide = 1;
-  /** True once the approach gap has been opened and the boss lands next. */
-  let bossArmed = false;
 
   /**
    * Weighted pick, with two structural refusals.
@@ -359,7 +350,7 @@ export function createDirector(seed = 0x5eed): DirectorState {
     const neededGate = sinceGate >= DRY_LIMIT;
     for (let attempt = 0; attempt < 12; attempt++) {
       let roll = rng() * totalWeight;
-      for (const b of BEATS) {
+      for (const b of roster) {
         roll -= b.weight;
         if (roll > 0) continue;
         if (b.name === lastName && NO_REPEAT.has(b.name)) break;
@@ -373,8 +364,8 @@ export function createDirector(seed = 0x5eed): DirectorState {
     // Fall back to the plainest beat that satisfies the constraint rather than
     // to BEATS[0] blindly, so the guarantee holds even on an unlucky streak.
     return neededGate
-      ? (BEATS.find((b) => hasGate(b.places[0] ?? "barrels")) ?? BEATS[0]!)
-      : BEATS[0]!;
+      ? (roster.find((b) => hasGate(b.places[0] ?? "barrels")) ?? roster[0] ?? BEATS[0]!)
+      : (roster[0] ?? BEATS[0]!);
   }
 
   /**
@@ -408,46 +399,17 @@ export function createDirector(seed = 0x5eed): DirectorState {
   }
 
   return {
+    setLevel(next) {
+      if (next === level) return;
+      level = Math.max(1, Math.floor(next));
+      roster = BEATS.filter((b) => b.unlock <= level);
+      totalWeight = roster.reduce((a, b) => a + b.weight, 0);
+    },
+
     advance(metres) {
       pending += metres;
-      sinceBoss += metres;
       if (pending < gap) return null;
       pending -= gap;
-
-      // A boss pre-empts the beat table, and it does so in two steps: the first
-      // opportunity after it comes due is spent opening the approach, and the
-      // one after that places it. Widening the gap retroactively is not
-      // available — by the time the boss is due, the placement in front of it
-      // has already been made — so the gap is bought with a skipped slot.
-      // Armed one approach-length EARLY, so that the distance the constants name
-      // is the distance the boss is PLACED at rather than where it started being
-      // set up. Without this the approach gap and the placement grid pushed the
-      // first boss 44 m past its nominal 168.
-      if (sinceBoss >= bossDue - (bossArmed ? 0 : BOSS_APPROACH)) {
-        if (!bossArmed) {
-          bossArmed = true;
-          gap = BOSS_APPROACH;
-          // Normally the approach is bought with a skipped slot. If the world
-          // has jumped far enough to already owe that distance — a resumed tab —
-          // it is paid immediately instead, so a single huge step still places
-          // exactly one thing rather than nothing.
-          if (pending < gap) return null;
-          pending -= gap;
-        }
-        bossArmed = false;
-        sinceBoss = 0;
-        bossDue = BOSS_INTERVAL;
-        const side = bossSide;
-        bossSide = -bossSide;
-        count++;
-        // A boss is the biggest decision the corridor makes, so it resets the
-        // dry streak. Without this the limiter would treat a fifteen-second
-        // encounter as fifteen seconds of nothing happening and force a gate
-        // row into the middle of it.
-        sinceGate = 0;
-        gap = BOSS_TRAIL + SPACING;
-        return { what: "boss", side };
-      }
 
       ensureReady();
       const placement = beat.places[step];
@@ -468,7 +430,7 @@ export function createDirector(seed = 0x5eed): DirectorState {
     },
 
     reset() {
-      beat = BEATS[0]!;
+      beat = roster[0] ?? BEATS[0]!;
       step = 0;
       phraseSide = 1;
       lastName = "";
@@ -477,10 +439,6 @@ export function createDirector(seed = 0x5eed): DirectorState {
       gap = 0;
       trail = 0;
       sinceGate = 0;
-      sinceBoss = 0;
-      bossDue = FIRST_BOSS;
-      bossArmed = false;
-      bossSide = 1;
     },
 
     get count() {
