@@ -968,10 +968,6 @@ class Bullets implements BulletSystem, BulletView {
   /** Damage multiplier from weapon pickups, refreshed each tick from the world
    *  so `#shootFrom` does not need the world threaded through it. */
   #firepower = 1;
-  /** Copy of `world.focus` for the frame, so the fire loop reads a number
-   *  rather than the world. */
-  #focus = 0;
-
   constructor(scene: THREE.Scene) {
     this.#scene = scene;
     for (let i = 0; i < BULLET_POOL; i++) this.#free[i] = BULLET_POOL - 1 - i;
@@ -1134,7 +1130,6 @@ class Bullets implements BulletSystem, BulletView {
     this.#muzzleReported = false;
 
     this.#firepower = Math.max(0, world.firepower);
-    this.#focus = clamp01(world.focus);
     if (!this.#enabled) return;
 
     // If the squad system is not wired up yet, infer the blob so the module is
@@ -1169,11 +1164,7 @@ class Bullets implements BulletSystem, BulletView {
     this.#fireClock = next - Math.floor(next);
 
     const dart = tier === 2;
-    // FOCUS NARROWS THE STREAM AS WELL AS HARDENING IT. The damage is the
-    // mechanic; this is what makes it visible — a focused army's fire is a tight
-    // bright column and a scattered one is a haze, so the player can read their
-    // own meter off the screen without looking at a bar.
-    const spread = (dart ? t.tier2Spread : t.tier01Spread) * (1 - FOCUS_NARROW * this.#focus);
+    const spread = dart ? t.tier2Spread : t.tier01Spread;
     const rolled = spread * clamp01(t.shotJitterFraction);
     const fixed = spread - rolled;
     // No divergence term any more. A stream's aim is jitter only; where it
@@ -1594,24 +1585,14 @@ class Bullets implements BulletSystem, BulletView {
     this.damage[id] =
       (dart ? t.dartDamage : t.tracerDamage) *
       this.#firepower *
-      (1 + FOCUS_DAMAGE * this.#focus) *
       (rocket ? ROCKET_DAMAGE : 1);
     // Length tracks speed so a faster round is a longer streak, and a little
     // per-bullet variance stops the stream reading as clones. A rocket is scaled
     // UP against that rule on purpose — it is slow, so speed alone would make it
     // the smallest thing on screen when it needs to be the largest.
     const nominal = rocket ? t.dartSpeed * ROCKET_SPEED_SCALE : dart ? t.dartSpeed : t.tracerSpeed;
-    // FOCUS FATTENS THE ROUND, and this is the readable half of the mechanic.
-    // Narrowing the spread turned out to be nearly invisible: the stream's width
-    // is dominated by the crowd's own width — every soldier fires from where he
-    // is standing — so the aim jitter it scales is a small share of it, measured
-    // at 17% narrower at full focus. Size is what the eye actually reads at
-    // forty pixels, so a focused army fires visibly fatter, harder rounds.
     this.#size[id] =
-      (speed / nominal) *
-      (0.88 + Math.random() * 0.24) *
-      (1 + FOCUS_FATTEN * this.#focus) *
-      (rocket ? ROCKET_SIZE : 1);
+      (speed / nominal) * (0.88 + Math.random() * 0.24) * (rocket ? ROCKET_SIZE : 1);
 
     // The caller decides — the flash stride is derived from the live shot rate
     // so one soldier flashes on every round and a thousand do not strobe.
@@ -1709,25 +1690,6 @@ export function totalShotsPerSecond(tier: WeaponTier, troops: number, t: BulletT
  * The elite has to be worth more than the bodies that came with it or there is
  * no reason to prefer a barrel over a blue gate.
  */
-/**
- * What full FOCUS is worth: +55% damage and a stream 70% narrower.
- *
- * Sized against the thing it competes with. A dodge costs the player their focus
- * and takes about a second to rebuild, so focus has to be worth roughly what a
- * second of fire is worth — enough that giving it up to chase a barrel is a real
- * decision, and not so much that the optimal play is to stop steering.
- *
- * MEASURED DOWN FROM 1.55×. Sampled every tick, the autopilot holds a mean focus
- * of 0.88 over the first quiet minute and 0.50 once the corridor is busy, so
- * this multiplier is live for most of a run rather than occasionally — and at
- * 1.55× that took the run's wipe rate from 4 in 32 to 2. 1.4× keeps it a real
- * reward without quietly rewriting the difficulty curve.
- *
- * NOT in any hit-point model, deliberately — see `focus` in core/types.ts.
- */
-const FOCUS_DAMAGE = 0.4;
-const FOCUS_NARROW = 0.7;
-const FOCUS_FATTEN = 0.45;
 
 export const ELITE_SHOOTER_WEIGHT = 4;
 

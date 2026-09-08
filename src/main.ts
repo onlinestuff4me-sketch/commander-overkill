@@ -20,7 +20,7 @@ import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
 import type { System, WeaponTier } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
-import { createCorridor, CORRIDOR_HALF_WIDTH } from "./mechanics/lane";
+import { createCorridor, CORRIDOR_HALF_WIDTH, CORRIDOR_LENGTH } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
 import {
   createBullets,
@@ -57,7 +57,6 @@ import { createGrowthFx } from "./entities/growthfx";
 import { createBossBar } from "./ui/bossbar";
 import { createTroopCount } from "./ui/troopcount";
 import { createLoadout } from "./ui/loadout";
-import { createSkills } from "./ui/skills";
 import { createStreak } from "./ui/streak";
 import { createCommander } from "./ui/commander";
 import { createLevelCard } from "./ui/levelcard";
@@ -102,9 +101,6 @@ const troopCount = createTroopCount(ui);
 // Crowd size is one axis; what the crowd is CARRYING is the other, and until
 // this existed the second one was invisible — see ui/loadout.ts.
 const loadout = createLoadout(ui);
-// The state of the player's own controls. Not "show, don't tell" territory — a
-// control whose availability you cannot see is a control you do not use.
-const skills = createSkills(ui);
 // Going around a row is free, which left the safe line with nothing at stake.
 // This is what prices it — see ui/streak.ts.
 const streak = createStreak(ui);
@@ -130,7 +126,6 @@ const renderables: System[] = [
   bossBar,
   troopCount,
   loadout,
-  skills,
   streak,
   commander,
   levelCard,
@@ -146,6 +141,12 @@ const renderables: System[] = [
  * MAX_TROOPS must not promise troops that never arrived.
  */
 function payTroops(amount: number): void {
+  // MEDICS APPLY HERE, at the one seam every reward and every casualty passes
+  // through, so a rank of it is worth the same against a red gate, a walker that
+  // reached the line and a boss that broke through. A defensive upgrade that
+  // only covered one of those would be a footnote; this one is legible as
+  // "you lose fewer men".
+  if (amount < 0 && perks.medic > 0) amount *= 1 - medicSave(perks.medic);
   const before = world.troops;
   world.troops = clamp(world.troops + amount, 0, MAX_TROOPS);
   const delta = world.troops - before;
@@ -218,9 +219,9 @@ const LOSS_REMARK_SHARE = 0.1;
  *
  * Net-positive is the rule that survives that, and it is a better rule anyway:
  * it is achievable at every size, it is broken by a genuinely bad row rather
- * than by geometry, and TIGHTEN is the thing that makes a bad row into a good
- * one — squeeze onto the blue and the red goes past you. The multiplier is what
- * pays for learning that.
+ * than by geometry, and STEERING is the thing that turns a bad row into a good
+ * one — put the crowd's weight on the blue and the red only clips its edge. The
+ * multiplier is what pays for learning that.
  *
  * A row's segments all resolve inside one `gates.update`, so they are totalled
  * here and judged in `tick()` immediately after it.
@@ -341,7 +342,7 @@ function armCarriers(): void {
 }
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
-  payTroops(barrelPayout(maxHp));
+  payTroops(Math.round(barrelPayout(maxHp) * (1 + perks.salvage * PERK_SALVAGE_SHARE)));
   if (tag < 0) return;
 
   const kind = pickups.kindOf(tag);
@@ -401,6 +402,12 @@ enemies.onBreached((_id, kind, _hp, bodies) => {
   // once the army is established enough to do something about it.
   if (world.troops < MERCY_TROOPS) return;
   const weight = (BREACH_COST[kind] ?? 1) * Math.max(1, bodies);
+  if (weight >= HITSTOP_BREACH_WEIGHT) {
+    hitStop(HITSTOP_BREACH);
+    // Straight down. A breach arrives from up the road rather than from a side,
+    // so there is no sideways direction to honour — the crowd just takes it.
+    zoom.punch(0, -1, PUNCH_BREACH);
+  }
   payTroops(-Math.max(1, Math.round(world.troops * BREACH_SHARE * weight)));
 });
 
@@ -525,6 +532,10 @@ boss.onStrike((_kind, zx, half) => {
   // Scaled by how much of the crowd was actually in it, so a graze is a nudge
   // and a direct hit is a jolt.
   zoom.shake(SHAKE_BOSS_HIT * covered);
+  // Thrown AWAY from where the blow landed, and downward — a hit from the left
+  // shoves the frame right. The sign is what turns a rattle into a direction.
+  zoom.punch(world.squadCenter.x - zx, -0.3, PUNCH_BOSS_HIT * covered);
+  hitStop(Math.round(HITSTOP_BOSS_HIT * covered));
   payTroops(-Math.max(1, Math.round(world.troops * BOSS_HIT_SHARE * covered)));
 });
 
@@ -574,6 +585,52 @@ const BOSS_CREW = 2;
 const SHAKE_BOSS_DEATH = 0.6;
 const SHAKE_BOSS_HIT = 0.42;
 
+/**
+ * PUNCH — the same two events, plus the one that hurts, given a direction.
+ *
+ * Peak offsets are smaller than the shakes they accompany because a punch is a
+ * sustained displacement rather than an oscillation: 0.35 m of lurch reads much
+ * larger than 0.35 m of wobble. Paired with the shake rather than replacing it —
+ * the shake is the rattle, the punch is the shove.
+ */
+const PUNCH_BOSS_DEATH = 0.38;
+const PUNCH_BOSS_HIT = 0.3;
+const PUNCH_BREACH = 0.14;
+
+/**
+ * HIT-STOP — sim frames dropped on impact, and why they are DROPPED rather than
+ * slowed.
+ *
+ * The standard trick is to scale `dt` down for a moment. This project cannot:
+ * core/loop.ts advances the sim at exactly 60 Hz precisely so that a run pays
+ * the same on a 120 Hz iPad as on a throttled Android, and a variable `dt` gives
+ * that up for a visual effect. Skipping whole steps keeps every step exactly
+ * 1/60 s, so the sim stays reproducible and the frames in between simply repeat.
+ *
+ * Which is also what hit-stop actually IS. The brain reads a freeze at the
+ * moment of contact as "that landed"; it does not read a slowdown, it reads a
+ * slowdown as slow motion. Three to five frames is the whole window — past about
+ * eight the road visibly stops and it turns into a stutter.
+ *
+ * Only impacts ON THE PLAYER and the death of a boss get one. A barrel going off
+ * happens several times a corridor, and a game that freezes several times a
+ * corridor is a game that is dropping frames.
+ */
+const HITSTOP_BOSS_DEATH = 5;
+const HITSTOP_BOSS_HIT = 4;
+const HITSTOP_BREACH = 3;
+/** Weight of a breach — bodies × kind cost — that earns a freeze. A stray walker
+ *  does not; a pack arriving intact, an elite or an ogre does. */
+const HITSTOP_BREACH_WEIGHT = 6;
+
+let hitStopTicks = 0;
+
+/** Freeze the sim for `ticks` steps. Takes the larger of the current freeze and
+ *  this one, so two things landing together cannot stack into a stall. */
+function hitStop(ticks: number): void {
+  if (ticks > hitStopTicks) hitStopTicks = ticks;
+}
+
 /** Blasts thrown around a dying boss, and how far out they scatter. */
 const BOSS_DEATH_BLASTS = 7;
 const BOSS_DEATH_SPREAD = 2.4;
@@ -591,6 +648,8 @@ boss.onKilled((kind) => {
   // barrels detonate. It comes apart in a string of blasts up its own body, and
   // the camera takes the hit.
   zoom.shake(SHAKE_BOSS_DEATH);
+  zoom.punch(world.squadCenter.x - boss.x, -0.25, PUNCH_BOSS_DEATH);
+  hitStop(HITSTOP_BOSS_DEATH);
   // Staggered, not simultaneous. Seven blasts in one frame is one big flash;
   // seven blasts walking up the body over three quarters of a second is a boss
   // coming apart, and the death animation lasts long enough to carry it.
@@ -610,63 +669,6 @@ boss.onKilled((kind) => {
 
 // Nothing to show until one arrives.
 bossBar.hide();
-
-/* ── FOCUS: the player's one active ability ───────────────────────────────
- *
- * Tap and the army compresses into a column for a second and a half: narrower,
- * and firing harder. Then a cooldown.
- *
- * THIS WAS TWO THINGS AND THEY WERE THE SAME THING. A TIGHTEN on the tap that
- * squeezed the crowd, and a passive FOCUS that filled while the player held a
- * line. Mischa's question was the review: "what's the difference?" Both
- * concentrated fire, neither read as its own idea, and the passive one rewarded
- * not steering — which is the only input the game has. Measured, the autopilot
- * held it at full for 85% of the opening minute without trying, because the
- * opening minute is empty.
- *
- * What makes it worth pressing is the four-wide gate row (see ROW_WIDTHS in
- * mechanics/gates.ts). A row you cannot walk around charges you for every
- * segment your crowd covers, and a two-hundred-strong army covers three of them.
- * Focused, it covers one and a half. That is the ability's entire reason to
- * exist, and before the rows spanned the road there was not one.
- */
-
-/** Seconds the squeeze holds, and seconds before it can be used again. The cycle
- *  is ~4.8 s against a gate row every ~3.2 s, so it is available for roughly two
- *  rows in three — often enough to plan around, rare enough to be worth saving. */
-const FOCUS_TIME = 1.6;
-const FOCUS_COOLDOWN = 3.2;
-/** How fast the squeeze eases in and out. Fast enough to feel like a command,
- *  slow enough that the crowd's own springs do the crowding. */
-const FOCUS_EASE = 9;
-
-let focusHold = 0;
-let focusCool = 0;
-
-/** True when the ability is ready. Read by the HUD. */
-function focusReady(): boolean {
-  return focusHold <= 0 && focusCool <= 0;
-}
-
-bus.on("input:tap", () => {
-  if (state.state !== "running" || betweenLevels || !focusReady()) return;
-  focusHold = FOCUS_TIME;
-});
-
-function updateAbilities(dt: number): void {
-  if (focusHold > 0) {
-    focusHold -= dt;
-    if (focusHold <= 0) {
-      focusHold = 0;
-      focusCool = FOCUS_COOLDOWN;
-    }
-  } else if (focusCool > 0) {
-    focusCool = Math.max(0, focusCool - dt);
-  }
-  const want = focusHold > 0 ? 1 : 0;
-  world.focus += (want - world.focus) * Math.min(1, FOCUS_EASE * dt);
-  if (Math.abs(want - world.focus) < 0.002) world.focus = want;
-}
 
 /* ── Levels: an approach, then a boss rush ────────────────────────────────
  *
@@ -754,16 +756,32 @@ function difficultyClock(): number {
  * rather than how big it starts, and they unlock late enough that the player has
  * met the ability they modify.
  */
-type PerkId = "men" | "rate" | "power" | "focus" | "squeeze";
-const perks: Record<PerkId, number> = { men: 0, rate: 0, power: 0, focus: 0, squeeze: 0 };
+type PerkId = "men" | "rate" | "power" | "medic" | "salvage";
+const perks: Record<PerkId, number> = { men: 0, rate: 0, power: 0, medic: 0, salvage: 0 };
 
 const PERK_MEN_TROOPS = 6;
 const PERK_RATE_CREW = 3;
 const PERK_POWER_CREW = 2;
-/** Share of the focus fill time each rank removes, and seconds each rank adds
- *  to the squeeze. */
-const PERK_FOCUS_SPEED = 0.22;
-const PERK_SQUEEZE_TIME = 0.35;
+/**
+ * Share of every casualty each rank of MEDIC walks off, and the cap.
+ *
+ * The cap is the whole design of this perk. Losses are the only thing that ends
+ * a run, so a defensive perk with no ceiling is the one the player takes three
+ * times and stops being able to lose; at 0.45 even a fully-ranked medic still
+ * pays more than half of every red segment and a boss breakthrough still hurts.
+ */
+const PERK_MEDIC_SAVE = 0.14;
+const PERK_MEDIC_CAP = 0.45;
+/** Extra share a rank of SALVAGE adds to what a broken barrel pays. Applies to
+ *  the barrel's own payout only, not to the prize riding it — a crate of
+ *  rocketeers is worth the same however good your scavengers are. */
+const PERK_SALVAGE_SHARE = 0.3;
+
+/** What a given rank of MEDIC is worth, capped. Exported to the perk card so the
+ *  text on the card is the number the game actually applies. */
+function medicSave(rank: number): number {
+  return Math.min(PERK_MEDIC_CAP, rank * PERK_MEDIC_SAVE);
+}
 
 const ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 
@@ -798,18 +816,18 @@ const PERK_SPECS: readonly PerkSpec[] = [
     detail: (r) => `Start each level with ${r * PERK_POWER_CREW} rocketeers`,
   },
   {
-    id: "focus",
-    icon: "🎯",
-    title: "STEADY HANDS",
+    id: "medic",
+    icon: "🚑",
+    title: "FIELD MEDICS",
     unlock: 3,
-    detail: (r) => `Focus builds ${Math.round(r * PERK_FOCUS_SPEED * 100)}% faster`,
+    detail: (r) => `Walk off ${Math.round(medicSave(r) * 100)}% of every casualty`,
   },
   {
-    id: "squeeze",
-    icon: "🪗",
-    title: "CLOSE RANKS",
+    id: "salvage",
+    icon: "🧲",
+    title: "SALVAGE CREW",
     unlock: 4,
-    detail: (r) => `Tighten holds ${(r * PERK_SQUEEZE_TIME).toFixed(1)}s longer`,
+    detail: (r) => `Barrels pay ${Math.round(r * PERK_SALVAGE_SHARE * 100)}% more`,
   },
 ];
 
@@ -841,9 +859,6 @@ let rushLeft = 0;
 let rushTimer = 0;
 let bossesKilled = 0;
 let biggestCrowd = 0;
-/** Suspends the corridor while a card is up. The state machine stops `tick()`,
- *  but the level has to remember it is between levels rather than paused. */
-let betweenLevels = false;
 /** True while the autopilot is driving. A wipe then restarts silently instead of
  *  putting up a screen that nothing is going to press. */
 let harnessMode = false;
@@ -884,7 +899,6 @@ function clearLevel(): void {
     resetRun();
     return;
   }
-  betweenLevels = true;
   state.transition("paused");
   // The bar belongs to a boss that is now dead, and the tick that would have
   // hidden it does not run while the game is paused.
@@ -904,7 +918,6 @@ function clearLevel(): void {
 }
 
 function failLevel(): void {
-  betweenLevels = true;
   state.transition("paused");
   bossBar.hide();
   bossShowing = false;
@@ -924,7 +937,6 @@ levelCard.onChoice((choice) => {
   // "retry" keeps both the level and the perks: losing a level should cost the
   // level, not the run's whole investment. That is the difference between a
   // setback and a punishment.
-  betweenLevels = false;
   ui.classList.remove("is-carded");
   state.transition("running");
   resetRun();
@@ -1030,13 +1042,13 @@ function pickForRow(): PickupKind {
  *  floor is the old fixed value, so the opening is unchanged. Barrels no longer
  *  carry elites at all — they carry pickups — so only walkers need this. */
 function walkerHp(): number {
-  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX, WALKER_PASS_SHARE, 4);
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
 }
 
 /** Heavies and bikers are single bodies rather than a pack of eight, so each one
  *  soaks a much larger share of a pass — see ELITE_PASS_SHARE in pacing.ts. */
 function eliteHp(): number {
-  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX, ELITE_PASS_SHARE, 30);
+  return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, ELITE_PASS_SHARE, 30);
 }
 
 /** An OGRE soaks most of a whole approach — see OGRE_PASS_SHARE. The floor is
@@ -1047,7 +1059,7 @@ function ogreHp(): number {
     world.troops,
     tierFor(world.troops),
     bullets.tuning,
-    squad.naturalRadiusX,
+    squad.radiusX,
     OGRE_PASS_SHARE,
     90,
   );
@@ -1171,7 +1183,7 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
         world.troops,
         tierFor(world.troops),
         bullets.tuning,
-        squad.naturalRadiusX,
+        squad.radiusX,
       );
       const width = (BARREL_CLUSTER - 1) * BARREL_SPACING + BARREL_FACE;
       const cx = free ? free.x : clusterX(width, side);
@@ -1379,6 +1391,7 @@ function resetRun(): void {
   bossIndex = 0;
   gates.reset();
   director.reset();
+  hitStopTicks = 0;
   rowIndex = 0;
   pickups.clear();
   pickupCursor = 0;
@@ -1386,9 +1399,6 @@ function resetRun(): void {
   world.elites = 0;
   world.gunners = perks.rate * PERK_RATE_CREW;
   world.rocketeers = perks.power * PERK_POWER_CREW;
-  world.focus = 0;
-  focusHold = 0;
-  focusCool = 0;
   streak.reset();
   growthMark = 0;
   // Not `reset()` on the commander: his line cursors are the only thing that
@@ -1540,6 +1550,12 @@ let scrolled = 0;
  */
 function tick(dt: number): void {
     if (state.state !== "running") return;
+    // THE FREEZE. Return before anything advances and the frame repeats — the
+    // renderer still runs, interpolating between two identical states.
+    if (hitStopTicks > 0) {
+      hitStopTicks--;
+      return;
+    }
     world.elapsed += dt;
     world.squadLane = touch.lane;
     world.weaponTier = tierFor(world.troops);
@@ -1547,7 +1563,7 @@ function tick(dt: number): void {
     // Before anything spawns: the gate module sizes a reward's target off what
     // the guns can actually deliver, and only this file knows the weapon model.
     gates.reportFirepower(
-      damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.naturalRadiusX),
+      damageOnSegment(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX),
     );
 
     // THE APPROACH BUILDS THE ARMY; THE RUSH ENDS THE LEVEL. The corridor only
@@ -1570,11 +1586,6 @@ function tick(dt: number): void {
       }
     }
 
-    // 0. The player's two abilities, BEFORE the squad: `world.tighten` is what
-    //    the squad reshapes against this tick, so setting it afterwards would
-    //    put the squeeze one frame behind the tap.
-    updateAbilities(dt);
-
     // 1. Squad first: it writes world.squadCenter, which everything below reads.
     squad.update(dt, world);
     // Immediately after, while the bodies that just arrived or fell are current.
@@ -1586,7 +1597,7 @@ function tick(dt: number): void {
       squad.center.x,
       squad.center.y + 1,
       squad.center.z - squad.radiusZ,
-      squad.naturalRadiusX,
+      squad.radiusX,
     );
     // setMuzzle still supplies the blob centre and width for aim; setShooters
     // is what gives each soldier its own stream origin.
@@ -1648,8 +1659,6 @@ function tick(dt: number): void {
     // Last of the readouts, so it reports the count this tick actually ended on.
     troopCount.update(dt, world);
     loadout.update(dt, world);
-    skills.setCooldown(focusCool / FOCUS_COOLDOWN, focusHold > 0);
-    skills.update(dt, world);
     streak.update(dt, world);
     commander.update(dt, world);
     netPop.update(dt, world);
@@ -1676,7 +1685,11 @@ function tick(dt: number): void {
 
 function draw(alpha: number): void {
   for (const system of renderables) system.render(alpha, world);
-  roadTex.offset.y = (scrolled / (70 / roadTex.repeat.y)) % 1;
+  // The 6 is metres per texture tile — `roadTexture()` sets repeat.y to
+  // CORRIDOR_LENGTH / 6, so this is that division undone. It used to be written
+  // as a hardcoded 70 / repeat.y, which was the same number only for as long as
+  // the corridor happened to be 70 m long.
+  roadTex.offset.y = (scrolled / (CORRIDOR_LENGTH / roadTex.repeat.y)) % 1;
   stage.renderer.render(stage.scene, stage.camera);
 }
 
@@ -1848,8 +1861,6 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
   // Focus is sampled EVERY TICK, not at the end of a slice. Sampling it between
   // autopilot calls reported a mean of 0.83 because the bot always ends a slice
   // settled — the measurement was of the pauses, not of the run.
-  let focusSum = 0;
-  let focusFull = 0;
   const levelAtStart = world.level;
   // REACTION TIME, because a bot that re-decides sixty times a second is not a
   // measurement of the game — it is a measurement of the game played perfectly.
@@ -1867,8 +1878,6 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
       if (!Number.isNaN(want)) touch.lane = clamp(dodgeBoss(want), -1, 1);
     }
     tick(dt);
-    focusSum += world.focus;
-    if (world.focus > 0.95) focusFull++;
     peak = Math.max(peak, world.troops);
     // Biggest single-tick loss as a share of what was standing. A wipe is the
     // tail of this distribution, so watching it is how a change to the penalty
@@ -1891,8 +1900,6 @@ function autopilot(seconds = 120, sampleEvery = 5, reaction = 0.3) {
     // level the clock happened to stop in — a number with no meaning. How far
     // the run GOT is the honest one.
     levelsCleared: world.level - levelAtStart,
-    meanFocus: Number((focusSum / Math.max(1, ticks)).toFixed(3)),
-    fullFocusShare: Number((focusFull / Math.max(1, ticks)).toFixed(3)),
   };
 }
 
@@ -1940,15 +1947,6 @@ if (import.meta.env.DEV) {
       bossStats() {
         return { kind: boss.kind, hp: boss.hp, max: boss.maxHp, x: boss.x, z: boss.z, side: boss.side };
       },
-      /** Fire FOCUS, ignoring readiness. For posing the squeeze. */
-      focus(): void {
-        focusHold = FOCUS_TIME;
-        focusCool = 0;
-      },
-      /** Hold the squeeze at an exact value, for a screenshot. */
-      setFocus(v: number): void {
-        world.focus = clamp(v, 0, 1);
-      },
       /** Pose either level card without having to play a level to it. */
       showCleared(): void {
         biggestCrowd = Math.max(biggestCrowd, world.troops);
@@ -1976,9 +1974,7 @@ if (import.meta.env.DEV) {
           // by an army with thirty upgrades — the sample measured a difficulty
           // ramp rather than thirty-two comparable runs.
           world.level = 1;
-          perks.men = 0;
-          perks.rate = 0;
-          perks.power = 0;
+          for (const k of Object.keys(perks) as PerkId[]) perks[k] = 0;
           resetRun();
           world.elapsed = 0;
           const run = autopilot(seconds, seconds, reaction);
@@ -2080,7 +2076,6 @@ if (import.meta.env.DEV) {
         rowsLost,
         streakMult: streak.multiplier,
         radiusX: Number(squad.radiusX.toFixed(2)),
-        naturalRadiusX: Number(squad.naturalRadiusX.toFixed(2)),
         calls: stage.renderer.info.render.calls,
         zoom: Number(world.zoom.toFixed(3)),
         radiusZ: Number(squad.radiusZ.toFixed(2)),

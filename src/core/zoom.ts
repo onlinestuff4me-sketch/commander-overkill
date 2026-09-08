@@ -110,6 +110,37 @@ const SHAKE_DECAY = 8.5;
 const SHAKE_FREQ_X = 41;
 const SHAKE_FREQ_Y = 53;
 
+/**
+ * PUNCH — a shake with a direction, and the difference matters.
+ *
+ * A shake says "something happened". A punch says "something hit you FROM
+ * THERE": the camera lurches away from the impact and settles back, so a boss
+ * slamming down on the left throws the frame right. Two sines cannot do that —
+ * they are symmetric by construction — so this is a separate, additive offset
+ * that starts at its full value and decays.
+ *
+ * No oscillation on the way back on purpose. A punch that rings reads as a
+ * wobble, which is the thing the shake already does; a punch that lurches once
+ * and settles reads as weight. Faster decay than the shake for the same reason —
+ * it is a single event, not a rumble.
+ *
+ * Applied to the look-at, like everything else in this file, so it stays a pure
+ * translation and every baked billboard basis survives it.
+ */
+const PUNCH_DECAY = 11;
+/**
+ * CEILING ON THE VERTICAL COMPONENT, IN METRES, AND IT IS A FRAMING LIMIT.
+ *
+ * Photographed at 0.3 m of downward punch, a boss hit revealed the near end of
+ * the corridor: the camera and its look-at move together, so dropping the pair
+ * shows 0.3 m more of the ground plane at the bottom of the frame, and the road
+ * simply stops there. The horizontal axis has no such wall — the road is wider
+ * than the frame — so the punch spends its budget sideways and only nods
+ * vertically. 0.12 m is what fits under the near kerb with the current
+ * CORRIDOR_LENGTH; lengthen the road and this can grow.
+ */
+const PUNCH_Y_LIMIT = 0.12;
+
 export interface ZoomController {
   /** Multiple of the resting distance the camera is currently at. */
   readonly distance: number;
@@ -119,6 +150,12 @@ export interface ZoomController {
    * frame cannot stack into a seizure.
    */
   shake(metres: number): void;
+  /**
+   * Knock the camera in a direction. `x` and `y` are a direction in world/screen
+   * space (they are normalised here), `metres` the peak offset. Like `shake`,
+   * the larger of the current punch and this one wins rather than summing.
+   */
+  punch(x: number, y: number, metres: number): void;
   /** The step the troop count alone would put it at, ignoring the ease. */
   readonly target: number;
   /** World X the camera has panned to. Read for diagnostics; never written. */
@@ -131,6 +168,10 @@ export interface ZoomController {
   update(dt: number, troops: number, centerX: number): void;
   /** Snap to the step for `troops` with no ease, centred. For a run restart. */
   reset(troops: number): void;
+}
+
+function clamp(lo: number, v: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 /**
@@ -162,6 +203,8 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
   let panX = 0;
   let shakeMag = 0;
   let shakeClock = 0;
+  let punchX = 0;
+  let punchY = 0;
   /** Scratch for the panned look-at point, so apply() never allocates. */
   const lookAt = new THREE.Vector3();
 
@@ -172,6 +215,8 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
       lookAt.x += Math.sin(shakeClock * SHAKE_FREQ_X) * shakeMag;
       lookAt.y += Math.sin(shakeClock * SHAKE_FREQ_Y) * shakeMag * 0.75;
     }
+    lookAt.x += punchX;
+    lookAt.y += punchY;
     camera.position.copy(lookAt).addScaledVector(VIEW_AXIS, REST_DISTANCE * distance);
     // Position and target move by the same vector, so this is a translation and
     // the view basis is unchanged — see the note at the top of the file.
@@ -203,6 +248,14 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
       if (metres > shakeMag) shakeMag = metres;
     },
 
+    punch(x, y, metres) {
+      const len = Math.hypot(x, y);
+      if (len < 1e-6 || metres <= 0) return;
+      if (metres <= Math.hypot(punchX, punchY)) return;
+      punchX = (x / len) * metres;
+      punchY = clamp(-PUNCH_Y_LIMIT, (y / len) * metres, PUNCH_Y_LIMIT);
+    },
+
     update(dt, troops, centerX) {
       target = stepFor(troops, target);
       const wantPan = centerX * PAN_GAIN;
@@ -215,7 +268,17 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
         shakeMag *= Math.exp(-SHAKE_DECAY * dt);
         if (shakeMag < 0.004) shakeMag = 0;
       }
-      if (distance === target && !moved && !shaking) return;
+      const punching = punchX !== 0 || punchY !== 0;
+      if (punching) {
+        const k = Math.exp(-PUNCH_DECAY * dt);
+        punchX *= k;
+        punchY *= k;
+        if (Math.hypot(punchX, punchY) < 0.004) {
+          punchX = 0;
+          punchY = 0;
+        }
+      }
+      if (distance === target && !moved && !shaking && !punching) return;
       // Exponential approach: covers ~95% of the remaining gap in EASE_TIME,
       // whatever the size of the step, so a two-step jump does not take twice
       // as long as a one-step one. Snapped at the end so `distance === target`
@@ -232,6 +295,8 @@ export function createZoom(camera: THREE.PerspectiveCamera, scene: THREE.Scene):
       distance = target;
       panX = 0;
       shakeMag = 0;
+      punchX = 0;
+      punchY = 0;
       apply();
     },
   };

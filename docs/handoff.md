@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-07, session 3 (sixteenth pass)._
+_Last updated: 2026-09-08, session 3 (seventeenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -10,9 +10,9 @@ _Last updated: 2026-09-07, session 3 (sixteenth pass)._
 **Repo:** `onlinestuff4me-sketch/commander-overkill`, public, `main`.
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
-**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 63 passing;
-`npm run build` succeeds; the page loads with no console errors. 93 draw calls
-and 105k triangles at 280 troops with the camera stepped back to 1.45.
+**Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 62 passing;
+`npm run build` succeeds; the page loads with no console errors. 84 draw calls
+and 79k triangles at 37 troops; the turn dust adds exactly one draw call.
 
 **A LEVEL IS AN APPROACH AND THEN A BOSS RUSH.** It builds to something:
 
@@ -38,8 +38,11 @@ happens, and the punishment is the blood, not the deadlock.
 the roster: level 1 is gates, barrels and walkers and nothing else; elites and
 blockades arrive on 2, bikers and forks on 3, ogres and crossroads on 4, `surge`
 on 5. The perk pool grows the same way — three ranks of three things is a shallow
-upgrade path, so STEADY HANDS (focus) unlocks on 3 and CLOSE RANKS (tighten) on
-4, and a newly-unlocked perk is always on the card the level it unlocks.
+upgrade path, so FIELD MEDICS unlocks on 3 and SALVAGE CREW on 4, and a
+newly-unlocked perk is always on the card the level it unlocks. Medics are capped
+at 45% of every casualty on purpose: losses are the only thing that ends a run,
+so an uncapped defensive perk is the one you take three times and stop being able
+to lose.
 
 **Measured**, `__overkill.sample(32, 110, 0.3)`: **32 of 32 runs clear exactly
 one level** in 110 seconds, and **0–2 of 32 wipe** across samples.
@@ -49,8 +52,8 @@ is 1 in 8 for levels 1–2. Consecutive samples of the same build gave 2 and the
 0; earlier the horde looked like a sharp lever (5 wipes at four packs against 2
 at two packs) and then four packs measured 0. Counts this small carry more noise
 than the effect being chased. Either sample much larger, or — better — get this
-in front of a person, because the bot never crosses a gate row and never taps
-TIGHTEN, so it is playing a materially easier game than a player does.
+in front of a person, because the bot crosses a gate row about ten times in a
+hundred seconds and never dodges anything it has not been told about.
 
 **The failure mode is a STALL, not a wipe.** `min` is 1 in most samples: a run
 that never grew, because filling a reward needs committed fire and a squad that
@@ -87,6 +90,11 @@ and they are written up in the gap analysis: every prize needs a visible chain
 (prize → how troops use it → what it does to the world), anything a primitive
 cannot say gets a text label, and every idea is judged by whether someone would
 clip it. Do not reopen the art question.
+
+**Where PROGRESSION goes next:**
+[`docs/progression-research.md`](progression-research.md) is the Last War /
+Top War / Last Shelter / Puzzles & Survival teardown, with seven patterns ranked
+by what they would do for a ninety-second run. Nothing from it is built. Item 1c.
 
 **Where the LOOK still falls short:**
 [`docs/reference/gap-analysis.md`](reference/gap-analysis.md) audits our build
@@ -146,10 +154,35 @@ The diagnosis in one line: **nothing in this game created tension between moving
 and staying.** Moving was free, staying was free, so between rows the correct
 play was to do nothing.
 
-**TIGHTEN, FOCUS, the STREAK and the COMMANDER are all shipped** (see the
-decisions below). What is still open from the proposal, in its order: compound
-placements as the default rather than 5 of 39, drifting motes to chase in the
-dead seconds, and hazards that move sideways.
+**The STREAK and the COMMANDER are shipped; the ABILITY was built and then cut**
+(see the decisions below). What is still open from the proposal, in its order:
+compound placements as the default rather than 5 of 39, drifting motes to chase
+in the dead seconds, and hazards that move sideways.
+
+### 1c. The progression research is done and nothing has been built from it
+
+[`docs/progression-research.md`](progression-research.md) is a teardown of Last
+War: Survival, Top War, Last Shelter and Puzzles & Survival, written to Mischa's
+brief: what those games do for upgrading, progressing, unlocking troop and weapon
+types and allies, and fighting hordes and bosses. The health warning at the top
+of it is the important part — all four are 4X base-builders whose progression is
+paced for a session a day, so nothing lifts directly.
+
+Seven patterns survive the translation. The two I would build first:
+
+1. **COUNTERS.** Rifle, minigun and rocket are currently a straight line — a
+   rocketeer is a rifleman who does more damage — so nothing on the road cares
+   which you brought. One enemy with armour only rockets open and one fast enough
+   that only the minigun's rate catches it turns every upgrade card from "take
+   the biggest number" into "what is this level going to throw at me". No new
+   art; the enemies already exist.
+2. **AN ALLY YOU RESCUE.** Last War's Drone is a unit you unlock once and then
+   have forever, fighting beside you. A cage on the road you shoot open, and a
+   drone runs with you for the rest of the level, is the most visible upgrade
+   this game could get and it lands in the slot the existing prizes already use.
+
+The rest — fragments, visible merges, front-and-back formation, one new noun per
+level, rarity colour — are ranked in the doc with reasons.
 
 ### 1b. Nothing on the road punishes you for being big
 
@@ -266,7 +299,6 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/levelcard.ts` | The level pill, the cleared/failed screen, and the three upgrade cards. Reports which button was pressed; owns none of the run. |
 | `ui/streak.ts` | The multiplier chip, top right. Counts rows the player came out ahead on; one bad row resets it. |
 | `ui/commander.ts` | The Commander. Files reports after things resolve, never during, and never twice running. |
-| `ui/skills.ts` | The focus meter and the tighten pill, bottom-centre. The state of the player's own controls — not "show, don't tell" territory, since a control whose availability you cannot see is one you do not use. |
 | `core/look.ts` | The house material. One place that decides everything in the game is made of shiny plastic. Objects use it; the road, water and bridge do not. |
 | `entities/boss.ts` | The three bosses, one alive at a time. Owns its own figures, name plate, attack label, danger decal and death. Reports that a strike landed; never touches `world.troops`. |
 | `core/zoom.ts` | Stepped camera dolly tied to troop count, with hysteresis, plus a damped lateral pan that follows the crowd. Both are pure translations. Scales the squad depth cap and the fog with the dolly. |
@@ -694,7 +726,7 @@ when the crowd covers a fraction of its width, so past a few dozen troops the
 army is wider than a whole row and takes every segment in it whatever it aims at.
 A no-red streak is unavailable by construction to any army big enough to want
 one. Net-positive is achievable at every size, is broken by a bad row rather than
-by geometry, and makes TIGHTEN the tool that turns a bad row into a good one.
+by geometry, and makes STEERING the tool that turns a bad row into a good one.
 
 The ladder tops out at **2×**, not 3×. On an economy whose failure mode is a run
 that catches fire, a 3× on gate rewards is not a thread, it is a second economy.
@@ -723,36 +755,94 @@ was placed 124px in, beside the badge; that reads well at "12" and collides at
 "1200", which is the run where it matters most. The badge grows with the number.
 It is in the opposite corner now.
 
-**THE PLAYER HAS ONE ACTIVE ABILITY: FOCUS.** Tap and the army compresses into a
-column for a second and a half — narrower, and firing harder — then a cooldown.
+**THERE IS NO ACTIVE ABILITY, AND THERE SHOULD NOT BE ONE.** The game is steering
+and only steering. `world.focus`, `ui/skills.ts`, the squeeze in the squad, the
+damage and spread terms in the bullets, and the two perks that modified them are
+all deleted.
 
-**IT WAS TWO ABILITIES AND THEY WERE THE SAME ABILITY.** A TIGHTEN on the tap
-that squeezed the crowd, and a passive FOCUS that filled while the player held a
-line. Mischa's question was the entire review: *"what's the difference?"* Both
-concentrated fire, neither read as its own idea, and the passive one rewarded NOT
-STEERING — the game's only input. Measured, the autopilot held it at full for 85%
-of the opening minute without trying, because the opening minute is empty. A
-bonus you hold most of the time for doing nothing is a constant, not a mechanic.
+**THE WHOLE HISTORY, BECAUSE IT IS THE MOST INSTRUCTIVE MISTAKE IN THE PROJECT.**
+It shipped first as TWO abilities — a TIGHTEN on the tap that squeezed the crowd,
+and a passive FOCUS that filled while the player held a line. Mischa's review was
+one question: *"what's the difference?"* Both concentrated fire, neither read as
+its own idea, and the passive one rewarded NOT STEERING, which is the only input
+the game has. They were merged into one tap ability. Mischa's next note was
+*"I don't like the Focus mechanic — invest more in other ways of making the game
+feel responsive"*, and that one was right too.
 
-**AND IT HAD NO REASON TO BE PRESSED, BECAUSE NO ROW MADE YOU PAY FOR BEING
-WIDE.** That is the same root cause as the second half of the review — "the
-barrier gates don't really lead to much clear decision making". `ROW_WIDTHS` had
-nineteen rows in twenty walkable-around at tier 0 and six in ten at tier 2, and
-the autopilot crossed **zero rows in forty seconds**: every row was optional, so
-the optimal line was to ignore all of them. A row you can walk around is not a
-decision, it is scenery with a number on it.
+**THE DIAGNOSIS: IT WAS A SECOND THING TO DO WITH THE THUMB THAT STEERS.** On a
+phone held one-handed, the thumb that drags the crowd is the thumb that has to
+tap, and every hard dodge is a gesture that must not fire it. An ability whose
+entire cost is "you were not steering for a moment" cannot be exciting in a game
+where steering is the fun. Two full passes of tuning — a squeeze number, a
+damage number, a spread number, a cooldown, two perks and a HUD pill — bought
+nothing that steering did not already do better.
 
-Four-wide rows leave 1.8 m of an 11.2 m road, so they are a fork — you are going
-through one of these and which one is the question, which is what the PRD asked
-for in the first place. Level one still teaches on narrow rows; half the rows are
-forks by tier 1 and three quarters by tier 2.
+**REMOVING IT COST NOTHING MEASURABLE, AND THAT IS THE EVIDENCE.** The autopilot
+never tapped, so every economy number in this file was ALREADY measured with the
+ability at zero. Deleting it moved the sampled wipe rate from 5 in 32 to 1 and 2
+in 32 across two samples — a difference inside the noise this file already
+documents at n=32. An ability that can be deleted without the numbers noticing
+was not carrying the game.
 
-**The two changes measure each other.** After them the autopilot crosses **10
-segments in 100 seconds** where it crossed none, and a 200-strong army meeting a
-four-wide row takes **4 of 4 segments unfocused and 1 of 4 focused**. That gap is
-the ability's whole reason to exist and there was not one before. The wipe rate
-went from 0–2 in 32 to **5 in 32**, which is the brief's early band — reached by
-giving the game decisions rather than by tuning a penalty number.
+**WHAT REPLACED IT: THE CROWD ANSWERS THE INPUT WITH ITS POSTURE.** The centre is
+capped at 7 m/s and ramped over ~0.2 s, both deliberately, so a big army feels
+like a big army. The cost was that the first fifth of a second of a swipe
+produced almost nothing on screen — and that fifth of a second is exactly the
+window in which a control feels connected to a thumb or does not. The latency was
+never the problem; the SILENCE was. Three things now fill it, all in
+`entities/squad.ts` and all free:
+
+- **LEAN.** Every soldier rolls into the turn, up to 0.2 rad at full lateral
+  speed. Uniform across the crowd, so it is one quaternion per frame rather than
+  one per unit.
+- **DRAG.** The formation shears — the front rank leads, the rear rank trails, by
+  0.18 m per metre of depth at full speed. Symmetric about the centre, so
+  `world.squadHalfWidth` and every gate calculation are untouched. Applied to the
+  muzzle sample too, or a hard turn leaves every tracer starting a third of a
+  body width off the soldier firing it.
+- **DUST.** A pooled ground puff kicked off the trailing flank above 3 m/s. Three
+  things were wrong with the first version and all three are worth knowing:
+  pale grey dust over a 0.73-grey road is invisible (it is warm tan and DARKER
+  than the road now, because reading against the surface beats being the right
+  colour for grit); dust under the crowd is covered by bodies and their shadows;
+  and dust behind the rear rank is off the bottom of the frame. The clear road is
+  the FLANK the turn is leaving, which is also where the eye already is.
+
+**HIT-STOP DROPS WHOLE SIM STEPS. IT DOES NOT SCALE `dt`.** The standard trick is
+to slow time on impact; this project cannot, because `core/loop.ts` runs the sim
+at exactly 60 Hz so that a run pays the same on a 120 Hz iPad as on a throttled
+Android. `tick()` returns early instead, so every step that runs is still exactly
+1/60 s and the frames between simply repeat — which is also what hit-stop
+actually is. A freeze reads as "that landed"; a slowdown reads as slow motion.
+Three to five frames is the window. Only impacts ON the player and the death of a
+boss get one: a barrel goes off several times a corridor, and a game that freezes
+several times a corridor is a game that is dropping frames.
+
+**THE CAMERA PUNCH HAS A HARD VERTICAL CEILING, AND IT IS A FRAMING LIMIT.** A
+punch is a shake with a direction — the frame is thrown AWAY from the blow — and
+at 0.3 m of downward punch a boss hit revealed the near end of the road. Camera
+and look-at move together, so dropping the pair shows more of the ground plane at
+the bottom of the frame and the deck simply stops there. `PUNCH_Y_LIMIT` in
+`core/zoom.ts` caps the vertical component at 0.12 m; the horizontal axis has no
+such wall, so a punch spends its budget sideways and only nods vertically.
+
+**THE ROAD WAS 7 m TOO SHORT AT THE NEAR END, AND HAD BEEN ALL ALONG.** Found
+while photographing the punch: at the 450-troop zoom step the camera sits far
+enough back to see over the deck's near edge, and the road ended about 140 px
+above the bottom of the frame with water under it — at exactly the army size the
+game is trying to look impressive at. `CORRIDOR_LENGTH` is 84 with the near end
+at z +15, which keeps the road's centre where it was so nothing positioned
+relative to it moved. `main.ts` had a hardcoded `70` duplicating
+`CORRIDOR_LENGTH` in the road-texture scroll; it is imported now.
+
+**THE ROWS STAY AS THEY ARE.** `ROW_WIDTHS` was widened so half of rows are
+four-wide by tier 1 and three quarters by tier 2, and that was done to give the
+ability a reason to exist. It survives the ability, because the reason it worked
+was never the ability: a row you can walk around is scenery with a number on it,
+and a row you cannot is a fork. Before the change the autopilot crossed ZERO rows
+in forty seconds; it crosses about ten in a hundred now. Being wide is a
+liability you cannot switch off any more, which is a cleaner version of the same
+trade.
 
 **THE AUTOPILOT HAS NEVER CROSSED A GATE ROW. NOT ONCE.** Measured while wiring
 the streak: `clearPayouts()` then a 40-second `autopilot()` run produces **zero**
@@ -780,7 +870,7 @@ when the crowd covers a fraction of its width, so past a few dozen troops the
 army is wider than a whole row and takes every segment in it whatever it aims at.
 A no-red streak is unavailable by construction to any army big enough to want
 one. Net-positive is achievable at every size, is broken by a bad row rather than
-by geometry, and makes TIGHTEN the tool that turns a bad row into a good one.
+by geometry, and makes STEERING the tool that turns a bad row into a good one.
 
 The ladder tops out at **2×**, not 3×. On an economy whose failure mode is a run
 that catches fire, a 3× on gate rewards is not a thread, it is a second economy.
@@ -808,55 +898,6 @@ a player should NOT hear the same casualty line for the fourth time.
 was placed 124px in, beside the badge; that reads well at "12" and collides at
 "1200", which is the run where it matters most. The badge grows with the number.
 It is in the opposite corner now.
-
-**THE PLAYER HAS TWO VERBS NOW, AND THEY ARE TWO HALVES OF ONE IDEA.** Tighten
-is a reason to move; focus is a reason not to. Neither adds anything to the road.
-
-**TIGHTEN (tap) squeezes the crowd, and crowd width was always the hidden
-variable.** `laneCoverage()` decides what share of the curtain lands on a target
-and `squadHalfWidth` decides how many gate segments a row charges for, so
-narrowing the army threads a gap a wide one cannot, puts every round on one lane,
-and gives up the rest of the road while it lasts. Measured: a 200-strong army
-goes from 4.19 m half-width to 2.39 m, and the same red pair that costs it four
-troops wide costs it nothing tight.
-
-`input:tap` was already emitted by `input/touch.ts` with no listener anywhere —
-its own header said "skills fire on tap" — so the input side cost nothing.
-
-**CONTENT IS PRICED AGAINST `squad.naturalRadiusX`, NOT `squad.radiusX`.** Every
-hit-point model derives from how much of the curtain a target intercepts, so
-pricing against the LIVE width would mean a barrel that spawned while the army
-was squeezed came out tougher — and the optimal play would be to release before
-every spawn and re-squeeze after. Pricing against the resting shape leaves
-tighten a pure skill bonus with nothing to game. The squad exposes both.
-
-**FOCUS FILLS PROPORTIONALLY TO STILLNESS, AND THE FIRST VERSION DID NOT.** A
-flat "below 1.2 m/s it fills, above it drains" measured out at a mean focus of
-0.83 with the autopilot sitting at FULL for four fifths of the run: a buff you
-have four fifths of the time is a constant, not a decision, and it took the wipe
-rate from 4 in 32 to 2. Filling now scales with how still the crowd actually is
-and draining scales with how hard it is steering.
-
-**SAMPLE FOCUS EVERY TICK, NOT BETWEEN AUTOPILOT CALLS.** The first measurement
-sampled `world.focus` after each 1.5 s slice and reported 0.83 — but the bot
-always ends a slice settled, so it was measuring the pauses rather than the run.
-`autopilot()` accumulates `meanFocus` and `fullFocusShare` itself now. The honest
-figures: 0.88 mean over the first quiet minute, 0.50 once the corridor is busy,
-at full 85% of the time early and 39% late.
-
-**FOCUS IS 1.4×, MEASURED DOWN FROM 1.55×.** At 1.55 the wipe rate fell to 2 in
-32; at 1.4 it sits at 3 in 32 across two samples, against 4–5 before. That is a
-real softening and it is the right kind: a skill multiplier should make a
-well-played run stronger. Restore the difficulty with CONTENT (levels, item #1),
-not by nerfing the mechanic into irrelevance. Note also that the autopilot never
-taps, so every number here is the floor — a player who uses tighten does better
-still, and the bot pays none of its cost.
-
-**FOCUS IS READ OFF THE ROUNDS, NOT OFF THE METER.** Narrowing the spread turned
-out to be nearly invisible — the stream's width is dominated by the crowd's own
-width, since every soldier fires from where he is standing, so the aim jitter
-focus scales is a small share of it and full focus measured only 17% narrower.
-Size is what the eye reads at forty pixels, so focus fattens the round instead.
 
 **EVERY OBJECT IS PHONG, EVERY SURFACE IS LAMBERT.** `core/look.ts` owns it.
 Lambert has no specular term at all, and that single fact was most of the

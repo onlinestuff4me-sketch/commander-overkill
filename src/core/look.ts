@@ -59,3 +59,43 @@ export function toyMaterial(params: ToyParams = {}): THREE.MeshPhongMaterial {
     shininess: TOY_SHININESS,
   });
 }
+
+/**
+ * Give an instanced material a per-instance alpha channel.
+ *
+ * LIVES IN CORE BECAUSE TWO ELEMENTS NEED IT. It started in entities/barrels.ts
+ * for the smoke; entities/squad.ts then needed the same six lines for its turn
+ * dust, and an element importing another element is the one thing the module
+ * contract forbids. Core is the shared shelf, and a shader patch with no game
+ * state in it belongs on it.
+ *
+ * three has no built-in for this: instanceColor covers RGB only. The patch adds
+ * one float attribute and multiplies it into the final fragment alpha, which is
+ * blend-mode agnostic and survives however the material is otherwise shaded.
+ */
+export function attachInstanceAlpha(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  count: number,
+): THREE.InstancedBufferAttribute {
+  const attr = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+  attr.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute("aInstanceAlpha", attr);
+
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader =
+      "attribute float aInstanceAlpha;\nvarying float vInstanceAlpha;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        "#include <begin_vertex>\nvInstanceAlpha = aInstanceAlpha;",
+      );
+    shader.fragmentShader =
+      "varying float vInstanceAlpha;\n" +
+      shader.fragmentShader.replace(
+        "#include <opaque_fragment>",
+        "#include <opaque_fragment>\ngl_FragColor.a *= vInstanceAlpha;",
+      );
+  };
+
+  return attr;
+}
