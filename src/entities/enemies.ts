@@ -43,7 +43,19 @@
 
 import * as THREE from "three";
 import { toyMaterial } from "../core/look";
-import type { System } from "../core/types";
+import type { System, WeaponKind } from "../core/types";
+import { WEAPON_FREEZE, WEAPON_RIFLE } from "../core/types";
+import type { ArmourClass } from "../core/counters";
+import {
+  ARMOUR_ARMOURED,
+  ARMOUR_FAST,
+  ARMOUR_SWARM,
+  armourLabel,
+  CHILL_PER_HIT,
+  CHILL_TIME,
+  chillSpeed,
+  counterMultiplier,
+} from "../core/counters";
 import { laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 
@@ -67,6 +79,18 @@ const BIKER_SPEED = 2.6;
  *  a wall you either spend rounds on or walk around, and walking around it is
  *  the whole point of putting one next to something you want. */
 const OGRE_SPEED = 0.55;
+/**
+ * How far a fully chilled body is pulled toward ice.
+ *
+ * `instanceColor` MULTIPLIES the baked vertex colours, so it can only ever take
+ * a channel away — the blue term is a boost above 1, which the tan enemy
+ * palette has room for, and the red and green are cut. Set hard enough to read
+ * on a tan body at forty pixels, because a slow that the player cannot SEE is a
+ * slow they will not believe they caused.
+ */
+const CHILL_TINT_R = 0.45;
+const CHILL_TINT_G = 0.22;
+const CHILL_TINT_B = 0.35;
 
 /** Walker figure height. Deliberately under the player's ~1.65m — they read as
  *  rabble, and the size gap is what makes an elite feel like an elite. */
@@ -91,6 +115,21 @@ const BAR_W = 1.0;
 const BAR_H = 0.15;
 const BAR_INSET = 0.035;
 const BAR_Y = 1.55;
+/**
+ * CLASS PLATES — the word above the bar that makes the counter table visible.
+ *
+ * A counter the player cannot see is a hidden modifier, not a decision, and the
+ * counter table is invisible from the road: the enemies were ALREADY plated,
+ * fast or numerous, but nothing said which gun that wanted. One word does.
+ *
+ * ONLY THE SINGLE BODIES GET ONE. A pack is self-evidently a swarm, and forty
+ * SWARM plates in a corridor is a wall of type rather than a cue — the label is
+ * spent where the silhouette is ambiguous, which is on the heavies and the
+ * bikers.
+ */
+const PLATE_Y = BAR_Y + 0.42;
+const PLATE_W = 1.7;
+const PLATE_H = 0.4;
 const MAX_BARS = MAX_UNITS;
 
 /** Seconds an enemy stays white-hot after being hit. */
@@ -154,6 +193,22 @@ const BILLBOARD = new THREE.Quaternion().setFromEuler(new THREE.Euler(-CAMERA_PI
 /* -------------------------------------------------------------------------- */
 
 export type EnemyKind = "pack" | "elite" | "biker" | "ogre";
+
+/**
+ * WHAT EACH KIND IS MADE OF, for the counter table in core/counters.ts.
+ *
+ * This mapping is the entire design of the counter system and it is one line
+ * per enemy: a pack is many small bodies, an elite and an ogre are plated, a
+ * biker is one body moving fast. Nothing here was invented to suit the table —
+ * the enemies already behaved this way, and the table is what finally makes the
+ * player's weapon choice notice.
+ */
+export const ARMOUR_OF: Readonly<Record<EnemyKind, ArmourClass>> = {
+  pack: ARMOUR_SWARM,
+  elite: ARMOUR_ARMOURED,
+  biker: ARMOUR_FAST,
+  ogre: ARMOUR_ARMOURED,
+};
 
 /** Fired when a unit's hp hits zero. Primitives only — this runs inside update(). */
 export type EnemyKilled = (id: number, kind: EnemyKind, x: number, z: number) => void;
@@ -223,7 +278,26 @@ export interface EnemySystem extends System {
   /** Damage a unit. Returns hp remaining (0 = killed), or -1 if not live. */
   damage(id: number, amount: number): number;
   /** hitTest + damage in one. Returns hp remaining, or -1 if nothing was hit. */
-  damageAt(x: number, z: number, pad: number, amount: number): number;
+  /**
+   * Damage whatever is standing at (x, z). `weapon` is the kind that fired the
+   * round — the multiplier is applied HERE rather than at the muzzle, because
+   * only the target knows what it is made of. A freeze round also chills.
+   *
+   * Returns remaining hit points, or -1 if nothing was there.
+   */
+  damageAt(x: number, z: number, pad: number, amount: number, weapon?: WeaponKind): number;
+
+  /**
+   * Health of the first live unit as a fraction, or −1 if the road is empty.
+   *
+   * DEV HARNESS ONLY, and it exists because time-to-clear is not a measurement.
+   * The first attempt to verify the counter table timed how long a target took
+   * to stop existing — which for anything that moves is its TRANSIT time, not
+   * its death: a walker pack crosses the whole corridor in 2.6 s whether you
+   * shoot it or not, so every loadout measured 2.3 s and the table looked inert.
+   * Damage dealt in a fixed window is the honest number.
+   */
+  readonly firstHpFraction: number;
 
   onKilled(fn: EnemyKilled): void;
   onBreached(fn: EnemyBreached): void;
@@ -256,6 +330,17 @@ interface Unit {
   /** Per-unit gait offset so a crowd never steps in unison. */
   phase: number;
   breached: boolean;
+  /**
+   * How frozen this unit is, 0..1, and how long is left before it thaws.
+   *
+   * Two numbers rather than one because a chill has to DECAY rather than simply
+   * expire: a target that thaws instantly at the end of a timer snaps back to
+   * full speed in a single frame, which reads as a bug. The freeze ray tops
+   * `chillLeft` up on every hit, so holding something frozen means holding the
+   * stream on it.
+   */
+  chill: number;
+  chillLeft: number;
 }
 
 interface Walker {
@@ -396,7 +481,76 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
   barBacks.renderOrder = 5;
   barFills.renderOrder = 6;
 
+  /* ---- class plates --------------------------------------------------- */
+
+  // One mesh per word rather than one atlas with per-instance UVs: two draw
+  // calls against a custom attribute and a shader patch, for two words that will
+  // never be more than two.
+  const plateGeo = new THREE.PlaneGeometry(PLATE_W, PLATE_H);
+  const plateTex = {
+    // The words come from core/counters.ts so the vocabulary the plate uses and
+    // the vocabulary the table is documented in cannot drift apart.
+    armoured: plateTexture(armourLabel(ARMOUR_ARMOURED), "#cfd8e6"),
+    fast: plateTexture(armourLabel(ARMOUR_FAST), "#ffd447"),
+  } as const;
+  const plates = {
+    armoured: new THREE.InstancedMesh(
+      plateGeo,
+      new THREE.MeshBasicMaterial({
+        map: plateTex.armoured,
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+        // Same rule as every other word in this game: the body may haze with
+        // distance, the label may not. A plate you cannot read is not a plate.
+        fog: false,
+      }),
+      MAX_BARS,
+    ),
+    fast: new THREE.InstancedMesh(
+      plateGeo,
+      new THREE.MeshBasicMaterial({
+        map: plateTex.fast,
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+        fog: false,
+      }),
+      MAX_BARS,
+    ),
+  } as const;
+  for (const mesh of [plates.armoured, plates.fast]) {
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    mesh.renderOrder = 7;
+    object.add(mesh);
+  }
+
   /* ---- slots ---------------------------------------------------------- */
+
+  /**
+   * The body tint for one unit, written into the shared `_col` scratch.
+   *
+   * TWO TINTS THAT HAVE TO COEXIST. A hit flash brightens toward white; a chill
+   * pulls toward ice blue. They are applied in that order and the flash wins,
+   * because a unit taking damage while frozen still has to read as taking
+   * damage — the freeze ray is a support weapon and must never hide the thing
+   * the player is actually shooting.
+   */
+  function tintFor(u: Unit): void {
+    const hot = u.flash > 0 ? 1 + (u.flash / HIT_FLASH) * 1.6 : 1;
+    if (u.chill <= 0) {
+      _col.setRGB(hot, hot, hot);
+      return;
+    }
+    const c = u.chill > 1 ? 1 : u.chill;
+    _col.setRGB(
+      hot * (1 - CHILL_TINT_R * c),
+      hot * (1 - CHILL_TINT_G * c),
+      hot * (1 + CHILL_TINT_B * c),
+    );
+  }
 
   const units: Unit[] = [];
   for (let i = 0; i < MAX_UNITS; i++) {
@@ -417,6 +571,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       flash: 0,
       phase: 0,
       breached: false,
+      chill: 0,
+      chillLeft: 0,
     });
   }
 
@@ -633,6 +789,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       u.pinned = false;
       u.flash = 0;
       u.breached = false;
+      u.chill = 0;
+      u.chillLeft = 0;
       u.phase = Math.random() * Math.PI * 2;
       u.bar = id;
       live++;
@@ -686,6 +844,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       u.pinned = false;
       u.flash = 0;
       u.breached = false;
+      u.chill = 0;
+      u.chillLeft = 0;
       u.phase = Math.random() * Math.PI * 2;
       // Elites carry no bar of their own until hurt — on a barrel, the barrel's
       // numeral is already the health readout the player is watching.
@@ -783,10 +943,24 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       return u.hp;
     },
 
-    damageAt(x, z, pad, amount) {
+    get firstHpFraction() {
+      for (let i = 0; i < MAX_UNITS; i++) {
+        const u = units[i];
+        if (u && u.alive) return u.hp / Math.max(1, u.maxHp);
+      }
+      return -1;
+    },
+
+    damageAt(x, z, pad, amount, weapon = WEAPON_RIFLE) {
       const id = system.hitTest(x, z, pad);
       if (id < 0) return -1;
-      return system.damage(id, amount);
+      const u = units[id];
+      if (!u) return -1;
+      if (weapon === WEAPON_FREEZE) {
+        u.chill = Math.min(1, u.chill + CHILL_PER_HIT);
+        u.chillLeft = CHILL_TIME;
+      }
+      return system.damage(id, amount * counterMultiplier(weapon, ARMOUR_OF[u.kind]));
     },
 
     onKilled(fn) {
@@ -847,6 +1021,17 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
         if (!u || !u.alive) continue;
 
         if (u.flash > 0) u.flash -= dt;
+        if (u.chillLeft > 0) {
+          u.chillLeft -= dt;
+          // Decays over the tail rather than switching off at the end of it, so
+          // a thawing target speeds up visibly instead of snapping.
+          if (u.chillLeft <= 0) {
+            u.chillLeft = 0;
+            u.chill = 0;
+          } else if (u.chillLeft < CHILL_TIME * 0.5) {
+            u.chill *= Math.max(0, u.chillLeft / (CHILL_TIME * 0.5));
+          }
+        }
 
         if (u.pinned) {
           // Position is driven from outside every tick; nothing to integrate.
@@ -862,7 +1047,11 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
                 ? OGRE_SPEED
                 : ELITE_SPEED;
         u.prevZ = u.z;
-        u.z += (world.scrollSpeed + speed) * dt;
+        // THE CHILL ONLY SLOWS THE ENEMY'S OWN WALK, never the corridor scroll.
+        // Freezing the scroll would mean freezing the ROAD, which would carry
+        // the whole world with it — the target has to be slower relative to a
+        // bridge that is still moving.
+        u.z += (world.scrollSpeed + speed * chillSpeed(u.chill)) * dt;
 
         if (u.y > 0 || u.vy !== 0) {
           u.vy -= DROP_GRAVITY * dt;
@@ -920,8 +1109,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
         _scl.set(1, 1, 1);
         _m.compose(_pos, _q, _scl);
         walkers.setMatrixAt(i, _m);
-        const hot = u.flash > 0 ? 1 + (u.flash / HIT_FLASH) * 1.6 : 1;
-        walkers.setColorAt(i, _col.setRGB(hot, hot, hot));
+        tintFor(u);
+        walkers.setColorAt(i, _col);
 
         // Shadow stays on the ground and does not inherit the bob — a shadow
         // that bounces with the walker is worse than no shadow at all.
@@ -944,6 +1133,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       for (let i = MAX_WALKERS; i < SHADOW_CAPACITY; i++) shadows.setMatrixAt(i, _m);
 
       let barCount = 0;
+      let armouredCount = 0;
+      let fastCount = 0;
       for (let i = 0; i < MAX_UNITS; i++) {
         const u = units[i];
         if (!u || !u.alive) continue;
@@ -965,8 +1156,8 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
             const shell = shellMeshOf(u.kind);
             body.setMatrixAt(slot, _m);
             shell.setMatrixAt(slot, _m);
-            const hot = u.flash > 0 ? 1 + (u.flash / HIT_FLASH) * 1.6 : 1;
-            body.setColorAt(slot, _col.setRGB(hot, hot, hot));
+            tintFor(u);
+            body.setColorAt(slot, _col);
 
             // A rider standing on a barrel is not touching the road, and the
             // barrel already casts its own shadow there.
@@ -997,6 +1188,20 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
           _m.compose(_pos, BILLBOARD, _scl);
           barFills.setMatrixAt(barCount, _m);
           barCount++;
+
+          // The class plate rides the same billboard basis as the bar, one step
+          // higher. Packs are skipped — see PLATE_Y.
+          const armour = ARMOUR_OF[u.kind];
+          if (armour === ARMOUR_ARMOURED || armour === ARMOUR_FAST) {
+            const mesh = armour === ARMOUR_ARMOURED ? plates.armoured : plates.fast;
+            const n = armour === ARMOUR_ARMOURED ? armouredCount++ : fastCount++;
+            if (n < MAX_BARS) {
+              _pos.set(u.x, u.y + PLATE_Y, z - 0.35);
+              _scl.set(1, 1, 1);
+              _m.compose(_pos, BILLBOARD, _scl);
+              mesh.setMatrixAt(n, _m);
+            }
+          }
         }
       }
       eliteShells.instanceMatrix.needsUpdate = true;
@@ -1017,6 +1222,10 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       }
       barBacks.instanceMatrix.needsUpdate = true;
       barFills.instanceMatrix.needsUpdate = true;
+      plates.armoured.count = Math.min(armouredCount, MAX_BARS);
+      plates.fast.count = Math.min(fastCount, MAX_BARS);
+      plates.armoured.instanceMatrix.needsUpdate = true;
+      plates.fast.instanceMatrix.needsUpdate = true;
       shadows.instanceMatrix.needsUpdate = true;
 
       for (let i = 0; i < PUFF_CAPACITY; i++) {
@@ -1071,6 +1280,13 @@ export function createEnemies(scene: THREE.Scene): EnemySystem {
       eliteBodies.dispose();
       bikerShells.dispose();
       bikerBodies.dispose();
+      for (const mesh of [plates.armoured, plates.fast]) {
+        (mesh.material as THREE.Material).dispose();
+        mesh.dispose();
+      }
+      plateGeo.dispose();
+      plateTex.armoured.dispose();
+      plateTex.fast.dispose();
       barBacks.dispose();
       barFills.dispose();
     },
@@ -1312,6 +1528,46 @@ function buildOgre(g = 0): THREE.BufferGeometry {
 
 function box(w: number, h: number, d: number, g: number): THREE.BoxGeometry {
   return new THREE.BoxGeometry(w + g * 2, h + g * 2, d + g * 2);
+}
+
+/**
+ * A word on a dark rounded plate, in the same heavy white-stroked type the gate
+ * numerals and the pickup labels use — the one typeface in this project that has
+ * been proven to read at forty pixels through fog.
+ */
+function plateTexture(text: string, color: string): THREE.CanvasTexture {
+  const W = 256;
+  const H = 64;
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+  if (!ctx) throw new Error("enemies: 2d canvas unavailable");
+
+  const r = 16;
+  ctx.fillStyle = "rgba(14,20,32,0.82)";
+  ctx.beginPath();
+  ctx.moveTo(r, 2);
+  ctx.arcTo(W - 2, 2, W - 2, H - 2, r);
+  ctx.arcTo(W - 2, H - 2, 2, H - 2, r);
+  ctx.arcTo(2, H - 2, 2, 2, r);
+  ctx.arcTo(2, 2, W - 2, 2, r);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.font = '900 34px "Arial Black", Impact, sans-serif';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = "#0d1524";
+  ctx.strokeText(text, W / 2, H / 2 + 2);
+  ctx.fillStyle = color;
+  ctx.fillText(text, W / 2, H / 2 + 2);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 /** A soft ellipse of alpha. Black RGB so the material never tints it. */

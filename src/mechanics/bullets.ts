@@ -143,6 +143,7 @@
 import * as THREE from "three";
 import { toyMaterial } from "../core/look";
 import type { System, WeaponTier, WorldState } from "../core/types";
+import { WEAPON_FLAMER, WEAPON_FREEZE, WEAPON_RIFLE, WEAPON_ROCKET } from "../core/types";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import { CORRIDOR_HALF_WIDTH } from "./lane";
 
@@ -222,6 +223,69 @@ const ROCKET_CAPACITY = 128;
  *  to err toward bigger and more obvious, and a rocket that does not stand out
  *  of a curtain of hundreds of rounds may as well be one of them. */
 const ROCKET_MESH_SCALE = 0.19;
+
+/**
+ * THE FLAMETHROWER — a short, wide, cheap-per-round wall of fire.
+ *
+ * Everything about it is the opposite of the rocket, which is the point: a
+ * rocket is one expensive round that has to hit the right thing, and a flamer is
+ * a great many worthless ones that do not have to hit anything in particular.
+ * That difference is what makes the two counter different targets — see
+ * WEAPON_COUNTER in entities/enemies.ts.
+ *
+ * The RANGE is the mechanic, not the damage. At 42% of a rifle's reach the fire
+ * dies at roughly z −9, which is inside the band a walker pack has to cross to
+ * breach, and well short of where a barrel is worth shooting. So it is a defence
+ * weapon that cannot farm the corridor, and its owner still wants riflemen.
+ */
+const STYLE_FLAME = 3;
+const FLAME_RANGE_SCALE = 0.42;
+const FLAME_SPEED_SCALE = 0.72;
+/**
+ * ONE, NOT A PENALTY. The flamer's drawback is its RANGE, and charging it a
+ * damage penalty on top of that made it strictly worse than a rifle against
+ * anything it was not built for and only a wash against the things it was. A
+ * round is a round; the counter table is where this weapon is priced.
+ */
+const FLAME_DAMAGE = 1;
+const FLAME_SIZE = 1.55;
+/**
+ * Radians of extra scatter on top of the tier's own spread. A flamer that fires
+ * down the stream axis is a bad rifle; the cone IS the weapon.
+ *
+ * 0.19 WAS TOO WIDE TO MEASURE. At six metres it threw rounds ±1.14 m either
+ * side of a pack barely two metres across, so roughly half the fire landed on
+ * empty road and the weapon's 3.5x against swarms came out as 1.68x in a
+ * damage-window probe — worse than a minigun against the one target it exists
+ * to beat. 0.11 still reads as a cone and still wastes rounds at long range,
+ * which is the flavour; it simply stops wasting most of them at the range the
+ * weapon can actually reach.
+ */
+const FLAME_SPREAD = 0.11;
+
+/**
+ * THE FREEZE RAY — the one weapon that is not about damage at all.
+ *
+ * It hits for a tenth of a rifle round and chills whatever it touches, and the
+ * chill is a speed multiplier the enemies and the boss both read. That makes it
+ * the only answer in the game to something that is dangerous because it is
+ * CLOSING: a charging boss, a pack of bikers, the horde that arrives with every
+ * rush. Nothing else in the arsenal can buy time.
+ *
+ * Priced so that stacking it is a real cost. An army of freezers kills nothing
+ * and starves — the weapon has to be mixed, which is the first time this game
+ * has asked the player to compose a loadout rather than accumulate one.
+ */
+const STYLE_FREEZE = 4;
+/**
+ * A third of a rifle round. It was a tenth, which made a freezer a body that
+ * does not shoot — and a crate of those is a punishment however good the chill
+ * is. A third is small enough that an army of freezers still starves and large
+ * enough that carrying two is not a sacrifice.
+ */
+const FREEZE_DAMAGE = 0.35;
+const FREEZE_SPEED_SCALE = 1.15;
+const FREEZE_SIZE = 1.5;
 /** The axis the rocket geometry is built along. Bullets fly toward -Z. */
 const ROCKET_FORWARD = new THREE.Vector3(0, 0, -1);
 
@@ -495,6 +559,13 @@ const TINT_CYAN = { r: 1, g: 1, b: 1 };
 /** Rockets ride the dart sprite but hot orange, so they separate from a cyan
  *  firehose without needing their own texture. */
 const TINT_ROCKET = { r: 1.4, g: 0.66, b: 0.3 };
+/** Flame rides the warm sprite hotter and yellower than a tracer; freeze rides
+ *  the cyan dart pulled toward white, because ice reads as a lack of colour
+ *  rather than as a colour. Both are multipliers on the texture, so neither can
+ *  add a hue the texture does not already have — that is why flame is on the
+ *  warm sheet and freeze is on the cyan one. */
+const TINT_FLAME = { r: 1.5, g: 0.85, b: 0.25 };
+const TINT_FREEZE = { r: 0.75, g: 1.25, b: 1.5 };
 /**
  * Impact bursts are still ADDITIVE — a hit flash is a light source, it should
  * blow out, and it lasts 0.18 s so it never has to hold a hue. Kept just under
@@ -532,6 +603,15 @@ export interface BulletView {
   readonly pz: Float32Array;
   /** Damage this bullet delivers on impact. */
   readonly damage: Float32Array;
+  /**
+   * WHICH WEAPON FIRED EACH ROUND. Indexed by slot id like everything else.
+   *
+   * On the view rather than kept private because the counter table is not the
+   * bullet module's business: bullets knows what it fired, and only the thing
+   * being hit knows what that was worth against it. `main.ts` hands this
+   * straight to `enemies.damageAt` and `boss.damageAt`.
+   */
+  readonly weapon: Uint8Array;
 }
 
 export interface BulletSystem extends System {
@@ -862,6 +942,7 @@ class Bullets implements BulletSystem, BulletView {
   readonly py = new Float32Array(BULLET_POOL);
   readonly pz = new Float32Array(BULLET_POOL);
   readonly damage = new Float32Array(BULLET_POOL);
+  readonly weapon = new Uint8Array(BULLET_POOL);
   readonly #vx = new Float32Array(BULLET_POOL);
   readonly #vy = new Float32Array(BULLET_POOL);
   readonly #vz = new Float32Array(BULLET_POOL);
@@ -1183,7 +1264,8 @@ class Bullets implements BulletSystem, BulletView {
       if (shots > budget) shots = budget;
       budget -= shots;
 
-      const heavy = this.#streamKind[s] === 2;
+      const weapon = this.#streamKind[s]!;
+      const heavy = weapon === WEAPON_ROCKET;
       const ox = this.#streamX[s]!;
       const oy = this.#streamY[s]!;
       const oz = this.#streamZ[s]!;
@@ -1208,12 +1290,17 @@ class Bullets implements BulletSystem, BulletView {
           ox,
           oy,
           oz,
-          aim + (Math.random() * 2 - 1) * rolled,
+          // A FLAMER SCATTERS ON TOP OF THE TIER'S SPREAD. Every other weapon
+          // shares the stream's aim error; this one adds its own cone, because
+          // a wall of fire that arrives as a line is a bad rifle.
+          aim +
+            (Math.random() * 2 - 1) * rolled +
+            (weapon === WEAPON_FLAMER ? (Math.random() * 2 - 1) * FLAME_SPREAD : 0),
           tier,
           age < 0 ? 0 : age,
           this.#shotIndex % flashStride === 0 ? 1 : 0,
           axis,
-          heavy,
+          weapon,
         );
       }
     }
@@ -1310,11 +1397,31 @@ class Bullets implements BulletSystem, BulletView {
       // only darken what the texture already has. Routing rockets through the
       // tracer batch is what actually makes them orange, and it costs nothing
       // because both batches were already being flushed.
-      const dart = style === STYLE_DART;
+      // The CYAN sheet carries darts and freeze; the WARM sheet carries
+      // tracers, flame and rockets. A tint can only darken what the texture
+      // already has, so putting flame on the cyan sheet would multiply to olive.
+      const cyanSheet = style === STYLE_DART || style === STYLE_FREEZE;
       const size = this.#size[id]!;
-      const length = (dart ? t.dartLength : t.tracerLength) * size;
-      const width = (dart ? t.dartWidth : t.tracerWidth) * size;
-      const tint = rocket ? TINT_ROCKET : dart ? TINT_CYAN : TINT_WARM;
+      // Flame is drawn SHORT AND FAT against its speed: it is a puff of burning
+      // fuel, and a long thin one reads as another tracer.
+      const flame = style === STYLE_FLAME;
+      // FLAME IS SHORT AND FAT, but only up to a point. At 0.55 long and 1.5
+      // wide the sprite was as good as square, and a squashed needle texture
+      // reads as an orange BRICK — photographed, the fire looked like falling
+      // debris. 0.75 by 1.15 keeps a 3:1 streak, which is stubby enough to be
+      // fire and long enough to still be a projectile.
+      const length = (cyanSheet ? t.dartLength : t.tracerLength) * size * (flame ? 0.75 : 1);
+      const width = (cyanSheet ? t.dartWidth : t.tracerWidth) * size * (flame ? 1.15 : 1);
+      const tint =
+        style === STYLE_ROCKET
+          ? TINT_ROCKET
+          : flame
+            ? TINT_FLAME
+            : style === STYLE_FREEZE
+              ? TINT_FREEZE
+              : cyanSheet
+                ? TINT_CYAN
+                : TINT_WARM;
 
       // Interpolate the nose, then push the sprite back by half its length so
       // the nose — not the sprite centre — sits on the collision point.
@@ -1324,7 +1431,7 @@ class Bullets implements BulletSystem, BulletView {
       const ny = this.py[id]! + (this.y[id]! - this.py[id]!) * alpha;
       const nz = this.pz[id]! + (this.z[id]! - this.pz[id]!) * alpha;
 
-      (dart ? this.#dartBatch : this.#tracerBatch).push(
+      (cyanSheet ? this.#dartBatch : this.#tracerBatch).push(
         nx - this.#vx[id]! * inv * half,
         ny - this.#vy[id]! * inv * half,
         nz - this.#vz[id]! * inv * half,
@@ -1525,13 +1632,26 @@ class Bullets implements BulletSystem, BulletView {
     age: number,
     flash: number,
     axisX: number,
-    rocket = false,
+    weapon: number = WEAPON_RIFLE,
   ): void {
     if (this.#freeCount === 0) return;
     const t = this.tuning;
-    const dart = tier === 2 || rocket;
+    const rocket = weapon === WEAPON_ROCKET;
+    const flame = weapon === WEAPON_FLAMER;
+    const freeze = weapon === WEAPON_FREEZE;
+    // Flame is drawn on the WARM sheet and freeze on the CYAN one, so the
+    // dart/tracer split is a texture choice before it is a tier one.
+    const dart = freeze || (!flame && (tier === 2 || rocket));
 
-    const base = rocket ? t.dartSpeed * ROCKET_SPEED_SCALE : dart ? t.dartSpeed : t.tracerSpeed;
+    const base = rocket
+      ? t.dartSpeed * ROCKET_SPEED_SCALE
+      : flame
+        ? t.tracerSpeed * FLAME_SPEED_SCALE
+        : freeze
+          ? t.dartSpeed * FREEZE_SPEED_SCALE
+          : dart
+            ? t.dartSpeed
+            : t.tracerSpeed;
     const speed = base * (1 + (Math.random() - 0.5) * t.speedJitter);
 
     // Seed the inward lean at spawn rather than waiting for the first tick of
@@ -1552,7 +1672,8 @@ class Bullets implements BulletSystem, BulletView {
     // A fire rate slower than one shot per flight time makes the sub-tick
     // catch-up longer than the bullet lives. Nothing to draw, so don't take a
     // slot for it.
-    const maxLife = t.range / speed;
+    // THE FLAMER'S REACH IS ITS DEFINITION — see FLAME_RANGE_SCALE.
+    const maxLife = (flame ? t.range * FLAME_RANGE_SCALE : t.range) / speed;
     if (age >= maxLife) return;
 
     // Muzzles stay on the road even if the blob is reported wider than it;
@@ -1581,23 +1702,34 @@ class Bullets implements BulletSystem, BulletView {
     this.#life[id] = maxLife - age;
     this.#roll[id] = rollFor(vx, vy, vz);
     this.#axisX[id] = axisX;
-    this.#style[id] = rocket ? STYLE_ROCKET : dart ? STYLE_DART : STYLE_TRACER;
+    this.#style[id] = rocket
+      ? STYLE_ROCKET
+      : flame
+        ? STYLE_FLAME
+        : freeze
+          ? STYLE_FREEZE
+          : dart
+            ? STYLE_DART
+            : STYLE_TRACER;
+    this.weapon[id] = weapon;
     this.damage[id] =
       (dart ? t.dartDamage : t.tracerDamage) *
       this.#firepower *
-      (rocket ? ROCKET_DAMAGE : 1);
+      (rocket ? ROCKET_DAMAGE : flame ? FLAME_DAMAGE : freeze ? FREEZE_DAMAGE : 1);
     // Length tracks speed so a faster round is a longer streak, and a little
     // per-bullet variance stops the stream reading as clones. A rocket is scaled
     // UP against that rule on purpose — it is slow, so speed alone would make it
     // the smallest thing on screen when it needs to be the largest.
-    const nominal = rocket ? t.dartSpeed * ROCKET_SPEED_SCALE : dart ? t.dartSpeed : t.tracerSpeed;
+    const nominal = base;
     this.#size[id] =
-      (speed / nominal) * (0.88 + Math.random() * 0.24) * (rocket ? ROCKET_SIZE : 1);
+      (speed / nominal) *
+      (0.88 + Math.random() * 0.24) *
+      (rocket ? ROCKET_SIZE : flame ? FLAME_SIZE : freeze ? FREEZE_SIZE : 1);
 
     // The caller decides — the flash stride is derived from the live shot rate
     // so one soldier flashes on every round and a thousand do not strobe.
     if (flash !== 0) {
-      const tint = rocket || !dart ? FLAME_WARM : FLAME_CYAN;
+      const tint = rocket || flame || !dart ? FLAME_WARM : FLAME_CYAN;
       this.#muzzles.spawn(
         ox,
         oy,

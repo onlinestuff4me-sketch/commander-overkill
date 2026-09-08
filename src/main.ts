@@ -18,7 +18,8 @@ import { createStage } from "./core/renderer";
 import { createZoom } from "./core/zoom";
 import { bus } from "./core/events";
 import { createWorld, MAX_TROOPS } from "./core/types";
-import type { System, WeaponTier } from "./core/types";
+import type { System, WeaponKind, WeaponTier } from "./core/types";
+import { WEAPON_ROCKET, WEAPON_SPLASH } from "./core/types";
 import { TouchDriver, clamp } from "./input/touch";
 import { createCorridor, CORRIDOR_HALF_WIDTH, CORRIDOR_LENGTH } from "./mechanics/lane";
 import { createSquad } from "./entities/squad";
@@ -34,6 +35,7 @@ import {
   damageOnSegment,
   ELITE_PASS_SHARE,
   enemyHp,
+  CAGE_PASS_SHARE,
   OGRE_PASS_SHARE,
   WALKER_PASS_SHARE,
 } from "./mechanics/pacing";
@@ -49,6 +51,7 @@ import {
 import { createBarrels } from "./entities/barrels";
 import { createEnemies } from "./entities/enemies";
 import { createBoss } from "./entities/boss";
+import { ALLY_STREAMS, createAlly } from "./entities/ally";
 import type { BossKind } from "./entities/boss";
 import { createPickups } from "./entities/pickups";
 import type { PickupKind } from "./entities/pickups";
@@ -90,6 +93,9 @@ const enemies = createEnemies(stage.scene);
 // Punctuation. Everything else on the road is a decision you make in passing;
 // this is one that stands there and waits for an answer. See entities/boss.ts.
 const boss = createBoss(stage.scene);
+// The rescued robot, and the cage it arrives in. One per level — see
+// entities/ally.ts.
+const ally = createAlly(stage.scene);
 // What rides a barrel. Not an enemy — see the note in entities/pickups.ts.
 const pickups = createPickups(stage.scene);
 const floaters = createFloaters(stage.scene);
@@ -120,6 +126,7 @@ const renderables: System[] = [
   barrels,
   enemies,
   boss,
+  ally,
   pickups,
   floaters,
   growthFx,
@@ -314,9 +321,37 @@ const RECRUIT_ELITES = 1;
  */
 const MINIGUN_CREW = 4;
 const ROCKET_CREW = 3;
-/** What one carrier is worth on its axis. Small, because the count grows. */
+/**
+ * The counter crews, and they are SMALLER than the two above on purpose.
+ *
+ * A flamer or a freezer is worth three times an ordinary rifle against the
+ * right target and a third of one against the wrong target, so a crate of them
+ * is a bet rather than a stat. Handing out four at a time would make the bet
+ * cheap; three and two make you notice which one you took.
+ */
+const FLAMER_CREW = 3;
+const FREEZER_CREW = 2;
+/**
+ * What one carrier is worth on its axis. Small, because the count grows.
+ *
+ * ALL FOUR CREWS CONTRIBUTE, AND THAT IS A CORRECTION. The first version of the
+ * counter weapons gave a flamer and a freezer no global contribution at all —
+ * their whole value was the counter multiplier on their own rounds. Measured,
+ * that made them strictly worse than a rocket crate at every army size, because
+ * a rocketeer raises `firepower` for EVERY soldier: fifteen rocketeers in a
+ * two-hundred-strong army is worth more than a hundred riflemen, and fifteen
+ * flamers hitting three times as hard is worth forty-five. The counter table was
+ * being swamped by an economy it could not see, and a weapon nobody should ever
+ * pick up is not a decision.
+ *
+ * So the two new crews are PEERS on the existing two axes, at a slightly lower
+ * rate because they also carry a counter. Which crate you want is then decided
+ * by what is coming down the road, which is the entire point of the exercise.
+ */
 const GUNNER_RATE = 0.045;
 const ROCKETEER_POWER = 0.06;
+const FLAMER_POWER = 0.045;
+const FREEZER_RATE = 0.03;
 /** Ceilings, so a long run cannot stack its way out of the difficulty curve. */
 const FIRE_RATE_MAX = 4;
 const FIREPOWER_MAX = 6;
@@ -337,8 +372,23 @@ function armCarriers(): void {
     world.rocketeers,
     Math.max(0, world.troops - world.elites - world.gunners),
   );
-  world.fireRate = Math.min(FIRE_RATE_MAX, 1 + world.gunners * GUNNER_RATE);
-  world.firepower = Math.min(FIREPOWER_MAX, 1 + world.rocketeers * ROCKETEER_POWER);
+  // The counter crews are last in the priority order for the same reason
+  // rocketeers are before them: a loss eats the least-invested job first, so a
+  // shattered army is still the veterans and the heavy weapons.
+  const armed = world.elites + world.gunners + world.rocketeers;
+  world.flamers = Math.min(world.flamers, Math.max(0, world.troops - armed));
+  world.freezers = Math.min(
+    world.freezers,
+    Math.max(0, world.troops - armed - world.flamers),
+  );
+  world.fireRate = Math.min(
+    FIRE_RATE_MAX,
+    1 + world.gunners * GUNNER_RATE + world.freezers * FREEZER_RATE,
+  );
+  world.firepower = Math.min(
+    FIREPOWER_MAX,
+    1 + world.rocketeers * ROCKETEER_POWER + world.flamers * FLAMER_POWER,
+  );
 }
 
 barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
@@ -357,6 +407,12 @@ barrels.onDestroyed((_id, tag, _x, _z, maxHp) => {
     world.gunners += MINIGUN_CREW;
   } else if (kind === "rocket") {
     world.rocketeers += ROCKET_CREW;
+  } else if (kind === "flamer") {
+    world.flamers += FLAMER_CREW;
+    commander.say("flamer");
+  } else if (kind === "freezer") {
+    world.freezers += FREEZER_CREW;
+    commander.say("freezer");
   }
   armCarriers();
 });
@@ -402,6 +458,14 @@ enemies.onBreached((_id, kind, _hp, bodies) => {
   // once the army is established enough to do something about it.
   if (world.troops < MERCY_TROOPS) return;
   const weight = (BREACH_COST[kind] ?? 1) * Math.max(1, bodies);
+  // THE ROBOT STEPS IN FRONT. Only for a breach worth stepping in front of —
+  // spending its cooldown on a single stray walker would mean it was never there
+  // for the pack behind it — and only once every few seconds, so it blunts a
+  // horde rather than deleting one.
+  if (weight >= HITSTOP_BREACH_WEIGHT && ally.guard()) {
+    zoom.shake(SHAKE_BOSS_HIT * 0.4);
+    return;
+  }
   if (weight >= HITSTOP_BREACH_WEIGHT) {
     hitStop(HITSTOP_BREACH);
     // Straight down. A breach arrives from up the road rather than from a side,
@@ -665,6 +729,15 @@ boss.onKilled((kind) => {
   else if (kind === "roller") world.gunners += MINIGUN_CREW * BOSS_CREW;
   else world.elites = Math.min(world.troops, world.elites + RECRUIT_ELITES * 3);
   armCarriers();
+});
+
+ally.onFreed(() => {
+  commander.say("ally");
+  // The same beat a boss death gets, at half the size: it is the second biggest
+  // thing that can happen on the road, and it should land like it.
+  zoom.shake(SHAKE_BOSS_DEATH * 0.5);
+  zoom.punch(0, -1, PUNCH_BOSS_DEATH * 0.5);
+  hitStop(HITSTOP_BOSS_DEATH);
 });
 
 // Nothing to show until one arrives.
@@ -1025,8 +1098,12 @@ const PICKUP_ODDS: readonly PickupKind[] = [
   "recruit",
   "minigun",
   "recruit",
+  "flamer",
+  "recruit",
   "recruit",
   "rocket",
+  "recruit",
+  "freezer",
 ];
 let pickupCursor = 0;
 
@@ -1038,11 +1115,35 @@ function pickForRow(): PickupKind {
   return kind;
 }
 
+/** How much road the cage occupies, for `clusterX`. Matches CAGE_HALF_WIDTH in
+ *  entities/ally.ts with a little clearance, so a cage placed at the kerb does
+ *  not overhang it. */
+const CAGE_WIDTH = 2.6;
+
 /** Walker toughness tracks the army, for the reason in mechanics/pacing.ts. The
  *  floor is the old fixed value, so the opening is unchanged. Barrels no longer
  *  carry elites at all — they carry pickups — so only walkers need this. */
 function walkerHp(): number {
   return enemyHp(world.troops, tierFor(world.troops), bullets.tuning, squad.radiusX, WALKER_PASS_SHARE, 4);
+}
+
+/**
+ * What a cage costs to open.
+ *
+ * Priced off the same curve as an ogre and then softened, because the two are
+ * doing different jobs: an ogre is meant to be walked around at low strength,
+ * and a cage is meant to be OPENED. A prize nobody can afford is not a prize.
+ * The floor is high for the opposite reason — free is not a decision either.
+ */
+function cageHp(): number {
+  return enemyHp(
+    world.troops,
+    tierFor(world.troops),
+    bullets.tuning,
+    squad.radiusX,
+    CAGE_PASS_SHARE,
+    60,
+  );
 }
 
 /** Heavies and bikers are single bodies rather than a pack of eight, so each one
@@ -1224,6 +1325,17 @@ function place(what: Placement, z: number, side = 0, free?: { x: number; count: 
       return;
     }
 
+    case "cage": {
+      // PRICED LIKE A HEAVY, NOT LIKE A BARREL. An ally that opens in a second
+      // is a free ally, and this is the biggest single thing the corridor gives
+      // away — it should cost roughly what an ogre costs, which is most of an
+      // approach's fire. If the module refuses (a cage is already up, or the
+      // robot is already out) nothing is placed and the beat is quiet road,
+      // which is the correct outcome: there is only one of these per level.
+      ally.spawnCage(clusterX(CAGE_WIDTH, side), z, cageHp());
+      return;
+    }
+
     case "ogres": {
       // ONE BODY, and that is the design. A line of ogres is a wall, which the
       // gate rows already do better; a single one standing in front of something
@@ -1391,6 +1503,7 @@ function resetRun(): void {
   bossIndex = 0;
   gates.reset();
   director.reset();
+  ally.clear();
   hitStopTicks = 0;
   rowIndex = 0;
   pickups.clear();
@@ -1476,12 +1589,15 @@ function detonate(x: number, y: number, z: number, dmg: number): void {
   // Once, not once per pass: a boss is a single target, and letting the blast
   // loop find it four times would quietly make rockets four times better
   // against the one enemy the difficulty curve is built around.
-  boss.damageAt(x, z, SPLASH_RADIUS, splash);
+  // WEAPON_SPLASH, not WEAPON_ROCKET. The blast has its own row in the counter
+  // table — see core/types.ts — because it lands several times on a single
+  // target and the round that caused it lands once.
+  boss.damageAt(x, z, SPLASH_RADIUS, splash, WEAPON_SPLASH);
   for (let i = 0; i < SPLASH_TARGETS; i++) {
     // Each pass takes the nearest remaining target; once both stop reporting a
     // hit there is nothing else in the blast and the rest of the passes are free.
     const hitBarrel = barrels.damageAt(x, z, SPLASH_RADIUS, splash) >= 0;
-    const hitEnemy = enemies.damageAt(x, z, SPLASH_RADIUS, splash) >= 0;
+    const hitEnemy = enemies.damageAt(x, z, SPLASH_RADIUS, splash, WEAPON_SPLASH) >= 0;
     if (!hitBarrel && !hitEnemy) break;
   }
 }
@@ -1494,6 +1610,10 @@ function resolveHits(): void {
     const y = view.y[id]!;
     const z = view.z[id]!;
     const dmg = view.damage[id]!;
+    // WHICH GUN FIRED IT, carried all the way from the muzzle. Gates and barrels
+    // ignore it — the economy is neutral to weapon choice on purpose, see
+    // core/counters.ts — and the two things that can be countered read it.
+    const weapon = view.weapon[id]! as WeaponKind;
 
     // GATES FIRST, AND THEY STOP THE ROUND. A barrier is a physical thing: the
     // stream ends at the nearest standing one and only reaches what is behind
@@ -1511,7 +1631,18 @@ function resolveHits(): void {
     // Tested before barrels because it is the biggest thing on the road and the
     // one the player is aiming at; a round that reaches it has already passed
     // everything in front.
-    if (boss.damageAt(x, z, ENEMY_PAD, dmg)) {
+    if (boss.damageAt(x, z, ENEMY_PAD, dmg, weapon)) {
+      bullets.consume(id, x, y, z);
+      if (rocket) detonate(x, y, z, dmg);
+      continue;
+    }
+
+    // AFTER the boss and BEFORE the barrels. A cage is a structure standing on
+    // the road exactly as a barrel is, and it is tested first of the two so that
+    // a cage placed among barrels is the thing the stream chews through rather
+    // than the thing that survives because the barrels in front of it kept
+    // eating rounds.
+    if (ally.damageAt(x, z, BARREL_PAD, dmg)) {
       bullets.consume(id, x, y, z);
       if (rocket) detonate(x, y, z, dmg);
       continue;
@@ -1522,7 +1653,7 @@ function resolveHits(): void {
       if (rocket) detonate(x, y, z, dmg);
       continue;
     }
-    if (enemies.damageAt(x, z, ENEMY_PAD, dmg) >= 0) {
+    if (enemies.damageAt(x, z, ENEMY_PAD, dmg, weapon) >= 0) {
       bullets.consume(id, x, y, z);
       if (rocket) detonate(x, y, z, dmg);
     }
@@ -1601,11 +1732,34 @@ function tick(dt: number): void {
     );
     // setMuzzle still supplies the blob centre and width for aim; setShooters
     // is what gives each soldier its own stream origin.
-    const reported = squad.sampleShooters(shooters, MAX_STREAMS);
-    bullets.setShooters(shooters, reported);
+    // ROOM IS RESERVED FOR THE ROBOT BEFORE THE CROWD IS SAMPLED, not after.
+    // The crowd fills every stream slot it is offered, so appending the ally
+    // afterwards gave it zero streams at exactly the army sizes where the stream
+    // cap binds — the robot would have gone quiet in the second half of every
+    // level and nothing would have said why.
+    const squadCap = ally.active ? MAX_STREAMS - ALLY_STREAMS : MAX_STREAMS;
+    const reported = squad.sampleShooters(shooters, squadCap);
+    // Same limit, deliberately: the two samplers share their index arithmetic,
+    // and a divergence between them puts a rocket in an ordinary soldier's hands.
+    squad.sampleShooterKinds(shooterKinds, squadCap);
+    // THE ROBOT IS A BANK OF STREAMS AT ONE POINT, appended to the crowd's own.
+    // It owns no bullet code — see the header of entities/ally.ts — so this is
+    // the whole of its firepower: ten rocket streams from its muzzle, which is
+    // worth roughly twenty riflemen. Appended rather than mixed in so the
+    // crowd's own sampling is untouched.
+    let streams = reported;
+    if (ally.active) {
+      const room = Math.min(ALLY_STREAMS, MAX_STREAMS - streams);
+      for (let i = 0; i < room; i++) {
+        shooters[streams]!.set(ally.muzzleX, ally.muzzleY, ally.muzzleZ);
+        shooterKinds[streams] = WEAPON_ROCKET;
+        streams++;
+      }
+    }
+    bullets.setShooters(shooters, streams);
     // Immediately after, against the same buffers: which of those soldiers is
     // carrying what, so a rocketeer's stream actually fires rockets.
-    bullets.setShooterKinds(shooterKinds, squad.sampleShooterKinds(shooterKinds, MAX_STREAMS));
+    bullets.setShooterKinds(shooterKinds, streams);
     bullets.update(dt, world);
 
     // 3. Targets move, then get shot — so a hit lands where the barrel is now,
@@ -1616,6 +1770,9 @@ function tick(dt: number): void {
     // a hit lands where the boss is now — it moves fast during a charge and a
     // tick of lag there reads as rounds passing through it.
     boss.update(dt, world);
+    // After the boss and before the hits are resolved, for the same reason the
+    // boss is: the cage has to be where it is now when a round arrives at it.
+    ally.update(dt, world);
     // The dying boss's blast chain. Driven here rather than from the boss module
     // because the flashes belong to the bullet system, and an entity module does
     // not reach into another one.
@@ -1943,6 +2100,17 @@ if (import.meta.env.DEV) {
         boss.spawn(kind, bossHp(kind, bossIndex), side, z);
         bossBar.reset(boss.maxHp);
       },
+      /** Where the ally is and what it is doing. The robot takes station off the
+       *  crowd's live width, so "is it in frame" is a question with a number. */
+      allyStats() {
+        return {
+          caged: ally.caged,
+          active: ally.active,
+          cageFraction: Number(ally.cageFraction.toFixed(3)),
+          x: Number(ally.muzzleX.toFixed(2)),
+          z: Number(ally.muzzleZ.toFixed(2)),
+        };
+      },
       /** What the live boss is doing, for grading a pose against a reference. */
       bossStats() {
         return { kind: boss.kind, hp: boss.hp, max: boss.maxHp, x: boss.x, z: boss.z, side: boss.side };
@@ -2066,6 +2234,10 @@ if (import.meta.env.DEV) {
         elites: world.elites,
         gunners: world.gunners,
         rocketeers: world.rocketeers,
+        flamers: world.flamers,
+        freezers: world.freezers,
+        enemies: enemies.liveCount,
+        enemyHp: Number(enemies.firstHpFraction.toFixed(3)),
         firepower: Number(world.firepower.toFixed(2)),
         fireRate: Number(world.fireRate.toFixed(2)),
         tier: world.weaponTier,

@@ -72,7 +72,8 @@ export type Placement =
   | "bikers"
   | "ogres"
   | "blockade"
-  | "crossroads";
+  | "crossroads"
+  | "cage";
 
 /**
  * A placement plus which side of the road it wants.
@@ -184,6 +185,17 @@ export const BEATS: readonly Beat[] = [
   // Growth or firepower, and only one of them. The barrels carry a pickup and
   // the row carries troops, on the same plane, on opposite kerbs.
   { name: "crossroads", places: ["crossroads"], trail: 6, weight: 2 , unlock: 4 },
+
+  // THE RESCUE. A cage with a pack standing over it, on the same kerb, so the
+  // ally has to be bought with the fire that would otherwise have gone into the
+  // guards — and going around it costs the ally entirely.
+  //
+  // WEIGHT 1 AND UNLOCK 2, and both are the same decision. There is one ally per
+  // level by construction (the module refuses a second cage), so a common beat
+  // would only ever waste itself; rare means a cage arriving is an event, and the
+  // player who is not ready for it loses it. Level 2 because level 1 is the one
+  // level that teaches, and it teaches gates.
+  { name: "rescue", places: ["cage", "walkers"], sides: [1, 1], trail: 6, weight: 1, unlock: 2 },
 
   // Loud on purpose: cover, a wave, and a decision in quick succession, with
   // the wave planted where the cover was so the guns are already pointed at it.

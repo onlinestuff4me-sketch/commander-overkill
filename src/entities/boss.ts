@@ -54,7 +54,18 @@
  */
 
 import * as THREE from "three";
-import type { System, WorldState } from "../core/types";
+import type { System, WeaponKind, WorldState } from "../core/types";
+import { WEAPON_FREEZE, WEAPON_RIFLE } from "../core/types";
+import type { ArmourClass } from "../core/counters";
+import {
+  ARMOUR_ARMOURED,
+  ARMOUR_FAST,
+  ARMOUR_SWARM,
+  CHILL_PER_HIT,
+  CHILL_TIME,
+  chillSpeed,
+  counterMultiplier,
+} from "../core/counters";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import { toyMaterial } from "../core/look";
 
@@ -187,6 +198,21 @@ const BILLBOARD = new THREE.Quaternion().setFromEuler(new THREE.Euler(-CAMERA_PI
 
 export type BossKind = "brute" | "roller" | "hive";
 
+/**
+ * ONE ARMOUR CLASS EACH, AND THE THREE OF THEM COVER THE TABLE.
+ *
+ * That is not a coincidence tidied up after the fact — the three bosses were
+ * authored as a slab of plate, a thing that charges, and a thing that produces
+ * bodies, which is exactly the vocabulary the counter table already speaks. So
+ * the rush is a composition test: the level's boss order decides which gun you
+ * wanted, and the approach is where you had the chance to go and get it.
+ */
+export const ARMOUR_OF: Readonly<Record<BossKind, ArmourClass>> = {
+  brute: ARMOUR_ARMOURED,
+  roller: ARMOUR_FAST,
+  hive: ARMOUR_SWARM,
+};
+
 /** Fired the moment a strike lands. `x`/`halfWidth` describe the stretch of road
  *  it covers; the orchestrator decides whether the crowd was standing in it and
  *  what that costs. */
@@ -221,7 +247,12 @@ export interface BossSystem extends System {
   /** Put one on the road. Ignored if one is already active. */
   spawn(kind: BossKind, hp: number, side: number, z: number): void;
   /** Bullet test. Returns true if the round was stopped by the boss. */
-  damageAt(x: number, z: number, pad: number, amount: number): boolean;
+  /**
+   * Damage the live boss. `weapon` is the kind that fired the round; the counter
+   * multiplier for this boss's armour class is applied here, and a freeze round
+   * chills it.
+   */
+  damageAt(x: number, z: number, pad: number, amount: number, weapon?: WeaponKind): boolean;
 
   onStrike(fn: BossStrike): void;
   onHatch(fn: BossHatch): void;
@@ -330,6 +361,10 @@ export function createBoss(scene: THREE.Scene): BossSystem {
   let timer = 0;
   let patience = 0;
   let flash = 0;
+  /** How frozen the boss is, and how long is left. Same two-number shape the
+   *  enemies use — see `chill` in entities/enemies.ts. */
+  let chill = 0;
+  let chillLeft = 0;
   let spin = 0;
   let lunge = 0;
   /** Where the pending strike will land. Latched at wind-up, so the zone the
@@ -455,12 +490,16 @@ export function createBoss(scene: THREE.Scene): BossSystem {
       shadow.visible = true;
     },
 
-    damageAt(px, pz, pad, amount) {
+    damageAt(px, pz, pad, amount, weapon = WEAPON_RIFLE) {
       if (!this.fighting || !kind) return false;
       const r = rigs[kind];
       if (Math.abs(px - x) > r.halfWidth + pad) return false;
       if (Math.abs(pz - (z + lunge)) > BODY_HALF_Z + pad) return false;
-      hp -= amount;
+      if (weapon === WEAPON_FREEZE) {
+        chill = Math.min(1, chill + CHILL_PER_HIT);
+        chillLeft = CHILL_TIME;
+      }
+      hp -= amount * counterMultiplier(weapon, ARMOUR_OF[kind]);
       flash = HIT_FLASH;
       if (hp <= 0) {
         hp = 0;
@@ -493,6 +532,15 @@ export function createBoss(scene: THREE.Scene): BossSystem {
       if (phase === "idle" || !kind) return;
       const r = rigs[kind];
       if (flash > 0) flash = Math.max(0, flash - dt);
+      if (chillLeft > 0) {
+        chillLeft -= dt;
+        if (chillLeft <= 0) {
+          chillLeft = 0;
+          chill = 0;
+        } else if (chillLeft < CHILL_TIME * 0.5) {
+          chill *= Math.max(0, chillLeft / (CHILL_TIME * 0.5));
+        }
+      }
       timer -= dt;
 
       switch (phase) {
@@ -549,7 +597,10 @@ export function createBoss(scene: THREE.Scene): BossSystem {
         }
 
         case "charge": {
-          z += CHARGE_SPEED * dt;
+          // THE ONE PLACE THE FREEZE RAY PAYS FOR ITSELF. A charge is dangerous
+          // because there is no time to get off the line; a chilled charge gives
+          // the time back. Nothing else in the arsenal can buy it.
+          z += CHARGE_SPEED * chillSpeed(chill) * dt;
           // It tracks a little on the way in — enough that a lazy half-step
           // does not shake it, not enough to make the dodge impossible.
           zoneX += (clampX(world.squadCenter.x, zoneHalf) - zoneX) * Math.min(1, dt * 1.4);

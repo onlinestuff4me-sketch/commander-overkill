@@ -53,7 +53,14 @@ import * as THREE from "three";
 import { toyMaterial, attachInstanceAlpha } from "../core/look";
 import { CORRIDOR_HALF_WIDTH, laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
-import { MAX_TROOPS } from "../core/types";
+import {
+  MAX_TROOPS,
+  WEAPON_FLAMER,
+  WEAPON_FREEZE,
+  WEAPON_MINIGUN,
+  WEAPON_RIFLE,
+  WEAPON_ROCKET,
+} from "../core/types";
 import type { System, WorldState } from "../core/types";
 
 // ---------------------------------------------------------------------------
@@ -272,6 +279,11 @@ const ELITE_SCALE = 1.5;
  */
 const GUNNER_TINT = [0.86, 0.96, 1.18] as const;
 const ROCKETEER_TINT = [1.16, 0.9, 0.78] as const;
+/** The two counter weapons. Warm for the flamer, cold for the freezer — the
+ *  same warm/cold split the rounds themselves use, so a carrier and his fire
+ *  are recognisably the same colour idea. */
+const FLAMER_TINT = [1.22, 0.94, 0.72] as const;
+const FREEZER_TINT = [0.8, 1.0, 1.22] as const;
 /** Where a shouldered weapon sits, in unmodified unit space. Level with the
  *  helmet so it breaks the crowd's outline from above, which is the only angle
  *  this camera really has. */
@@ -502,6 +514,12 @@ const KIT_GUNMETAL = 0x4a5568;
 const KIT_STEEL = 0x9aa6ba;
 const KIT_BRASS = 0xd8a13a;
 const KIT_WARHEAD = 0xd8452f;
+/** The flamer's fuel bottle and its pilot flame, and the freezer's tank. Both
+ *  are the one saturated colour on their kit, for the same reason the rocket's
+ *  warhead is: at forty pixels the silhouette says "big weapon" and the colour
+ *  is what says WHICH big weapon. */
+const KIT_FUEL = 0xe8622c;
+const KIT_ICE = 0x66d8f0;
 
 /** Baked-in forward lean. Costs nothing at runtime (it is part of the merged
  *  geometry) and does most of the work of selling "running" that a vertical bob
@@ -705,11 +723,15 @@ class Squad implements SquadSystem {
   #elites = 0;
   #gunners = 0;
   #rocketeers = 0;
+  #flamers = 0;
+  #freezers = 0;
   /** Slots `0, stride, 2·stride, …` hold the specials. See the note in update(). */
   #eliteStride = 1;
   /** Weapon meshes, drawn at the carriers' shoulders. */
   #gunnerKit: THREE.InstancedMesh;
   #rocketKit: THREE.InstancedMesh;
+  #flamerKit: THREE.InstancedMesh;
+  #freezerKit: THREE.InstancedMesh;
 
   // --- centre steering ---
   #centerX = 0;
@@ -839,7 +861,9 @@ class Squad implements SquadSystem {
     const kitMat = toyMaterial({ vertexColors: true });
     this.#gunnerKit = new THREE.InstancedMesh(buildMinigunKit(), kitMat, MAX_TROOPS);
     this.#rocketKit = new THREE.InstancedMesh(buildRocketKit(), kitMat, MAX_TROOPS);
-    for (const kit of [this.#gunnerKit, this.#rocketKit]) {
+    this.#flamerKit = new THREE.InstancedMesh(buildFlamerKit(), kitMat, MAX_TROOPS);
+    this.#freezerKit = new THREE.InstancedMesh(buildFreezerKit(), kitMat, MAX_TROOPS);
+    for (const kit of [this.#gunnerKit, this.#rocketKit, this.#flamerKit, this.#freezerKit]) {
       kit.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       kit.frustumCulled = false;
       kit.count = 0;
@@ -1002,13 +1026,22 @@ class Squad implements SquadSystem {
     const elites = this.#elites;
     const gunners = this.#gunners;
     const rocketeers = this.#rocketeers;
+    const flamers = this.#flamers;
+    const freezers = this.#freezers;
     for (let k = 0; k < limit; k++) {
       const i = Math.min(this.#count - 1, Math.floor(k * stride));
-      let kind = 0;
+      // These ARE the WEAPON_* values from core/types.ts — an elite fires an
+      // ordinary rifle round, so he lands on 0 with everyone else.
+      let kind = WEAPON_RIFLE;
       if (i % specialStride === 0) {
         const rank = i / specialStride;
-        if (rank >= elites && rank < elites + gunners) kind = 1;
-        else if (rank >= elites + gunners && rank < elites + gunners + rocketeers) kind = 2;
+        const afterElites = rank - elites;
+        if (afterElites >= 0) {
+          if (afterElites < gunners) kind = WEAPON_MINIGUN;
+          else if (afterElites < gunners + rocketeers) kind = WEAPON_ROCKET;
+          else if (afterElites < gunners + rocketeers + flamers) kind = WEAPON_FLAMER;
+          else if (afterElites < gunners + rocketeers + flamers + freezers) kind = WEAPON_FREEZE;
+        }
       }
       kinds[k] = kind;
     }
@@ -1059,7 +1092,16 @@ class Squad implements SquadSystem {
       room - this.#elites - this.#gunners,
       Math.max(0, Math.floor(world.rocketeers)),
     );
-    const specials = this.#elites + this.#gunners + this.#rocketeers;
+    this.#flamers = Math.min(
+      room - this.#elites - this.#gunners - this.#rocketeers,
+      Math.max(0, Math.floor(world.flamers)),
+    );
+    this.#freezers = Math.min(
+      room - this.#elites - this.#gunners - this.#rocketeers - this.#flamers,
+      Math.max(0, Math.floor(world.freezers)),
+    );
+    const specials =
+      this.#elites + this.#gunners + this.#rocketeers + this.#flamers + this.#freezers;
     // SPREAD, NOT STACKED. Slot order is a Vogel spiral with r = sqrt(i/(n-1)),
     // so slots 0..E-1 are the innermost E units — six elites landed on top of
     // each other in the middle of the blob and read as one gold platform. Taking
@@ -1251,9 +1293,13 @@ class Squad implements SquadSystem {
     const elites = this.#elites;
     const gunners = this.#gunners;
     const rocketeers = this.#rocketeers;
+    const flamers = this.#flamers;
+    const freezers = this.#freezers;
     const stride = this.#eliteStride;
     let gunnerCount = 0;
     let rocketCount = 0;
+    let flamerCount = 0;
+    let freezerCount = 0;
     const tint = this.#body.instanceColor!;
     const tints = tint.array as Float32Array;
     const legTint = this.#legs.instanceColor!;
@@ -1272,12 +1318,17 @@ class Squad implements SquadSystem {
       // Which job, if any, this slot holds. One strided sequence, banded:
       // elites take the first `elites` special slots, gunners the next, and
       // rocketeers the rest. `job` is 0 none, 1 elite, 2 gunner, 3 rocketeer.
+      // 0 none, 1 elite, 2 gunner, 3 rocketeer, 4 flamer, 5 freezer. Bands in
+      // that order so a soldier can only ever hold one, and so adding a weapon
+      // never renumbers the ones before it.
       let job = 0;
       if (i % stride === 0) {
         const rank = i / stride;
         if (rank < elites) job = 1;
         else if (rank < elites + gunners) job = 2;
         else if (rank < elites + gunners + rocketeers) job = 3;
+        else if (rank < elites + gunners + rocketeers + flamers) job = 4;
+        else if (rank < elites + gunners + rocketeers + flamers + freezers) job = 5;
       }
       const elite = job === 1;
       const s = p * UNIT_SCALE * (elite ? ELITE_SCALE : 1);
@@ -1293,7 +1344,16 @@ class Squad implements SquadSystem {
         cg = 1 + f * (DEATH_TINT[1] - 1);
         cb = 1 + f * (DEATH_TINT[2] - 1);
       } else if (job !== 0) {
-        const tint = job === 1 ? ELITE_TINT : job === 2 ? GUNNER_TINT : ROCKETEER_TINT;
+        const tint =
+          job === 1
+            ? ELITE_TINT
+            : job === 2
+              ? GUNNER_TINT
+              : job === 3
+                ? ROCKETEER_TINT
+                : job === 4
+                  ? FLAMER_TINT
+                  : FREEZER_TINT;
         cr = tint[0];
         cg = tint[1];
         cb = tint[2];
@@ -1360,7 +1420,9 @@ class Squad implements SquadSystem {
         scl.set(ks, ks, ks);
         m.compose(pos, quat, scl);
         if (job === 2) this.#gunnerKit.setMatrixAt(gunnerCount++, m);
-        else this.#rocketKit.setMatrixAt(rocketCount++, m);
+        else if (job === 3) this.#rocketKit.setMatrixAt(rocketCount++, m);
+        else if (job === 4) this.#flamerKit.setMatrixAt(flamerCount++, m);
+        else this.#freezerKit.setMatrixAt(freezerCount++, m);
       }
 
       // The shadow stays welded to the ground and shrinks as the unit rises —
@@ -1392,8 +1454,12 @@ class Squad implements SquadSystem {
     }
     this.#gunnerKit.count = gunnerCount;
     this.#rocketKit.count = rocketCount;
+    this.#flamerKit.count = flamerCount;
+    this.#freezerKit.count = freezerCount;
     this.#gunnerKit.instanceMatrix.needsUpdate = true;
     this.#rocketKit.instanceMatrix.needsUpdate = true;
+    this.#flamerKit.instanceMatrix.needsUpdate = true;
+    this.#freezerKit.instanceMatrix.needsUpdate = true;
 
     const showBar = this.#count >= HP_BAR_MIN_TROOPS;
     this.#barGroup.visible = showBar;
@@ -1485,8 +1551,16 @@ class Squad implements SquadSystem {
     if (this.#disposed) return;
     this.#disposed = true;
 
-    this.#scene.remove(this.#body, this.#shadow, this.#barGroup, this.#gunnerKit, this.#rocketKit);
-    for (const kit of [this.#gunnerKit, this.#rocketKit]) {
+    this.#scene.remove(
+      this.#body,
+      this.#shadow,
+      this.#barGroup,
+      this.#gunnerKit,
+      this.#rocketKit,
+      this.#flamerKit,
+      this.#freezerKit,
+    );
+    for (const kit of [this.#gunnerKit, this.#rocketKit, this.#flamerKit, this.#freezerKit]) {
       kit.geometry.dispose();
       kit.dispose();
     }
@@ -1852,6 +1926,111 @@ function buildRocketKit(): THREE.BufferGeometry {
   // Pitched up and swung out for the same reason the rifle is — see RIFLE_PITCH.
   merged.rotateX(0.34);
   merged.rotateY(-0.42);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * A shouldered FLAMETHROWER — a stubby wide nozzle and a fat fuel bottle.
+ *
+ * The read is SHORT AND WIDE, which is exactly what the weapon does. Every other
+ * gun on this crowd is a long thin tube pointing down the road; this one is a
+ * fat cylinder with a flared bell on the end, so a flamer carrier is
+ * identifiable in a crowd of a hundred by silhouette alone. The pilot flame is
+ * the giveaway detail — a small orange nub that burns whether or not the weapon
+ * is firing, which is what says "fire" before a single round leaves it.
+ */
+function buildFlamerKit(): THREE.BufferGeometry {
+  const parts: Part[] = [];
+
+  // Fuel bottle on the back, oversized on purpose. It is the largest single
+  // volume on the kit and it is what reads at distance.
+  const tank = new THREE.CylinderGeometry(0.17, 0.17, 0.44, 9);
+  tank.rotateX(Math.PI / 2);
+  tank.translate(0, 0.02, 0.3);
+  parts.push({ geo: tank, color: KIT_FUEL });
+
+  // Cap and strap band, so the bottle reads as a pressure vessel rather than a
+  // lozenge.
+  const cap = new THREE.CylinderGeometry(0.09, 0.09, 0.1, 8);
+  cap.rotateX(Math.PI / 2);
+  cap.translate(0, 0.02, 0.54);
+  parts.push({ geo: cap, color: KIT_GUNMETAL });
+
+  // The barrel: short, fat, and finished with a bell. Half the length of the
+  // minigun's cluster, because the range is half as well.
+  const barrel = new THREE.CylinderGeometry(0.075, 0.075, 0.4, 8);
+  barrel.rotateX(Math.PI / 2);
+  barrel.translate(0, 0, -0.22);
+  parts.push({ geo: barrel, color: KIT_GUNMETAL });
+
+  const bell = new THREE.CylinderGeometry(0.17, 0.08, 0.19, 9);
+  bell.rotateX(Math.PI / 2);
+  bell.translate(0, 0, -0.5);
+  parts.push({ geo: bell, color: KIT_STEEL });
+
+  // The pilot flame. Small, saturated, and always lit.
+  const pilot = new THREE.ConeGeometry(0.055, 0.15, 6);
+  pilot.rotateX(-Math.PI / 2);
+  pilot.translate(0, 0.11, -0.5);
+  parts.push({ geo: pilot, color: KIT_FUEL });
+
+  const grip = new THREE.BoxGeometry(0.08, 0.15, 0.1);
+  grip.translate(0, -0.13, 0.06);
+  parts.push({ geo: grip, color: KIT_GUNMETAL });
+
+  const merged = mergeParts(parts);
+  merged.rotateX(0.22);
+  merged.rotateY(-0.38);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+/**
+ * A shouldered FREEZE RAY — a slim emitter with a glowing coil.
+ *
+ * Built as the flamethrower's opposite in every axis that reads: long where the
+ * flamer is short, thin where it is fat, and pale blue where it is orange. A
+ * player who has seen one of these two knows what the other one is without being
+ * told, which is the whole reason they were designed as a pair.
+ */
+function buildFreezerKit(): THREE.BufferGeometry {
+  const parts: Part[] = [];
+
+  const body = new THREE.BoxGeometry(0.16, 0.18, 0.36);
+  body.translate(0, 0, 0.16);
+  parts.push({ geo: body, color: KIT_GUNMETAL });
+
+  // Long thin emitter tube.
+  const tube = new THREE.CylinderGeometry(0.05, 0.05, 0.7, 7);
+  tube.rotateX(Math.PI / 2);
+  tube.translate(0, 0.02, -0.34);
+  parts.push({ geo: tube, color: KIT_STEEL });
+
+  // THREE COIL RINGS DOWN THE TUBE, and they are the whole identity. A single
+  // pale tube is a rifle with the colour turned down; rings say the thing is
+  // charged, and stacking three of them says it in a silhouette.
+  for (let i = 0; i < 3; i++) {
+    const ring = new THREE.CylinderGeometry(0.105, 0.105, 0.055, 9);
+    ring.rotateX(Math.PI / 2);
+    ring.translate(0, 0.02, -0.16 - i * 0.19);
+    parts.push({ geo: ring, color: KIT_ICE });
+  }
+
+  // Emitter dish on the nose, the one place the ice colour is allowed to be a
+  // solid mass rather than a stripe.
+  const dish = new THREE.CylinderGeometry(0.13, 0.07, 0.12, 9);
+  dish.rotateX(Math.PI / 2);
+  dish.translate(0, 0.02, -0.72);
+  parts.push({ geo: dish, color: KIT_ICE });
+
+  const grip = new THREE.BoxGeometry(0.075, 0.15, 0.1);
+  grip.translate(0, -0.12, 0.14);
+  parts.push({ geo: grip, color: KIT_GUNMETAL });
+
+  const merged = mergeParts(parts);
+  merged.rotateX(0.3);
+  merged.rotateY(-0.4);
   merged.computeBoundingSphere();
   return merged;
 }
