@@ -220,7 +220,6 @@ const CSS = `
 #ui.is-carded .cok-lvl,
 #ui.is-carded .cok-loadout,
 #ui.is-carded .cok-streak,
-#ui.is-carded .cok-skills,
 #ui.is-carded .cok-cmdr,
 #ui.is-carded .cok-boss {
   /* NOT a fade. A card is a scene change rather than a state change, so the HUD

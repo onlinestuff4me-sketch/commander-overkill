@@ -50,7 +50,7 @@
  */
 
 import * as THREE from "three";
-import { toyMaterial } from "../core/look";
+import { toyMaterial, attachInstanceAlpha } from "../core/look";
 import { CORRIDOR_HALF_WIDTH, laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import { MAX_TROOPS } from "../core/types";
@@ -203,6 +203,10 @@ const FALL_SINK = 1.1;
 /** Topple about world X — away from the camera, so the fall is legible at this
  *  shallow angle instead of happening edge-on. */
 const FALL_AXIS = new THREE.Vector3(1, 0, 0);
+/** The lean is a roll about the axis pointing at the camera, so it reads as a
+ *  soldier tipping sideways rather than forwards. */
+const BANK_AXIS = new THREE.Vector3(0, 0, 1);
+const IDENTITY_QUAT = new THREE.Quaternion();
 /** Ceiling on queued spawn/death reports between drains. Matches the floater
  *  burst cap: past this the eye cannot follow individual units anyway. */
 const MAX_QUEUE = 64;
@@ -362,23 +366,6 @@ const CENTER_FOLLOW = 30;
  * played by committing early rather than by darting. Kept mild — this is meant
  * to add weight, not to take the controls away.
  */
-/**
- * How far TIGHTEN squeezes the crowd, and where the squeezed bodies go.
- *
- * 0.55 takes an eight-metre army down to three and a half, which is the
- * difference between smashing three segments of a four-wide row and smashing
- * one and a half. That is the number the ability is sized against: not "narrower"
- * in the abstract, but "how many of those do I have to pay for". Anything much
- * tighter and a big crowd's own units start fighting the per-unit spacing and
- * the blob reads as a scale animation rather than as men crowding together.
- *
- * The depth grows to match, because a crowd squeezed sideways has to go
- * somewhere and a column is what that looks like. It is still capped by the
- * framing budget (`RADIUS_Z_MAX`), or the rear rank walks off the bottom of the
- * screen.
- */
-const TIGHTEN_SQUEEZE = 0.55;
-const TIGHTEN_DEEPEN = 0.4;
 
 const LATERAL_SPEED = 7;
 const MASS_TROOPS = 400;
@@ -390,6 +377,77 @@ const MASS_SPEED = 5;
  * lateral speed in ~0.2 s — a lean into the turn, not a delay.
  */
 const LATERAL_ACCEL = 34;
+
+/**
+ * LEAN AND DRAG — what a swipe looks like in the frame it happens.
+ *
+ * The crowd's centre is capped at LATERAL_SPEED and ramped by LATERAL_ACCEL,
+ * both deliberately: a big army is supposed to feel like a big army. But those
+ * two together mean the first ~0.2 s of a swipe produces almost no movement on
+ * screen, and 0.2 s is exactly the window in which a control either feels
+ * connected to your thumb or does not. Mischa's note was that the game did not
+ * feel responsive, and this is where that lived — not in the latency, which is
+ * a tenth of a second, but in the fact that nothing VISIBLE happened during it.
+ *
+ * So the army answers the input with its posture instead of its position. Two
+ * things, both driven off the centre's velocity and both free:
+ *
+ *   LEAN   every soldier rolls into the turn. Uniform across the crowd, so it
+ *          is one quaternion per frame rather than one per unit.
+ *   DRAG   the formation shears — the front rank leads and the rear rank trails,
+ *          by an amount proportional to how far back it is standing.
+ *
+ * Neither moves the crowd's centre, so nothing about the strategy changes: the
+ * gate maths reads `world.squadHalfWidth`, which is derived from the head count,
+ * and the shear is symmetric about the centre. This is pure feel, and that is
+ * the point — the weight was never the problem, the silence was.
+ *
+ * BANK_ANGLE is radians at full lateral speed; 0.2 is ~11°, which reads clearly
+ * on a 40-pixel-tall soldier without tipping him over. DRAG_GAIN is metres of
+ * lag per metre of depth at full speed: the rear of a deep crowd trails about a
+ * third of a body width, which is a sweep rather than a smear.
+ */
+const BANK_ANGLE = 0.2;
+const DRAG_GAIN = 0.18;
+/** How fast the lean follows the velocity, in 1/seconds. Faster than the crowd
+ *  itself accelerates, or the posture would lag the thing it is reporting. */
+const BANK_FOLLOW = 12;
+
+/**
+ * TURN DUST — the third thing a swipe does, and the only one that stays behind.
+ *
+ * Lean and drag are posture: they tell you the crowd is turning while it turns,
+ * and they are gone the instant it stops. Dust is a TRAIL, and a trail is what
+ * makes a movement feel like it had force. It is also the only cue in this game
+ * that survives the moment it was made, which is what lets a player see how hard
+ * they just cut without having been watching at the time.
+ *
+ * Emitted from the trailing edge of the crowd, proportional to how far over the
+ * threshold the centre's speed is, so a lazy drift makes none and a full-tilt
+ * cut across the road lays a visible streak. The threshold is what keeps it
+ * meaningful — dust under a crowd that is barely moving is just fog.
+ */
+const DUST_CAPACITY = 48;
+/** Metres/second the centre has to be doing before any is kicked up. Just under
+ *  half the cap, so ordinary corrections stay clean and committed moves smoke. */
+const DUST_SPEED_MIN = 3;
+/** Puffs per second at full lateral speed. */
+const DUST_RATE = 34;
+const DUST_LIFE = 0.9;
+const DUST_SIZE = 0.95;
+const DUST_GROWTH = 1.8;
+const DUST_ALPHA = 0.72;
+/**
+ * WARM TAN, AND DARKER THAN THE ROAD. The first version was pale grey-cream,
+ * which is what dust actually looks like and which was invisible: the road
+ * composites at about 0.73 grey, so a lighter-than-road puff at half alpha
+ * changes the pixel by a couple of percent. Photographed, it was a smudge.
+ *
+ * Reading against the surface is the requirement, not being the right colour for
+ * grit, so it is pulled warm and down — the same warm/cool split that makes the
+ * bridge towers read as landmarks against the same road.
+ */
+const DUST_COLOR = 0xb0956b;
 
 /**
  * Uniform, straight off the reference: blue helmet, cream shirt, navy trousers.
@@ -559,22 +617,6 @@ export interface SquadSystem extends System {
   readonly center: THREE.Vector3;
   /** Half-width of the clump ellipse, world units. */
   readonly radiusX: number;
-  /**
-   * The crowd's half-width WITHOUT the player's squeeze.
-   *
-   * Content is priced against this rather than against `radiusX`, and that is
-   * not a detail: barrel and enemy hit points are derived from how much of the
-   * curtain a target intercepts, so pricing them against the live width would
-   * mean a barrel that spawned while the army was tight came out TOUGHER, and
-   * the optimal play would be to release before every spawn and re-squeeze
-   * after. Pricing against the resting shape makes TIGHTEN a pure skill bonus
-   * with nothing to game.
-   */
-  readonly naturalRadiusX: number;
-  /** Metres/second the crowd's CENTRE is currently sliding sideways, unsigned.
-   *  The orchestrator reads it to decide whether the army is holding a line —
-   *  see `focus` in core/types.ts. */
-  readonly lateralSpeed: number;
   /** Half-depth of the clump ellipse, world units. */
   readonly radiusZ: number;
   /** Whichever of the two is larger, for callers that want a single number. */
@@ -645,10 +687,6 @@ class Squad implements SquadSystem {
 
   // --- clump shape, recomputed only when the count changes ---
   #radiusX = 0;
-  /** Shape before TIGHTEN is applied. `#reshape` is cached on the troop count,
-   *  so the squeeze cannot live in it — it changes every tick. */
-  #naturalRadiusX = 0;
-  #naturalRadiusZ = 0;
   #radiusZ = 0;
   #shapedFor = -1;
   #shapedAtZoom = 1;
@@ -679,6 +717,10 @@ class Squad implements SquadSystem {
   /** Metres/second the centre is sliding at. Integrated rather than derived so
    *  the speed cap and the acceleration ramp have something to act on. */
   #centerVel = 0;
+  /** Lean, −1..1, smoothed from the centre's velocity. Its own state rather than
+   *  a function of `#centerVel` so it can settle at its own rate. */
+  #bank = 0;
+  #prevBank = 0;
 
   /** Own clock rather than world.elapsed. The bob is the one thing that must
    *  never stop, and it should not depend on another system remembering to
@@ -722,6 +764,20 @@ class Squad implements SquadSystem {
   /** Leg scratch. Preallocated with everything else — render() allocates
    *  nothing, and at 1200 units this runs 2400 times a frame. */
   #legQuat = new THREE.Quaternion();
+  #bankQuat = new THREE.Quaternion();
+
+  // --- turn dust: a fixed pool, oldest recycled ---
+  readonly #dust: THREE.InstancedMesh;
+  readonly #dustAlpha: THREE.InstancedBufferAttribute;
+  readonly #dustTexture: THREE.CanvasTexture;
+  #dustX = new Float32Array(DUST_CAPACITY);
+  #dustZ = new Float32Array(DUST_CAPACITY);
+  #dustVX = new Float32Array(DUST_CAPACITY);
+  #dustLife = new Float32Array(DUST_CAPACITY);
+  #dustNext = 0;
+  /** Fractional puffs owed. Carried across ticks so the emission rate is honest
+   *  at any frame rate rather than rounding down to zero every tick. */
+  #dustOwed = 0;
   #hip = new THREE.Vector3();
 
   constructor(scene: THREE.Scene) {
@@ -812,6 +868,30 @@ class Squad implements SquadSystem {
     this.#shadow.renderOrder = -1;
     scene.add(this.#shadow);
 
+    // --- turn dust ---
+    this.#dustTexture = buildDustTexture();
+    const dustGeo = new THREE.PlaneGeometry(1, 1);
+    // Lying in the road plane, like the shadows. Dust that billows upward would
+    // have to be a billboard, and a billboard at the crowd's feet reads as smoke
+    // coming off the soldiers rather than off the ground.
+    dustGeo.rotateX(-Math.PI / 2);
+    const dustMat = new THREE.MeshBasicMaterial({
+      map: this.#dustTexture,
+      color: DUST_COLOR,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+    });
+    this.#dustAlpha = attachInstanceAlpha(dustGeo, dustMat, DUST_CAPACITY);
+    this.#dust = new THREE.InstancedMesh(dustGeo, dustMat, DUST_CAPACITY);
+    this.#dust.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.#dust.frustumCulled = false;
+    this.#dust.count = 0;
+    // Over the road and under the shadows, so a soldier's own shadow still
+    // reads on top of the dust he is kicking up.
+    this.#dust.renderOrder = -2;
+    scene.add(this.#dust);
+
     // --- HP bar ---
     this.#barGroup = new THREE.Group();
     const barMat = (color: number): THREE.MeshBasicMaterial =>
@@ -854,14 +934,6 @@ class Squad implements SquadSystem {
     return this.#radiusX;
   }
 
-  get naturalRadiusX(): number {
-    return this.#naturalRadiusX;
-  }
-
-  get lateralSpeed(): number {
-    return Math.abs(this.#centerVel);
-  }
-
   get radiusZ(): number {
     return this.#radiusZ;
   }
@@ -899,15 +971,19 @@ class Squad implements SquadSystem {
     // as a persistent stream identity and holds most of its aim error for the
     // stream's life, so a reshuffle would visibly teleport the stream.
     const stride = this.#count / limit;
+    // The same shear render applies, or a hard turn would leave every tracer
+    // starting a third of a body width off the soldier firing it.
+    const drag = -this.#bank * DRAG_GAIN;
     let written = 0;
     for (let k = 0; k < limit; k++) {
       const i = Math.min(this.#count - 1, Math.floor(k * stride));
       const v = out[written];
       if (v === undefined) break;
+      const z = this.#posZ[i]!;
       v.set(
-        this.#posX[i]! + MUZZLE_X * UNIT_SCALE,
+        this.#posX[i]! + drag * (z - SQUAD_Z) + MUZZLE_X * UNIT_SCALE,
         MUZZLE_Y * UNIT_SCALE + this.#bob[i]!,
-        this.#posZ[i]! - MUZZLE_Z * UNIT_SCALE,
+        z - MUZZLE_Z * UNIT_SCALE,
       );
       written++;
     }
@@ -972,7 +1048,6 @@ class Squad implements SquadSystem {
     this.setCount(world.troops);
     this.#reshape(world.zoom);
     // Every tick, and after the cached reshape: the squeeze is a live value.
-    this.#applyTighten(world.focus, world.zoom);
     // Clamped here rather than trusted: an elite is a slot index, and a slot
     // index past the live count would paint a body that is already falling.
     // One job per soldier: each kind takes what is left after the ones before
@@ -1012,6 +1087,10 @@ class Squad implements SquadSystem {
     // let a crowd 1 cm from its goal sail 12 cm past it and buzz.
     const travel = clamp(this.#centerVel * dt, -Math.abs(targetX - this.#centerX), Math.abs(targetX - this.#centerX));
     this.#centerX += travel;
+    this.#prevBank = this.#bank;
+    const wantBank = clamp(this.#centerVel / LATERAL_SPEED, -1, 1);
+    this.#bank += (wantBank - this.#bank) * Math.min(1, BANK_FOLLOW * dt);
+    this.#updateDust(dt, world.scrollSpeed);
     this.center.set(this.#centerX, 0, SQUAD_Z);
     world.squadCenter.copy(this.center);
     // NOT `radiusX`. That is the ellipse the crowd is LAID OUT in, and at small
@@ -1161,6 +1240,14 @@ class Squad implements SquadSystem {
     const scl = this.#scl;
     quat.identity();
 
+    // The lean is uniform across the crowd, so it is built once here rather than
+    // per unit — a thousand soldiers cost one setFromAxisAngle. The drag is a
+    // single multiply inside the loop for the same reason.
+    const bank = lerp(this.#prevBank, this.#bank, alpha);
+    const banked = bank !== 0;
+    if (banked) this.#bankQuat.setFromAxisAngle(BANK_AXIS, -bank * BANK_ANGLE);
+    const drag = -bank * DRAG_GAIN;
+
     const elites = this.#elites;
     const gunners = this.#gunners;
     const rocketeers = this.#rocketeers;
@@ -1175,8 +1262,11 @@ class Squad implements SquadSystem {
 
     for (let i = 0; i < n; i++) {
       const fall = this.#fall[i]!;
-      const x = lerp(this.#prevX[i]!, this.#posX[i]!, alpha);
       const z = lerp(this.#prevZ[i]!, this.#posZ[i]!, alpha);
+      // DRAG. Depth from the blob's centre line decides how far a unit lags, so
+      // the front rank leads the turn and the back rank is still catching up.
+      // Symmetric about the centre, so the crowd's extent is unchanged.
+      const x = lerp(this.#prevX[i]!, this.#posX[i]!, alpha) + drag * (z - SQUAD_Z);
       const y = lerp(this.#prevBob[i]!, this.#bob[i]!, alpha);
       const p = lerp(this.#prevPop[i]!, this.#pop[i]!, alpha);
       // Which job, if any, this slot holds. One strided sequence, banded:
@@ -1234,7 +1324,9 @@ class Squad implements SquadSystem {
         quat.setFromAxisAngle(FALL_AXIS, -e * FALL_ANGLE);
         pos.set(x, y - e * FALL_SINK, z);
       } else {
-        quat.identity();
+        // A falling unit keeps its topple; everyone still standing leans.
+        if (banked) quat.copy(this.#bankQuat);
+        else quat.identity();
         pos.set(x, y, z);
       }
       scl.set(s, s, s);
@@ -1278,9 +1370,15 @@ class Squad implements SquadSystem {
         SHADOW_RADIUS * 2 * p * (elite ? ELITE_SCALE : 1) * (1 - (y / BOB_HEIGHT) * 0.3);
       pos.set(x + SHADOW_OFFSET_X, SHADOW_Y, z + SHADOW_OFFSET_Z);
       scl.set(sh, 1, sh);
-      m.compose(pos, quat, scl);
+      // NOT `quat`. The lean is a roll about the view axis, and a shadow that
+      // rolls with it lifts off the road — the disc is authored lying in the
+      // ground plane and the rotation would stand it up. A topple still applies,
+      // because that one is about the X axis and keeps the disc flat.
+      m.compose(pos, fall > 0 ? quat : IDENTITY_QUAT, scl);
       this.#shadow.setMatrixAt(i, m);
     }
+
+    this.#renderDust();
 
     this.#body.count = n;
     this.#legs.count = n * 2;
@@ -1308,6 +1406,81 @@ class Squad implements SquadSystem {
     }
   }
 
+  /**
+   * Age the live puffs, slide them back down the road, and emit new ones if the
+   * crowd is cutting hard enough to earn them.
+   *
+   * The pool is a ring: past DUST_CAPACITY live puffs the oldest is overwritten
+   * rather than the newest dropped, because a trail that stops appearing at the
+   * front is a trail that looks like it broke.
+   */
+  #updateDust(dt: number, scrollSpeed: number): void {
+    for (let i = 0; i < DUST_CAPACITY; i++) {
+      const life = this.#dustLife[i]!;
+      if (life <= 0) continue;
+      this.#dustLife[i] = Math.max(0, life - dt);
+      this.#dustX[i]! += this.#dustVX[i]! * dt;
+      // Dust is ON the road, so it travels with the road — otherwise it hangs in
+      // the air behind a crowd that is supposed to be running forward.
+      this.#dustZ[i]! += scrollSpeed * dt;
+    }
+
+    const speed = Math.abs(this.#centerVel);
+    if (speed <= DUST_SPEED_MIN) {
+      // Half of any fractional puff is kept, so a stuttering swipe still emits
+      // rather than resetting its credit every time it dips under the threshold.
+      this.#dustOwed *= 0.5;
+      return;
+    }
+    const drive = Math.min(1, (speed - DUST_SPEED_MIN) / Math.max(0.001, LATERAL_SPEED - DUST_SPEED_MIN));
+    this.#dustOwed += DUST_RATE * drive * dt;
+    const sign = this.#centerVel > 0 ? 1 : -1;
+    while (this.#dustOwed >= 1) {
+      this.#dustOwed -= 1;
+      const i = this.#dustNext;
+      this.#dustNext = (i + 1) % DUST_CAPACITY;
+      // OUTSIDE the trailing edge, not under it. A crowd moving right kicks its
+      // grit up on the left, and at this camera the road under the crowd is the
+      // one place nothing is visible — the bodies and their shadows cover it,
+      // and the strip behind the rear rank is off the bottom of the frame. The
+      // clear road is the flank the turn is leaving, which is also where the
+      // eye already is during a swipe.
+      this.#dustX[i] = this.#centerX - sign * this.#radiusX * (0.95 + Math.random() * 0.7);
+      this.#dustZ[i] = SQUAD_Z + (Math.random() - 0.35) * 2 * this.#radiusZ;
+      this.#dustVX[i] = -sign * (0.8 + Math.random() * 1.4);
+      this.#dustLife[i] = DUST_LIFE;
+    }
+  }
+
+  /** Write the puff matrices and alphas. Ages are read straight off the sim —
+   *  a puff lives half a second, so interpolating it would cost more than it
+   *  could possibly be worth. */
+  #renderDust(): void {
+    const m = this.#m;
+    const pos = this.#pos;
+    const scl = this.#scl;
+    const alphas = this.#dustAlpha.array as Float32Array;
+    let drawn = 0;
+    for (let i = 0; i < DUST_CAPACITY; i++) {
+      const life = this.#dustLife[i]!;
+      if (life <= 0) continue;
+      // t runs 0 at birth to 1 at death: the puff spreads out and thins.
+      const t = 1 - life / DUST_LIFE;
+      const size = DUST_SIZE * (1 + DUST_GROWTH * t);
+      alphas[drawn] = DUST_ALPHA * (1 - t) * (1 - t);
+      pos.set(this.#dustX[i]!, DUST_Y, this.#dustZ[i]!);
+      scl.set(size, 1, size);
+      m.compose(pos, IDENTITY_QUAT, scl);
+      this.#dust.setMatrixAt(drawn, m);
+      drawn++;
+    }
+    this.#dust.count = drawn;
+    if (drawn > 0) {
+      this.#dust.instanceMatrix.needsUpdate = true;
+      this.#dustAlpha.needsUpdate = true;
+    }
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -1328,6 +1501,10 @@ class Squad implements SquadSystem {
     (this.#shadow.material as THREE.Material).dispose();
     this.#shadow.dispose();
     this.#shadowTexture.dispose();
+    this.#dustTexture.dispose();
+    this.#dust.geometry.dispose();
+    (this.#dust.material as THREE.Material).dispose();
+    this.#dust.dispose();
     for (const child of this.#barGroup.children) {
       const mesh = child as THREE.Mesh;
       mesh.geometry.dispose();
@@ -1356,34 +1533,21 @@ class Squad implements SquadSystem {
 
     const root = Math.sqrt(this.#count);
     const idealX = SPREAD * root * (1 + SMALL_SQUAD_FLARE / Math.max(1, this.#count));
-    this.#naturalRadiusX = Math.min(RADIUS_X_MAX, idealX);
+    this.#radiusX = Math.min(RADIUS_X_MAX, idealX);
 
     // Once the road stops the clump getting wider, the area it wanted has to go
     // somewhere — so it goes backwards, and density only starts climbing after
     // the depth cap too. This is the reference's behaviour past ~50 units.
-    const squeeze = idealX > 0 ? idealX / Math.max(this.#naturalRadiusX, 1e-4) : 1;
+    const squeeze = idealX > 0 ? idealX / Math.max(this.#radiusX, 1e-4) : 1;
     // The depth cap is a FRAMING budget, not a road one — it is where the rear
     // rank reaches the bottom of the screen. Pulling the camera back is exactly
     // the thing that buys more of it, so it scales with the zoom. Width does
     // not: the road does not get wider just because you are looking from
     // further away, and letting the crowd widen with the zoom would walk it out
     // over the water.
-    this.#naturalRadiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
+    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, SPREAD * DEPTH_RATIO * root * squeeze);
   }
 
-  /**
-   * Apply the player's squeeze on top of the cached natural shape.
-   *
-   * Runs every tick, after `#reshape`. The slot layout below reads `#radiusX`
-   * and `#radiusZ` directly, so narrowing them moves every slot inward and the
-   * per-unit springs carry the bodies there — the crowd physically crowds in
-   * rather than being scaled.
-   */
-  #applyTighten(tighten: number, zoom: number): void {
-    const k = tighten <= 0 ? 0 : tighten >= 1 ? 1 : tighten;
-    this.#radiusX = this.#naturalRadiusX * (1 - TIGHTEN_SQUEEZE * k);
-    this.#radiusZ = Math.min(RADIUS_Z_MAX * zoom, this.#naturalRadiusZ * (1 + TIGHTEN_DEEPEN * k));
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,6 +1563,8 @@ const MUZZLE_Y = 1.185;
 const MUZZLE_Z = 0.841;
 /** Just clear of the road plane at y=0, without needing polygonOffset. */
 const SHADOW_Y = 0.012;
+/** Under the shadows, still clear of the road plane. */
+const DUST_Y = 0.008;
 
 interface Part {
   geo: THREE.BufferGeometry;
@@ -1768,6 +1934,24 @@ function buildShadowTexture(): THREE.CanvasTexture {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 64, 64);
 
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Softer and wider than the shadow's falloff — grit thrown up off a road has
+ *  no edge to it, and a hard-edged disc reads as a decal. */
+function buildDustTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d")!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(0.4, "rgba(255,255,255,0.45)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;

@@ -47,7 +47,7 @@
  */
 
 import * as THREE from "three";
-import { toyMaterial } from "../core/look";
+import { toyMaterial, attachInstanceAlpha } from "../core/look";
 import type { System } from "../core/types";
 import { laneToX } from "../mechanics/lane";
 import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
@@ -1142,36 +1142,3 @@ function bakeTopLitColor(geo: THREE.BufferGeometry, hex: number): void {
   geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
 }
 
-/**
- * Give an instanced material a per-instance alpha channel.
- *
- * three has no built-in for this: instanceColor covers RGB only. The patch adds
- * one float attribute and multiplies it into the final fragment alpha, which is
- * blend-mode agnostic and survives however the material is otherwise shaded.
- */
-function attachInstanceAlpha(
-  geo: THREE.BufferGeometry,
-  mat: THREE.Material,
-  count: number,
-): THREE.InstancedBufferAttribute {
-  const attr = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
-  attr.setUsage(THREE.DynamicDrawUsage);
-  geo.setAttribute("aInstanceAlpha", attr);
-
-  mat.onBeforeCompile = (shader) => {
-    shader.vertexShader =
-      "attribute float aInstanceAlpha;\nvarying float vInstanceAlpha;\n" +
-      shader.vertexShader.replace(
-        "#include <begin_vertex>",
-        "#include <begin_vertex>\nvInstanceAlpha = aInstanceAlpha;",
-      );
-    shader.fragmentShader =
-      "varying float vInstanceAlpha;\n" +
-      shader.fragmentShader.replace(
-        "#include <opaque_fragment>",
-        "#include <opaque_fragment>\ngl_FragColor.a *= vInstanceAlpha;",
-      );
-  };
-
-  return attr;
-}

@@ -8,8 +8,10 @@
  * side, and still reach both walls.
  *
  * A gesture is a TAP if it stayed inside TAP_SLOP px and ended inside TAP_MS.
- * Skills fire on tap; anything longer is steering and must not also fire a
- * skill, or every hard dodge would burn an airstrike.
+ * Nothing is bound to it today — the game is steering and only steering, and
+ * the one tap ability it had was cut for being a second thing to do with the
+ * thumb that steers. The classification stays because it is the cheap half: a
+ * flick that lands and lifts must not read as a steer that ended early.
  */
 
 import { bus } from "../core/events";

@@ -100,36 +100,6 @@ export interface WorldState {
    */
   level: number;
   /**
-   * FOCUS, 0..1. The player's one active ability. Owned by the game; the squad
-   * narrows by it and bullets harden by it.
-   *
-   * IT USED TO BE TWO THINGS AND THAT WAS A MISTAKE. There was a TIGHTEN on the
-   * tap that squeezed the crowd, and a separate passive FOCUS that filled while
-   * the player held a line. Mischa's question was the whole review: "what's the
-   * difference?" — and the honest answer was that both concentrated fire and
-   * neither was legible as its own idea.
-   *
-   * Worse, the passive one rewarded NOT STEERING, which is the game's only
-   * input. Measured, the autopilot sat at full focus for 85% of the opening
-   * minute without trying, because the opening minute is empty. A bonus you hold
-   * most of the time for doing nothing is not a mechanic, it is a constant.
-   *
-   * So there is one: tap and the army compresses into a column AND its fire
-   * concentrates and hits harder, for a second and a half, on a cooldown. The
-   * narrowing IS the focusing, which is why it needs no second name.
-   *
-   * Crowd width is the hidden variable the whole combat model runs on —
-   * `laneCoverage()` decides what share of the curtain lands on a target and
-   * `squadHalfWidth` decides how many gate segments a row charges for — so this
-   * is the only thing in the game that lets the player choose which side of that
-   * trade to be on.
-   *
-   * Deliberately NOT fed into any hit-point model, for the same reason
-   * `firepower` is not: it is a skill multiplier, and content that got tougher
-   * whenever the player played well would make playing well pointless.
-   */
-  focus: number;
-  /**
    * How far back the camera has stepped, as a multiple of its resting distance.
    * 1 at every troop count the crowd still fits on screen at. Owned by the game
    * (see core/zoom.ts); the squad reads it because the extra room the camera
@@ -170,7 +140,6 @@ export function createWorld(center: THREE.Vector3): WorldState {
     gunners: 0,
     rocketeers: 0,
     level: 1,
-    focus: 0,
     zoom: 1,
   };
 }

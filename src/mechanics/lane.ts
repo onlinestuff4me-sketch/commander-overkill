@@ -36,8 +36,25 @@ import * as THREE from "three";
  * and it is the good kind: being enormous now costs you manoeuvring room.
  */
 export const CORRIDOR_HALF_WIDTH = 5.6;
-/** How far down -Z the road is drawn. Beyond this the fog has taken over anyway. */
-export const CORRIDOR_LENGTH = 70;
+/**
+ * How far down -Z the road is drawn. Beyond the far end the fog has taken over
+ * anyway; the NEAR end is the one that has to be defended.
+ *
+ * WAS 70 WITH A NEAR END AT z +8, AND THAT WAS VISIBLY SHORT. The camera dollies
+ * back as the crowd grows (core/zoom.ts), and at the 450-troop step it sits far
+ * enough back to see over the deck's near edge — the road simply stopped about
+ * 140 px from the bottom of the frame, with the water showing under it. It is
+ * only visible at the two largest armies, which is exactly the moment the game
+ * is trying to look impressive.
+ *
+ * 84 with the near end at +15 keeps the centre where it was, so nothing that is
+ * positioned relative to `road.position.z` moves, and buys 7 m of near road —
+ * more than the deepest zoom step needs. The far end gains 7 m it does not need
+ * and cannot see; that is the price of not moving the centre.
+ */
+export const CORRIDOR_LENGTH = 84;
+/** Metres of road drawn on the CAMERA side of the origin. See above. */
+const CORRIDOR_NEAR = 15;
 
 /* -------------------------------------------------------------------------- */
 /* The bridge                                                                  */
@@ -129,7 +146,7 @@ export function createCorridor(): CorridorSystem {
     new THREE.MeshLambertMaterial({ map: roadTexture() }),
   );
   road.rotation.x = -Math.PI / 2;
-  road.position.z = -CORRIDOR_LENGTH / 2 + 8;
+  road.position.z = -CORRIDOR_LENGTH / 2 + CORRIDOR_NEAR;
   group.add(road);
 
   // WATER, not grass. Wide enough to fill the frame at every aspect ratio and
