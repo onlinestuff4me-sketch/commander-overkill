@@ -41,7 +41,7 @@ const PULSE_TIME = 0.5;
  */
 const LINGER_TIME = 3.4;
 
-type Axis = "elites" | "rate" | "power";
+type Axis = "elites" | "rate" | "power" | "flame" | "freeze";
 
 interface Chip {
   root: HTMLElement;
@@ -66,7 +66,7 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
   parent.appendChild(root);
 
   const chips = {} as Record<Axis, Chip>;
-  for (const axis of ["elites", "rate", "power"] as const) {
+  for (const axis of AXES) {
     const el = document.createElement("div");
     el.className = `cok-chip cok-chip--${axis}`;
     el.innerHTML = `${ICON[axis]}<span class="cok-chip__v"></span>`;
@@ -121,8 +121,12 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
       const rocketeers = Math.max(0, Math.floor(world.rocketeers));
       set(chips.rate, String(gunners), gunners > 0);
       set(chips.power, String(rocketeers), rocketeers > 0);
+      const flamers = Math.max(0, Math.floor(world.flamers));
+      const freezers = Math.max(0, Math.floor(world.freezers));
+      set(chips.flame, String(flamers), flamers > 0);
+      set(chips.freeze, String(freezers), freezers > 0);
 
-      for (const axis of ["elites", "rate", "power"] as const) {
+      for (const axis of AXES) {
         const chip = chips[axis];
         if (chip.pulse > 0) chip.pulse -= dt;
         if (chip.linger > 0) {
@@ -162,6 +166,11 @@ export function createLoadout(parent: HTMLElement): LoadoutSystem {
  * is to connect "the gold thing I shot off that barrel" to "this number went
  * up", and it only does that if the two look like the same object.
  */
+/** Order is the order they appear in the row, and it is the order they are
+ *  ACQUIRED in: veterans, then the two straight upgrades, then the two counters.
+ *  A player watching the row fill left to right is watching the run's history. */
+const AXES = ["elites", "rate", "power", "flame", "freeze"] as const;
+
 const ICON: Record<Axis, string> = {
   // A helmeted head with a gold chevron — the crowd's own silhouette, promoted.
   elites: `<svg class="cok-chip__i" viewBox="0 0 32 32" aria-hidden="true">
@@ -183,6 +192,21 @@ const ICON: Record<Axis, string> = {
     <path d="M10.5 12.2L3 16l7.5 3.8z" fill="#d8452f"/>
     <rect x="21" y="19" width="4" height="5" rx="1" fill="#8f9bb0"/>
     <rect x="24.5" y="11" width="4" height="10" rx="1.6" fill="#d8a13a"/>
+  </svg>`,
+  // Bell nozzle spitting a flame, bottle behind — short and wide, like the gun.
+  flame: `<svg class="cok-chip__i" viewBox="0 0 32 32" aria-hidden="true">
+    <rect x="16" y="9.5" width="11" height="13" rx="4" fill="#e8622c"/>
+    <rect x="10" y="13" width="8" height="6" rx="1.4" fill="#4a5568"/>
+    <path d="M10.5 11.4L4 16l6.5 4.6z" fill="#8f9bb0"/>
+    <path d="M6 16c-2.4-1.1-3.6-2.6-3.6-4.2 1.8.9 2.6 1.6 3.6 2.6.4-1.9 1.3-3.2 2.6-4.1-.3 2.2 0 3.9.9 5.7z" fill="#ffc93c"/>
+  </svg>`,
+  // Emitter with coil rings and a cold star — long and thin, like the gun.
+  freeze: `<svg class="cok-chip__i" viewBox="0 0 32 32" aria-hidden="true">
+    <rect x="12" y="13.6" width="16" height="4.8" rx="2.4" fill="#8f9bb0"/>
+    <rect x="21" y="11" width="2.8" height="10" rx="1.2" fill="#66d8f0"/>
+    <rect x="25" y="11" width="2.8" height="10" rx="1.2" fill="#66d8f0"/>
+    <path d="M11.5 11.6L4.5 16l7 4.4z" fill="#66d8f0"/>
+    <path d="M6 12.4v7.2M3 14.2l6 3.6M9 14.2l-6 3.6" stroke="#d8f6ff" stroke-width="1.5" stroke-linecap="round"/>
   </svg>`,
 };
 

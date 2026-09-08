@@ -37,9 +37,15 @@ import { CAMERA_LOOK, CAMERA_POS } from "../core/renderer";
 import type { System } from "../core/types";
 
 /** What a barrel can be carrying. */
-export type PickupKind = "recruit" | "minigun" | "rocket";
+export type PickupKind = "recruit" | "minigun" | "rocket" | "flamer" | "freezer";
 
-export const PICKUP_KINDS: readonly PickupKind[] = ["recruit", "minigun", "rocket"];
+export const PICKUP_KINDS: readonly PickupKind[] = [
+  "recruit",
+  "minigun",
+  "rocket",
+  "flamer",
+  "freezer",
+];
 
 /** Live pickups. One per barrel, and barrels cap at 16. */
 const CAPACITY = 16;
@@ -152,6 +158,12 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
     recruit: labelTexture("TROOPS", "#8fd4ff"),
     minigun: labelTexture("MINIGUN", "#7fc2ff"),
     rocket: labelTexture("ROCKET", "#ff9a5c"),
+    // THE PLATE NAMES THE COUNTER, NOT THE WEAPON. "FLAMER" alone tells a player
+    // nothing about when to want one, and the counter table is invisible unless
+    // something says it out loud. Two words is all there is room for at this
+    // size, so the plate spends them on the ANSWER rather than the name.
+    flamer: labelTexture("FLAME vs SWARM", "#ffa23c"),
+    freezer: labelTexture("FREEZE: SLOWS", "#7fe4ff"),
   };
   const labels = {} as Record<PickupKind, THREE.InstancedMesh>;
   for (const kind of PICKUP_KINDS) {
@@ -176,6 +188,8 @@ export function createPickups(scene: THREE.Scene): PickupSystem {
     recruit: recruitGeometry(),
     minigun: minigunGeometry(),
     rocket: rocketGeometry(),
+    flamer: flamerGeometry(),
+    freezer: freezerGeometry(),
   };
 
   // Vertex colours carry the whole look, so one material serves every kind.
@@ -431,6 +445,11 @@ const GUNMETAL = new THREE.Color(0x4a5568);
 const BRASS = new THREE.Color(0xd8a13a);
 const STEEL = new THREE.Color(0x8f9bb0);
 const WARHEAD = new THREE.Color(0xd8452f);
+/** Matched to KIT_FUEL / KIT_ICE in entities/squad.ts. The object on the barrel
+ *  and the object that ends up on a soldier's shoulder have to be recognisably
+ *  the same thing, and colour is what carries that at forty pixels. */
+const FUEL = new THREE.Color(0xe8622c);
+const ICE = new THREE.Color(0x66d8f0);
 
 /** Paint every vertex of `g` one colour and merge it into `parts`. */
 function tint(g: THREE.BufferGeometry, colour: THREE.Color): THREE.BufferGeometry {
@@ -530,6 +549,48 @@ function rocketGeometry(): THREE.BufferGeometry {
     at(fin.clone(), 0.1, 0, 0.3),
     at(fin, -0.1, 0, 0.3),
   ]);
+}
+
+/**
+ * A fat bottle with a flared bell. Short and wide, where every other weapon in
+ * the game is long and thin — the silhouette is the message, and this one has to
+ * be legible against a rocket launcher at forty pixels.
+ */
+function flamerGeometry(): THREE.BufferGeometry {
+  const tank = tint(new THREE.CylinderGeometry(0.24, 0.24, 0.52, 12), FUEL);
+  tank.rotateX(Math.PI / 2);
+  const barrel = tint(new THREE.CylinderGeometry(0.1, 0.1, 0.42, 9), GUNMETAL);
+  barrel.rotateX(Math.PI / 2);
+  const bell = tint(new THREE.CylinderGeometry(0.24, 0.11, 0.24, 12), STEEL);
+  bell.rotateX(Math.PI / 2);
+  const pilot = tint(new THREE.ConeGeometry(0.08, 0.2, 7), FUEL);
+  pilot.rotateX(-Math.PI / 2);
+  return merge([
+    at(tank, 0, 0, 0.3),
+    at(tint(new THREE.CylinderGeometry(0.12, 0.12, 0.12, 9), GUNMETAL), 0, 0, 0.6),
+    at(barrel, 0, 0, -0.16),
+    at(bell, 0, 0, -0.48),
+    at(pilot, 0, 0.16, -0.5),
+  ]);
+}
+
+/** A slim emitter stacked with coil rings. The rings are the read — a pale tube
+ *  without them is just a rifle with the colour turned down. */
+function freezerGeometry(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  const tube = tint(new THREE.CylinderGeometry(0.075, 0.075, 0.86, 9), STEEL);
+  tube.rotateX(Math.PI / 2);
+  parts.push(at(tube, 0, 0, 0));
+  parts.push(at(tint(new THREE.BoxGeometry(0.24, 0.26, 0.32), GUNMETAL), 0, -0.02, 0.32));
+  for (let i = 0; i < 3; i++) {
+    const ring = tint(new THREE.CylinderGeometry(0.16, 0.16, 0.07, 11), ICE);
+    ring.rotateX(Math.PI / 2);
+    parts.push(at(ring, 0, 0, 0.06 - i * 0.22));
+  }
+  const dish = tint(new THREE.CylinderGeometry(0.2, 0.1, 0.16, 11), ICE);
+  dish.rotateX(Math.PI / 2);
+  parts.push(at(dish, 0, 0, -0.5));
+  return merge(parts);
 }
 
 /**

@@ -1,6 +1,6 @@
 # Where the work stands
 
-_Last updated: 2026-09-08, session 3 (seventeenth pass)._
+_Last updated: 2026-09-08, session 3 (eighteenth pass)._
 
 > The next session gets this repo and nothing else. **If it is not in a file, it
 > is gone.** Rewrite this file rather than appending to it — a handoff that is
@@ -11,8 +11,7 @@ _Last updated: 2026-09-08, session 3 (seventeenth pass)._
 **Live:** https://onlinestuff4me-sketch.github.io/commander-overkill/ — redeploys
 on every push to `main` via `.github/workflows/deploy.yml`.
 **Verified at HEAD:** `npx tsc --noEmit` exits 0; `npm test` is 62 passing;
-`npm run build` succeeds; the page loads with no console errors. 84 draw calls
-and 79k triangles at 37 troops; the turn dust adds exactly one draw call.
+`npm run build` succeeds; the page loads with no console errors.
 
 **A LEVEL IS AN APPROACH AND THEN A BOSS RUSH.** It builds to something:
 
@@ -44,8 +43,11 @@ at 45% of every casualty on purpose: losses are the only thing that ends a run,
 so an uncapped defensive perk is the one you take three times and stop being able
 to lose.
 
-**Measured**, `__overkill.sample(32, 110, 0.3)`: **32 of 32 runs clear exactly
-one level** in 110 seconds, and **0–2 of 32 wipe** across samples.
+**Measured**, `__overkill.sample(32, 110, 0.3)`: **31 of 32 runs clear exactly
+one level** in 110 seconds, and **3 of 32 wipe** — which is the brief's early
+band for the first time. Before the counter weapons it was 1–2 of 32 (too easy);
+mid-batch, with one badly-set cell of the counter table, it was 11 (far too
+hard). See the note on the SWARM column below.
 
 **THE WIPE RATE IS BELOW THE BRIEF AND I CANNOT RESOLVE IT AT n=32.** The target
 is 1 in 8 for levels 1–2. Consecutive samples of the same build gave 2 and then
@@ -90,6 +92,21 @@ and they are written up in the gap analysis: every prize needs a visible chain
 (prize → how troops use it → what it does to the world), anything a primitive
 cannot say gets a text label, and every idea is judged by whether someone would
 clip it. Do not reopen the art question.
+
+**FIVE WEAPONS, AND WHICH ONE YOU WANT DEPENDS ON WHAT IS COMING.** Rifle,
+minigun, rocket, **flamethrower** and **freeze ray**, against four target
+classes — FLESH, ARMOURED, SWARM and FAST. `core/counters.ts` holds the table;
+the enemies and the boss each declare their own class in an `ARMOUR_OF` map, and
+the multiplier is applied at the TARGET, because only the target knows what it is
+made of. Rockets open armour and are wasted on a swarm; fire is the reverse; the
+freeze ray barely scratches anything and slows what it touches, which is the only
+answer in the game to something dangerous because it is CLOSING.
+
+**AND THERE IS AN ALLY.** A cage on the road, guarded, priced at 0.55 of an
+approach's fire. Shoot it open and a three-metre robot in the army's own colours
+takes station on the crowd's flank, fires ten rocket streams for the rest of the
+level, and steps in front of one heavy breach every five and a half seconds. One
+per level; `entities/ally.ts`.
 
 **Where PROGRESSION goes next:**
 [`docs/progression-research.md`](progression-research.md) is the Last War /
@@ -159,7 +176,7 @@ play was to do nothing.
 compound placements as the default rather than 5 of 39, drifting motes to chase
 in the dead seconds, and hazards that move sideways.
 
-### 1c. The progression research is done and nothing has been built from it
+### 1c. Two of the seven research patterns are built; five are not
 
 [`docs/progression-research.md`](progression-research.md) is a teardown of Last
 War: Survival, Top War, Last Shelter and Puzzles & Survival, written to Mischa's
@@ -168,21 +185,29 @@ types and allies, and fighting hordes and bosses. The health warning at the top
 of it is the important part — all four are 4X base-builders whose progression is
 paced for a session a day, so nothing lifts directly.
 
-Seven patterns survive the translation. The two I would build first:
+**COUNTERS and the RESCUED ALLY are built** — five weapons against four armour
+classes, and a caged robot you shoot free. See the decisions below for what that
+cost to get right, and in particular for the finding that a counter table cannot
+survive an economy that buffs the whole army.
 
-1. **COUNTERS.** Rifle, minigun and rocket are currently a straight line — a
-   rocketeer is a rifleman who does more damage — so nothing on the road cares
-   which you brought. One enemy with armour only rockets open and one fast enough
-   that only the minigun's rate catches it turns every upgrade card from "take
-   the biggest number" into "what is this level going to throw at me". No new
-   art; the enemies already exist.
-2. **AN ALLY YOU RESCUE.** Last War's Drone is a unit you unlock once and then
-   have forever, fighting beside you. A cage on the road you shoot open, and a
-   drone runs with you for the rest of the level, is the most visible upgrade
-   this game could get and it lands in the slot the existing prizes already use.
+**The five that are not built**, in the doc's own order:
 
-The rest — fragments, visible merges, front-and-back formation, one new noun per
-level, rarity colour — are ranked in the doc with reasons.
+1. **FRAGMENTS.** Prizes that are pieces of something, with a counter that fills
+   across a level and unlocks a troop type at full. This is the pattern that
+   makes a player go out of their way for an optional prize, and we have optional
+   prizes that cost exactly their face value to skip.
+2. **MERGE, MADE VISIBLE.** The weapon tier already steps at troop-count
+   thresholds and tells the player with a HUD chip. Three riflemen visibly
+   walking together and standing up as a gunner would make it a scene.
+3. **FRONT AND BACK.** The crowd is an undifferentiated blob; a two-rank split
+   would make shape matter beyond width and give a shield-bearer prize a job.
+   The most invasive of the five — it touches the slot layout everything else
+   measures against.
+4. **ONE NEW NOUN PER LEVEL.** `Beat.unlock` already gates the roster; nothing
+   announces it. A card that says "Level 4: Bulwarks" turns a ramp into a
+   curriculum.
+5. **RARITY COLOUR** on prizes and perk cards. Cheap, and the only one of the
+   five that is pure presentation.
 
 ### 1b. Nothing on the road punishes you for being big
 
@@ -295,6 +320,8 @@ against the `WorldState`/`System` contract without a single interface change.
 | `ui/floaters.ts`, `entities/growthfx.ts` | Per-unit yellow `+1` popups that rise and red `-1`s that fall out of frame, screen-space separated, one draw call. Orbiting cyan swirl. |
 | `ui/bossbar.ts` | DOM, safe-area aware, eases and pops on damage. |
 | `entities/pickups.ts` | What rides a barrel: a recruit, a minigun or a rocket launcher, each under a plate reading its own name. Gold-rimmed, hovering, flies into the crowd when its barrel breaks. |
+| `entities/ally.ts` | The caged robot and the cage. Owns no bullets — it reports a muzzle and `main.ts` hands that to the bullet system as ten extra streams. |
+| `core/counters.ts` | The weapon × armour-class table, the class words, and the chill model. In core because two element modules need it and elements may not import each other. |
 | `mechanics/lane.ts` | The bridge: deck over water, railings, hangers, and suspension towers that scroll and recycle. Owns `CORRIDOR_HALF_WIDTH`, which every placement is measured against. |
 | `ui/levelcard.ts` | The level pill, the cleared/failed screen, and the three upgrade cards. Reports which button was pressed; owns none of the run. |
 | `ui/streak.ts` | The multiplier chip, top right. Counts rows the player came out ahead on; one bad row resets it. |
@@ -843,6 +870,120 @@ and a row you cannot is a fork. Before the change the autopilot crossed ZERO row
 in forty seconds; it crosses about ten in a hundred now. Being wide is a
 liability you cannot switch off any more, which is a cleaner version of the same
 trade.
+
+**MEASURED, AND THE NUMBERS ARE THE POINT.** `__overkill.stats()` now reports
+`enemies` and `enemyHp`, and the probe is DAMAGE DEALT IN A FIXED WINDOW — 70
+troops, a crew of 20, 45 ticks — against a single target, expressed relative to a
+crew of nothing:
+
+| target | none | minigun | rocket | flamer |
+|---|---|---|---|---|
+| walker pack (SWARM) | 1.00 | 1.82 | 1.87 | **2.35** |
+| ogre (ARMOURED) | 1.00 | 1.62 | **13.5** | 1.32 |
+
+The right gun against an ogre is not an improvement, it is a different outcome:
+rockets killed it inside the window and nothing else took a fifth of it off. The
+swarm row is narrower and should be — a flamethrower is the best answer to a
+crowd, not the only one.
+
+**TIME-TO-CLEAR IS NOT A MEASUREMENT, AND THE FIRST THREE ATTEMPTS AT THIS WERE
+WORTHLESS BECAUSE OF IT.** Timing how long a target takes to stop existing
+measures its TRANSIT: a walker pack crosses the corridor in 2.6 s whether it is
+shot at or not, so every loadout measured ~2.3 s and the table looked inert. It
+also has to be run on a fresh page per trial — leftovers from the previous target
+made one early run report an ogre dying to flame in 0.07 s. **FAST is still
+unverified**: `firstHpFraction` reads one unit, and a biker placement is a squad,
+so the probe reads whichever biker the converging stream never touched. The
+mechanism is identical to the two rows above.
+
+**ONE CELL OF THE COUNTER TABLE IS THE SHARPEST DIFFICULTY LEVER IN THE GAME.**
+The rocket BLAST's multiplier against swarms went in at 0.15 — a near-deletion,
+authored to stop splash making rockets the best anti-crowd weapon. Sampled, the
+run's failure rate was **11 in 32**, against a brief that wants 4 at levels 1–2:
+that is the level-16 band being played on level one. At 0.45 it is **3 in 32**
+with 31 of 32 runs still clearing a level, which is the band. Nothing else in
+this batch moved by anything like that much.
+
+The reason is structural and worth keeping: a horde is packs, packs are SWARM,
+and the horde is what ends runs. Any number that changes how fast the army kills
+packs is a difficulty number wearing a combat number's clothes. Re-measure after
+touching the SWARM column — all of it, not just this cell.
+
+**A COUNTER TABLE CANNOT WORK INSIDE AN ECONOMY THAT BUFFS THE WHOLE ARMY, AND
+THIS COST A REBALANCE TO FIND OUT.** The counters shipped first with the flamer
+and the freezer having no global contribution at all — their entire value was the
+multiplier on their own rounds. Measured at a realistic loadout (200 troops, one
+crate's worth of one crew), that was hopeless: a rocketeer raises `firepower` for
+EVERY soldier, so nine rocketeers are worth more than a hundred riflemen, while
+nine flamers hitting three and a half times as hard are worth thirty-two. The
+table was being swamped by an economy it could not see. The fix is that all four
+crews now contribute on the two existing axes — flamers to `firepower` at 0.035,
+freezers to `fireRate` at 0.03, both below the crews that carry no counter — so
+they are PEERS, and the table decides which peer you want. If a fifth weapon ever
+lands, it needs an axis before it needs a multiplier.
+
+**THE COUNTER MULTIPLIER IS APPLIED AT THE TARGET, NOT AT THE MUZZLE.** `weapon`
+rides on every bullet to the hit, and `enemies.damageAt` / `boss.damageAt` look up
+their own armour class. Bullets knows what it fired and nothing else; only the
+thing being hit knows what that was worth against it. This is also what keeps the
+table out of `mechanics/bullets.ts`, which has no business knowing there are
+enemies.
+
+**FLESH IS A ROW OF ONES AND MUST STAY ONE.** Barrels, gate panels and every
+other economy object are neutral to weapon choice. Every hit-point number in this
+project is derived from `damagePerPass`, so a weapon that hit barrels 40% harder
+would silently rewrite the whole economy. The counters are a COMBAT layer.
+
+**A CONE THAT IS TOO WIDE IS A COUNTER THAT DOES NOT EXIST.** The flamer's extra
+scatter went in at 0.19 rad, which at six metres throws rounds ±1.14 m either
+side of a pack barely two metres across — half the fire on empty road. Its 3.5x
+against swarms measured as 1.68x, worse than a minigun against the one target it
+exists to beat. At 0.11 rad and 5.0x it measures 2.35x and is the best answer on
+the board. The lesson generalises: a multiplier is only worth what actually
+connects.
+
+**THE FLAMER'S DRAWBACK IS RANGE, NOT DAMAGE.** It shipped at 0.55 damage AND 42%
+range, which made it strictly worse than a rifle against anything it was not
+built for and a wash against the things it was — two penalties for one weapon.
+Its round is a full round now. 42% of a rifle's reach dies at about z −9, which is
+inside the band a walker pack must cross to breach and well short of where a
+barrel is worth shooting: a defence weapon that cannot farm the corridor, so its
+owner still wants riflemen.
+
+**THE FREEZE RAY IS THE ONLY THING IN THE GAME THAT BUYS TIME.** Chill is two
+numbers per target — the amount and a timer topped up by every hit — and it
+decays over the tail rather than expiring, because a target that thaws in one
+frame reads as a bug. It floors at 0.35 rather than 0: a freeze that stops a
+charging boss dead is the player deleting an encounter, not surviving one. The
+chill slows a unit's own walk and never the corridor scroll, or freezing a walker
+would freeze the bridge.
+
+**THE ALLY OWNS NO BULLETS, AND THAT IS THE WHOLE INTEGRATION.** `entities/ally.ts`
+reports a muzzle; `main.ts` appends ten rocket streams at that point. An element
+that grew its own projectiles would have to know about barrels, enemies, bosses
+and gate panels to resolve them, which is exactly what the module contract
+forbids. Ten streams is worth roughly twenty riflemen — it doubles a small army
+and adds a tenth to a large one, which is the right way round for a rescue.
+
+**RESERVE THE ALLY'S STREAM SLOTS BEFORE SAMPLING THE CROWD, NOT AFTER.** The
+crowd fills every slot it is offered up to `MAX_STREAMS`, so appending the robot
+afterwards gave it zero streams at exactly the army sizes where the cap binds —
+it would have gone silent in the second half of every level with nothing to say
+why.
+
+**TWO THINGS ABOUT THE ROBOT WERE FOUND BY PHOTOGRAPHING IT, NOT BY READING IT.**
+Its station was `crowdHalfWidth + 1.5`, which at 140 troops put it at x −4.89 on a
+road of half-width 5.6 — and the camera only pans by 78% of the crowd's offset, so
+it stood half out of frame. Capped at 3.0 m outboard. And its arms were rotated
+−1.35 rad from a rest pose that was already built pointing forward, so both
+cannons pointed at the deck. Neither is visible in the code; both are obvious in
+a screenshot.
+
+**ENEMY CLASS PLATES ARE ONLY ON THE SINGLE BODIES.** ARMOURED on elites and
+ogres, FAST on bikers, nothing on packs — a swarm is self-evidently a swarm, and
+forty SWARM plates in a corridor is a wall of type rather than a cue. The words
+come from `armourLabel()` in core/counters.ts so the plate and the table cannot
+drift apart.
 
 **THE AUTOPILOT HAS NEVER CROSSED A GATE ROW. NOT ONCE.** Measured while wiring
 the streak: `clearPayouts()` then a 40-second `autopilot()` run produces **zero**

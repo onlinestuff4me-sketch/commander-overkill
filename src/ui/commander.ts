@@ -50,13 +50,23 @@ export type CommanderTopic =
   | "streak"
   | "loss"
   | "wipe"
-  | "rush";
+  | "rush"
+  | "flamer"
+  | "freezer"
+  | "ally";
 
 /** Higher cuts off lower. A boss dying outranks a remark about head count. */
 const PRIORITY: Record<CommanderTopic, number> = {
   opening: 0,
   growth: 1,
   streak: 1,
+  // THE COUNTER WEAPONS OUTRANK A HEAD-COUNT REMARK, because they are the one
+  // place this game teaches a rule. A player who picks up a flamethrower and
+  // hears nothing has to work the counter table out from damage numbers they
+  // cannot see.
+  flamer: 2,
+  freezer: 2,
+  ally: 3,
   loss: 2,
   boss: 3,
   rush: 4,
@@ -164,6 +174,21 @@ const LINES: Record<CommanderTopic, readonly string[]> = {
     "We have taken losses. We will take fewer next time.",
     "Regrettable. Press on.",
     "Those men knew the risks. They did not, but they do now.",
+  ],
+  flamer: [
+    "Flamethrowers issued. Point them at crowds, not at armour.",
+    "Fire team armed. Excellent against numbers. Useless against plate.",
+    "We now have fire. Fire does not respect iron. Remember that.",
+  ],
+  freezer: [
+    "Cryo issued. It kills nothing. It buys time. Time is the resource.",
+    "Freeze rays online. Slow the fast ones. Let the rifles do the rest.",
+    "Cold weapons deployed. Nothing dies. Everything hesitates.",
+  ],
+  ally: [
+    "Asset recovered. It is enormous and it is on our side.",
+    "The cage is open. Do not stand in front of it.",
+    "Mechanised support acquired. Morale: alarming.",
   ],
   rush: [
     "Approach complete. Whatever is next is what we came for.",

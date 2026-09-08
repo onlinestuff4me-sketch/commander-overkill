@@ -146,6 +146,22 @@ readable at a glance and make a gold card feel like a gold card.
 
 ---
 
+## STATUS: patterns 1 and 2 are BUILT
+
+Counters and the rescued ally shipped together (see `docs/handoff.md`), with the
+flamethrower, the freeze ray and the giant robot as their content. What that
+batch found, and what it cost, is written up there rather than here — this
+document is the research, and it should stay readable as research.
+
+The one finding worth repeating in this file, because it is about the pattern
+rather than about our code: **a counter table cannot do its job inside an economy
+that buffs the whole army.** Our minigun and rocket crews raise `fireRate` and
+`firepower` for every soldier, so measured at a realistic loadout a rocket crate
+was worth more than a hundred riflemen while a flamer crate hitting three times
+as hard was worth forty-five — the table was being swamped by an economy it could
+not see. Every game in the Last War family keeps counters and stat upgrades on
+separate axes, and now we know why.
+
 ## What I would build, in order
 
 1. **Counters** (pattern 1). Biggest change to the decision, no new art, and it

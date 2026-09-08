@@ -16,6 +16,40 @@ export const MAX_TROOPS = 1200;
 export type WeaponTier = 0 | 1 | 2;
 
 /**
+ * WHICH WEAPON FIRED A ROUND, and it has to travel all the way to the hit.
+ *
+ * Every module in the chain speaks this: the squad hands out jobs with it, the
+ * bullets stamp it on each round, and the enemies read it back off the round to
+ * decide what that round was worth against THEM. That is the whole counter
+ * system, and it lives here rather than in any one module because no element is
+ * allowed to import another.
+ *
+ * A plain union of numbers rather than an enum: these values are stored in
+ * `Uint8Array`s in three different files, and a nominal type that has to be cast
+ * at every array boundary is a type that gets cast away.
+ */
+export type WeaponKind = 0 | 1 | 2 | 3 | 4 | 5;
+export const WEAPON_RIFLE = 0;
+export const WEAPON_MINIGUN = 1;
+export const WEAPON_ROCKET = 2;
+export const WEAPON_FLAMER = 3;
+export const WEAPON_FREEZE = 4;
+/**
+ * A ROCKET'S BLAST, which is not a weapon anybody carries.
+ *
+ * It exists because splash needed its own row in the counter table. Measured, a
+ * rocket crew killed a walker pack 2.6x faster than plain rifles even carrying
+ * the table's 0.35 penalty against swarms — because `detonate()` in main.ts
+ * applies the blast several times over, and against a pack that is one hit-point
+ * pool it lands on the same unit every pass. The table said "wasted on a crowd"
+ * and the engine said the opposite, and the engine wins arguments like that.
+ *
+ * So the blast counters separately from the round that caused it: still good
+ * against plate, nearly worthless against a scattering crowd.
+ */
+export const WEAPON_SPLASH = 5;
+
+/**
  * The mutable world every system reads each tick. Systems MUST NOT write to
  * fields they do not own — ownership is noted per field.
  */
@@ -58,6 +92,19 @@ export interface WorldState {
    */
   gunners: number;
   rocketeers: number;
+  /**
+   * The two counter weapons. Same rules as the two above — a count, disjoint
+   * from every other job, never above `troops`.
+   *
+   * These exist because the first three weapons were a STRAIGHT LINE. A
+   * rocketeer was a rifleman who did more damage, so nothing on the road cared
+   * which one you brought and the upgrade card was always "take the biggest
+   * number". A flamethrower shreds a swarm and bounces off armour; a freeze ray
+   * barely scratches anything and slows whatever it touches. See WEAPON_COUNTER
+   * in mechanics/bullets.ts for the table that makes that true.
+   */
+  flamers: number;
+  freezers: number;
   /**
    * Damage multiplier on every round, from collected weapon pickups. 1 at the
    * start of a run.
@@ -139,6 +186,8 @@ export function createWorld(center: THREE.Vector3): WorldState {
     elites: 0,
     gunners: 0,
     rocketeers: 0,
+    flamers: 0,
+    freezers: 0,
     level: 1,
     zoom: 1,
   };

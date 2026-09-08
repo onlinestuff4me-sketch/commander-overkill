@@ -181,6 +181,23 @@ export const ELITE_PASS_SHARE = 0.3;
 export const OGRE_PASS_SHARE = 0.8;
 
 /**
+ * The ALLY'S CAGE, and it is the most expensive thing on the road that is not an
+ * enemy.
+ *
+ * 0.55 of a pass — two thirds of an ogre — because the two are asking opposite
+ * questions. An ogre is priced so that shooting it is a bad idea; a cage is
+ * priced so that shooting it is a COMMITMENT. It has to cost enough that a
+ * player who takes it gives up the barrels beside it, and little enough that a
+ * player who wants it can actually have it. A prize nobody can afford is scenery
+ * with a better model.
+ *
+ * The guards in the `rescue` beat stand on the same kerb, so the real price is
+ * this plus a walker pack — which lands it near an ogre after all, but split
+ * into two things the player can choose to fight in either order.
+ */
+export const CAGE_PASS_SHARE = 0.55;
+
+/**
  * Hit points for one enemy, derived from what the army can actually deliver.
  *
  * Floored at 1 so a single soldier can still kill something, and floored again
